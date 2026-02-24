@@ -1,4 +1,4 @@
-// Package skill 提供 SKILL L1/L2 记忆层查询
+// Package skill 提供 SKILL L1/L2 记忆层查询及 docs/ 记忆注入
 package skill
 
 import (
@@ -51,6 +51,49 @@ func (idx *Index) Match(keywords []string) ([]Skill, error) {
 						Level:   level,
 						Content: string(content),
 						Path:    path,
+					})
+					break
+				}
+			}
+		}
+	}
+	return matched, nil
+}
+
+// DocMemory docs/ 目录中匹配到的文档片段
+type DocMemory struct {
+	SubDir  string // designs / plans / assay / reports
+	Name    string
+	Content string
+}
+
+// MatchDocs 在 docs/ 目录下按关键词匹配相关文档（Q3=B：关键词匹配注入）
+// docsDir 为仓库根下的 docs/ 路径
+func MatchDocs(docsDir string, keywords []string) ([]DocMemory, error) {
+	var matched []DocMemory
+	subDirs := []string{"designs", "plans", "assay", "reports"}
+	for _, sub := range subDirs {
+		dir := filepath.Join(docsDir, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			content, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			lower := strings.ToLower(string(content))
+			for _, kw := range keywords {
+				if strings.Contains(lower, strings.ToLower(kw)) {
+					matched = append(matched, DocMemory{
+						SubDir:  sub,
+						Name:    strings.TrimSuffix(e.Name(), ".md"),
+						Content: string(content),
 					})
 					break
 				}
