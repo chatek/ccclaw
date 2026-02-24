@@ -30,3 +30,15 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# ccclaw 编译产物
+bin/
+
+# 运行时状态（本地调试）
+.ccclaw/
+
+# Claude Code 本地配置
+.claude/settings.local.json
+.claude/settings.*.json
+.claude/cache/
+.claude/tmp/

@@ -1,0 +1,16 @@
+[Unit]
+Description=ccclaw run — 执行队列中的任务
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ccclaw/env
+ExecStart=/usr/local/bin/ccclaw-run
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ccclaw-run
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ccclaw /var/log/ccclaw

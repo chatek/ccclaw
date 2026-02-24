@@ -1,0 +1,17 @@
+[Unit]
+Description=ccclaw ingest — 拉取 GitHub Issues 入队
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ccclaw/env
+ExecStart=/usr/local/bin/ccclaw-ingest
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ccclaw-ingest
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ccclaw /var/log/ccclaw
