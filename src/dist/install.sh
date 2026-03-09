@@ -4,11 +4,10 @@ set -euo pipefail
 YES=0
 SIMULATE=0
 SKIP_DEPS=0
+INSTALL_CLAUDE=0
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
 CONTROL_REPO_DEFAULT="41490/ccclaw"
-TARGET_PATH_DEFAULT="$(cd "$(dirname "$0")/../.." && pwd)"
-TARGET_REPO_DEFAULT="$CONTROL_REPO_DEFAULT"
 BIN_LINK_DEFAULT="$HOME/.local/bin/ccclaw"
 SYSTEMD_USER_DIR_DEFAULT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -16,8 +15,6 @@ DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
 HOME_REPO="${HOME_REPO:-$HOME_REPO_DEFAULT}"
 CONTROL_REPO="${CONTROL_REPO:-$CONTROL_REPO_DEFAULT}"
-TARGET_REPO="${TARGET_REPO:-$TARGET_REPO_DEFAULT}"
-TARGET_PATH="${TARGET_PATH:-$TARGET_PATH_DEFAULT}"
 BIN_LINK="${BIN_LINK:-$BIN_LINK_DEFAULT}"
 SYSTEMD_USER_DIR="$SYSTEMD_USER_DIR_DEFAULT"
 ENV_FILE=""
@@ -39,7 +36,6 @@ expand_path() {
 refresh_paths() {
   APP_DIR="$(expand_path "$APP_DIR")"
   HOME_REPO="$(expand_path "$HOME_REPO")"
-  TARGET_PATH="$(expand_path "$TARGET_PATH")"
   BIN_LINK="$(expand_path "$BIN_LINK")"
   ENV_FILE="$APP_DIR/.env"
   CONFIG_FILE="$APP_DIR/ops/config/config.toml"
@@ -61,11 +57,10 @@ usage() {
   --yes                 非交互模式，尽量使用默认值
   --simulate            只打印安装流程与当前探查结果，不写入文件
   --skip-deps           跳过系统依赖安装
+  --install-claude      非交互模式下自动执行 Claude 官方安装
   --app-dir PATH        程序目录，默认 ~/.ccclaw
   --home-repo PATH      本体仓库目录，默认 /opt/ccclaw
   --control-repo REPO   控制仓库，默认 41490/ccclaw
-  --target-repo REPO    首个目标仓库，默认等于 control repo
-  --target-path PATH    首个目标仓库本地路径，默认当前源码仓库
   -h, --help            显示帮助
 USAGE
 }
@@ -75,11 +70,10 @@ while (($#)); do
     --yes) YES=1 ;;
     --simulate) SIMULATE=1 ;;
     --skip-deps) SKIP_DEPS=1 ;;
+    --install-claude) INSTALL_CLAUDE=1 ;;
     --app-dir) shift; APP_DIR="$1" ;;
     --home-repo) shift; HOME_REPO="$1" ;;
     --control-repo) shift; CONTROL_REPO="$1" ;;
-    --target-repo) shift; TARGET_REPO="$1" ;;
-    --target-path) shift; TARGET_PATH="$1" ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -127,21 +121,32 @@ ensure_home_repo_owner() {
 }
 
 probe_claude() {
-  local claude_bin claude_ver plugins marketplaces skills_market
+  local claude_bin claude_ver plugins marketplaces skills_market auth_state install_channel
   claude_bin="$(command -v claude 2>/dev/null || true)"
   claude_ver="$(claude --version 2>/dev/null || true)"
   plugins="$(claude plugin list 2>/dev/null || true)"
   marketplaces="$(claude plugin marketplace list 2>/dev/null || true)"
   skills_market="$(printf '%s' "$marketplaces" | grep -F 'anthropic-agent-skills' || true)"
+  auth_state="$(claude auth status --json 2>/dev/null || true)"
+  if claude_install_channel_reachable; then
+    install_channel="reachable"
+  else
+    install_channel="blocked"
+  fi
   cat <<INFO
 == Claude 探查 ==
 - claude_bin: ${claude_bin:-<missing>}
 - claude_version: ${claude_ver:-<missing>}
+- install_channel: ${install_channel}
 - credentials_file: $( [[ -f "$HOME/.claude/.credentials.json" ]] && echo present || echo missing )
 - settings_json: $( [[ -f "$HOME/.claude/settings.json" ]] && echo present || echo missing )
+- auth_status_json: $( [[ -n "$auth_state" ]] && echo present || echo missing )
 - installed_plugins: $(printf '%s' "$plugins" | grep -c '@' || true)
 - official_marketplace: $(printf '%s' "$marketplaces" | grep -F 'claude-plugins-official' >/dev/null && echo present || echo missing)
 - skills_marketplace: $( [[ -n "$skills_market" ]] && echo present || echo missing )
+- proxy_env: $( [[ -n "${ANTHROPIC_BASE_URL:-}" && -n "${ANTHROPIC_AUTH_TOKEN:-}" ]] && echo present || echo missing )
+- go_version: $(go version 2>/dev/null || echo missing)
+- sudo_nopasswd: $(sudo -n true >/dev/null 2>&1 && echo enabled || echo missing)
 INFO
 }
 
@@ -152,6 +157,7 @@ print_flow() {
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
+   - 首次安装默认允许 targets = []
 3. 生成固定隐私配置：
    - .env: $ENV_FILE
    - 仅记录会造成经济损失的敏感信息
@@ -161,29 +167,34 @@ print_flow() {
 5. 初始化本体仓库：
    - 若目录为空：git init + 写入 kb/docs/README/CLAUDE
    - 若目录已是 git 仓库：接管并检查结构
-6. 安装程序文件：
+6. Claude 适配：
+   - 先探查官方安装通道可达性
+   - 交互模式可确认后执行官方安装脚本
+   - 非交互模式仅在 --install-claude 时自动安装
+   - 授权态只识别 setup-token / proxy 两条路径
+7. 安装程序文件：
    - $APP_DIR/bin/ccclaw
    - $APP_DIR/bin/ccclaude
    - $APP_DIR/ops/systemd/*.service|*.timer
-7. 安装基础工具：
-   - 必装: git gh rg sqlite3 curl wget
+8. 安装基础工具：
+   - 必装: git gh rg sqlite3 curl wget golang
    - 能力工具: node npm uv
    - token 优化: rtk
-8. Claude 适配：
+9. 若 Claude 已可用：
    - 若本机已有插件/marketplace：直接继承
    - 若本机没有插件：安装指定官方 plugins + example-skills
    - 执行器默认走: $CLAUDE_WRAPPER
-9. 安装 user systemd 单元：
+10. 安装 user systemd 单元：
    - $SYSTEMD_USER_DIR/ccclaw-ingest.service
    - $SYSTEMD_USER_DIR/ccclaw-run.service
-10. 升级策略：
+11. 升级策略：
    - upgrade.sh 只升级程序发布树与插件/marketplace
    - 不自动覆盖本体仓库记忆内容
 
 == 交互项矩阵 ==
 - 必填且敏感(.env): GH_TOKEN
-- 可选且敏感(.env): ANTHROPIC_API_KEY, GREPTILE_API_KEY
-- 必填但可默认(config.toml): control_repo, target_repo, target_path
+- 可选且敏感(.env): ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, GREPTILE_API_KEY
+- 必填但可默认(config.toml): control_repo
 - 必填但可默认(config.toml): app_dir, home_repo, kb_dir, state_db, log_dir
 - 可自动探查并默认继承: claude 路径、plugin marketplace、已装插件
 FLOW
@@ -193,8 +204,6 @@ collect_inputs() {
   prompt_default APP_DIR "程序目录" "$APP_DIR"
   prompt_default HOME_REPO "本体仓库目录" "$HOME_REPO"
   prompt_default CONTROL_REPO "控制仓库 owner/repo" "$CONTROL_REPO"
-  prompt_default TARGET_REPO "首个目标仓库 owner/repo" "$TARGET_REPO"
-  prompt_default TARGET_PATH "首个目标仓库本地路径" "$TARGET_PATH"
   refresh_paths
 }
 
@@ -207,32 +216,80 @@ ensure_dir() {
 }
 
 ensure_system_packages() {
-  local missing=()
+  local missing_tools=()
+  local missing_packages=()
   local required=(git gh rg sqlite3 curl wget)
   local optional=(node npm uv)
   for tool in "${required[@]}"; do
-    have "$tool" || missing+=("$tool")
+    if ! have "$tool"; then
+      missing_tools+=("$tool")
+      missing_packages+=("$tool")
+    fi
   done
-  if [[ "${#missing[@]}" -eq 0 ]]; then
+  if ! have go; then
+    missing_tools+=("go")
+    missing_packages+=("golang-go")
+  fi
+  if [[ "${#missing_tools[@]}" -eq 0 ]]; then
     log "基础工具已齐全"
   elif [[ "$SKIP_DEPS" -eq 1 ]]; then
-    warn "跳过依赖安装，当前缺失: ${missing[*]}"
+    warn "跳过依赖安装，当前缺失: ${missing_tools[*]}"
   elif have apt-get; then
-    log "尝试用 apt-get 安装缺失工具: ${missing[*]}"
+    log "尝试用 apt-get 安装缺失工具: ${missing_tools[*]}"
     if [[ "$SIMULATE" -eq 1 ]]; then
-      log "[simulate] sudo apt-get update && sudo apt-get install -y ${missing[*]}"
+      log "[simulate] sudo apt-get update && sudo apt-get install -y ${missing_packages[*]}"
     else
       sudo apt-get update
-      sudo apt-get install -y "${missing[@]}"
+      sudo apt-get install -y "${missing_packages[@]}"
     fi
   else
-    warn "未找到可用包管理器，请手工安装: ${missing[*]}"
+    warn "未找到可用包管理器，请手工安装: ${missing_tools[*]}"
   fi
   for tool in "${optional[@]}"; do
     if have "$tool"; then
       log "已发现可选工具: $tool"
     fi
   done
+}
+
+claude_install_channel_reachable() {
+  if have curl; then
+    curl -fsSIL --connect-timeout 5 --max-time 15 https://claude.ai/install.sh >/dev/null 2>&1
+    return $?
+  fi
+  if have wget; then
+    wget -q --spider --timeout=15 https://claude.ai/install.sh
+    return $?
+  fi
+  return 1
+}
+
+install_claude_official() {
+  if have claude; then
+    log "已发现 claude: $(command -v claude)"
+    return 0
+  fi
+  if ! claude_install_channel_reachable; then
+    fail "Claude 官方安装通道不可达，请先解决网络问题后重试；当前推荐命令: curl -fsSL https://claude.ai/install.sh | bash"
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] curl -fsSL https://claude.ai/install.sh | bash"
+    return 0
+  fi
+  if [[ "$YES" -eq 1 && "$INSTALL_CLAUDE" -ne 1 ]]; then
+    warn "非交互模式下未显式传入 --install-claude，跳过 Claude 自动安装"
+    return 0
+  fi
+  if [[ "$YES" -ne 1 ]]; then
+    local answer
+    read -r -p "检测到未安装 Claude，是否执行官方安装脚本? [y/N]: " answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+      warn "已跳过 Claude 安装；后续请手工执行: curl -fsSL https://claude.ai/install.sh | bash"
+      return 0
+    fi
+  fi
+  log "执行 Claude 官方安装脚本"
+  curl -fsSL https://claude.ai/install.sh | bash
 }
 
 install_rtk() {
@@ -268,16 +325,34 @@ WRAP
   chmod 755 "$CLAUDE_WRAPPER"
 }
 
+ensure_env_key() {
+  local key="$1"
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] append ${key}= to $ENV_FILE"
+    return 0
+  fi
+  printf '%s=\n' "$key" >> "$ENV_FILE"
+}
+
 create_env_file() {
   local gh_token="${GH_TOKEN:-}"
   local anthropic_key="${ANTHROPIC_API_KEY:-}"
+  local anthropic_base_url="${ANTHROPIC_BASE_URL:-}"
+  local anthropic_auth_token="${ANTHROPIC_AUTH_TOKEN:-}"
   local greptile_key="${GREPTILE_API_KEY:-}"
   if [[ -f "$ENV_FILE" ]]; then
     log "复用已有隐私配置: $ENV_FILE"
+    ensure_env_key "ANTHROPIC_BASE_URL"
+    ensure_env_key "ANTHROPIC_AUTH_TOKEN"
     return 0
   fi
   prompt_default gh_token "GitHub Token (issues read/write)" "$gh_token" 1
   prompt_default anthropic_key "Anthropic API Key(可留空，若本机 claude 凭据已可用)" "$anthropic_key" 1
+  prompt_default anthropic_base_url "Anthropic Base URL(代理模式可填，默认留空)" "$anthropic_base_url" 1
+  prompt_default anthropic_auth_token "Anthropic Auth Token(代理模式可填，默认留空)" "$anthropic_auth_token" 1
   prompt_default greptile_key "Greptile API Key(可留空)" "$greptile_key" 1
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] write $ENV_FILE"
@@ -288,6 +363,8 @@ create_env_file() {
 # 所有会导致经济损失的隐私信息都在这里。
 GH_TOKEN=${gh_token}
 ANTHROPIC_API_KEY=${anthropic_key}
+ANTHROPIC_BASE_URL=${anthropic_base_url}
+ANTHROPIC_AUTH_TOKEN=${anthropic_auth_token}
 GREPTILE_API_KEY=${greptile_key}
 ENV
   chmod 600 "$ENV_FILE"
@@ -303,6 +380,8 @@ create_config_file() {
     return 0
   fi
   cat > "$CONFIG_FILE" <<CFG
+default_target = ""
+
 [github]
 control_repo = "$CONTROL_REPO"
 issue_label = "ccclaw"
@@ -323,12 +402,7 @@ timeout = "30m"
 
 [approval]
 command = "/ccclaw approve"
-minimum_permission = "write"
-
-[[targets]]
-repo = "$TARGET_REPO"
-local_path = "$TARGET_PATH"
-kb_path = "$KB_DIR"
+minimum_permission = "admin"
 CFG
 }
 
@@ -470,7 +544,7 @@ ensure_marketplace() {
 
 configure_claude_assets() {
   if ! have claude; then
-    warn "未找到 claude；跳过插件/skills 配置，请先手工安装 Claude Code"
+    warn "未找到 claude；跳过插件/skills 配置，请先完成 Claude 安装与 setup-token/proxy 初始化"
     return 0
   fi
   ensure_marketplace anthropics/skills anthropic-agent-skills
@@ -533,6 +607,11 @@ print_summary() {
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
 5. 运行一次体检:
    $APP_DIR/bin/ccclaw doctor --config $CONFIG_FILE --env-file $ENV_FILE
+6. 如需后续绑定目标仓库:
+   $APP_DIR/bin/ccclaw target add --config $CONFIG_FILE --repo owner/repo --path /abs/path
+7. 若 sudo 无口令未开启，请手工执行:
+   sudo visudo
+   # 为当前用户追加 NOPASSWD 规则
 MSG
 }
 
@@ -545,6 +624,7 @@ main() {
     exit 0
   fi
   ensure_system_packages
+  install_claude_official
   install_rtk
   create_app_layout
   init_home_repo

@@ -3,11 +3,15 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -30,6 +34,17 @@ type Runtime struct {
 	rep     *reporter.Reporter
 	mem     *memory.Index
 }
+
+const (
+	claudeStateMissingCLI     = "missing_cli"
+	claudeStateInstallBlocked = "install_channel_blocked"
+	claudeStateInstalledBare  = "installed_unconfigured"
+	claudeStateInstalledSetup = "installed_setup_token_ready"
+	claudeStateInstalledProxy = "installed_proxy_ready"
+	claudeInstallScriptURL    = "https://claude.ai/install.sh"
+	issueTargetRepoPattern    = `(?mi)^\s*target_repo\s*:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$`
+	manualSudoGuide           = "sudo 无口令未开启，请按文档手工执行 `sudo visudo` 并为当前用户配置 `NOPASSWD` 规则"
+)
 
 func NewRuntime(configPath, envFile string) (*Runtime, error) {
 	cfg, err := config.Load(configPath)
@@ -99,7 +114,7 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 		if fresh == nil || fresh.State == core.StateBlocked || fresh.State == core.StateDone || fresh.State == core.StateDead {
 			continue
 		}
-		target, err := rt.cfg.TargetByRepo(fresh.TargetRepo)
+		target, err := rt.cfg.EnabledTargetByRepo(fresh.TargetRepo)
 		if err != nil {
 			return err
 		}
@@ -162,13 +177,17 @@ func (rt *Runtime) Status(out io.Writer) error {
 	}
 	_, _ = fmt.Fprintln(out)
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
+	_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tTARGET\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
 	for _, task := range tasks {
 		title := task.IssueTitle
 		if len(title) > 46 {
 			title = title[:43] + "..."
 		}
-		_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%t\t%d\t%s\n", task.IssueNumber, task.State, task.IssueAuthor, task.Approved, task.RetryCount, title)
+		targetRepo := task.TargetRepo
+		if targetRepo == "" {
+			targetRepo = "-"
+		}
+		_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
 	}
 	return w.Flush()
 }
@@ -177,20 +196,27 @@ func (rt *Runtime) ShowConfig(out io.Writer) error {
 	defer rt.store.Close()
 	targets := make([]map[string]string, 0, len(rt.cfg.Targets))
 	for _, target := range rt.cfg.Targets {
-		targets = append(targets, map[string]string{
+		item := map[string]string{
 			"repo":       target.Repo,
 			"local_path": target.LocalPath,
 			"kb_path":    target.KBPath,
-		})
+		}
+		if target.Disabled {
+			item["status"] = "disabled"
+		} else {
+			item["status"] = "enabled"
+		}
+		targets = append(targets, item)
 	}
 	payload := map[string]any{
-		"github":      rt.cfg.GitHub,
-		"paths":       rt.cfg.Paths,
-		"executor":    rt.cfg.Executor,
-		"approval":    rt.cfg.Approval,
-		"targets":     targets,
-		"env_file":    rt.secrets.Path,
-		"secret_keys": sortedKeys(rt.secrets.Values),
+		"default_target": rt.cfg.DefaultTarget,
+		"github":         rt.cfg.GitHub,
+		"paths":          rt.cfg.Paths,
+		"executor":       rt.cfg.Executor,
+		"approval":       rt.cfg.Approval,
+		"targets":        targets,
+		"env_file":       rt.secrets.Path,
+		"secret_keys":    sortedKeys(rt.secrets.Values),
 	}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -204,30 +230,44 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	defer rt.store.Close()
 	checks := []struct {
 		name string
-		run  func() error
+		run  func() (string, error)
 	}{
-		{name: "配置文件", run: func() error { return rt.cfg.Validate() }},
-		{name: ".env 权限", run: func() error { return config.ValidateEnvFile(rt.secrets.Path) }},
-		{name: "claude CLI", run: func() error { return commandExists(rt.cfg.Executor.Command, rt.cfg.Executor.Binary) }},
-		{name: "rtk CLI", run: func() error { return requireCommand("rtk") }},
-		{name: "rg CLI", run: func() error { return requireCommand("rg") }},
-		{name: "sqlite3 CLI", run: func() error { return requireCommand("sqlite3") }},
-		{name: "git CLI", run: func() error { return requireCommand("git") }},
-		{name: "gh CLI", run: func() error { return requireCommand("gh") }},
-		{name: "GitHub 网络", run: func() error { return rt.gh.NetworkCheck(ctx) }},
-		{name: "SQLite 读写", run: func() error { return rt.store.Ping() }},
-		{name: "systemd timers", run: rt.checkSystemd},
-		{name: "磁盘空间", run: rt.checkDisk},
+		{name: "配置文件", run: func() (string, error) { return rt.describeTargetRouting(), rt.cfg.Validate() }},
+		{name: ".env 权限", run: func() (string, error) { return rt.secrets.Path, config.ValidateEnvFile(rt.secrets.Path) }},
+		{name: "claude CLI", run: func() (string, error) {
+			return rt.describeExecutor(), commandExists(rt.cfg.Executor.Command, rt.cfg.Executor.Binary)
+		}},
+		{name: "Claude 安装通道", run: func() (string, error) { return claudeInstallScriptURL, rt.checkClaudeInstallChannel(ctx) }},
+		{name: "Claude 运行态", run: func() (string, error) { return rt.detectClaudeState(ctx) }},
+		{name: "Go 工具链", run: func() (string, error) { return commandVersion("go", "version") }},
+		{name: "sudo 无口令", run: rt.checkPasswordlessSudo},
+		{name: "rtk CLI", run: func() (string, error) { return commandVersion("rtk", "--version") }},
+		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
+		{name: "sqlite3 CLI", run: func() (string, error) { return commandVersion("sqlite3", "--version") }},
+		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
+		{name: "gh CLI", run: func() (string, error) { return commandVersion("gh", "--version") }},
+		{name: "GitHub 网络", run: func() (string, error) { return "rate_limit", rt.gh.NetworkCheck(ctx) }},
+		{name: "SQLite 读写", run: func() (string, error) { return rt.cfg.Paths.StateDB, rt.store.Ping() }},
+		{name: "systemd timers", run: func() (string, error) { return "ccclaw-ingest.timer, ccclaw-run.timer", rt.checkSystemd() }},
+		{name: "磁盘空间", run: func() (string, error) { return rt.cfg.Paths.LogDir, rt.checkDisk() }},
 	}
 	var failed []string
 	for _, check := range checks {
-		err := check.run()
+		detail, err := check.run()
 		if err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", check.name, err))
-			_, _ = fmt.Fprintf(out, "[FAIL] %s: %v\n", check.name, err)
+			if detail != "" {
+				_, _ = fmt.Fprintf(out, "[FAIL] %s: %v (%s)\n", check.name, err, detail)
+			} else {
+				_, _ = fmt.Fprintf(out, "[FAIL] %s: %v\n", check.name, err)
+			}
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "[ OK ] %s\n", check.name)
+		if detail != "" {
+			_, _ = fmt.Fprintf(out, "[ OK ] %s: %s\n", check.name, detail)
+		} else {
+			_, _ = fmt.Fprintf(out, "[ OK ] %s\n", check.name)
+		}
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("doctor 失败，共 %d 项异常", len(failed))
@@ -250,13 +290,19 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		return err
 	}
 	approved := trusted || approval.Approved
+	targetRepo, routeReasons := rt.resolveTargetRepo(issue.Body)
+	blockReasons := make([]string, 0, 2)
+	if !approved {
+		blockReasons = append(blockReasons, fmt.Sprintf("发起者 `%s` 权限为 `%s`，等待管理员评论 `%s`", issue.User.Login, permission, rt.cfg.Approval.Command))
+	}
+	blockReasons = append(blockReasons, routeReasons...)
 	labels := github.LabelNames(issue.Labels)
 	if existing == nil {
 		existing = &core.Task{
 			TaskID:         core.TaskID(issue.Number),
 			IdempotencyKey: core.IdempotencyKey(issue.Number),
 			ControlRepo:    rt.cfg.GitHub.ControlRepo,
-			TargetRepo:     rt.cfg.GitHub.ControlRepo,
+			TargetRepo:     targetRepo,
 			CreatedAt:      issue.CreatedAt,
 		}
 	}
@@ -270,6 +316,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	existing.Intent = core.InferIntent(labels)
 	existing.RiskLevel = core.InferRisk(labels)
 	existing.Approved = approved
+	existing.TargetRepo = targetRepo
 	existing.ApprovalCommand = rt.cfg.Approval.Command
 	existing.ApprovalActor = approval.Actor
 	existing.ApprovalCommentID = approval.CommentID
@@ -277,7 +324,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	switch {
 	case existing.State == core.StateDone || existing.State == core.StateDead:
 		// 保持终态，只更新元数据。
-	case approved:
+	case len(blockReasons) == 0:
 		if existing.State == core.StateBlocked || existing.State == "" {
 			existing.State = core.StateNew
 		}
@@ -290,24 +337,27 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	}
 	if previousState == "" {
 		eventType := core.EventCreated
-		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t", existing.IssueAuthor, permission, approved)
+		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t target=%s", existing.IssueAuthor, permission, approved, displayTargetRepo(targetRepo))
 		if existing.State == core.StateBlocked {
 			eventType = core.EventBlocked
+			detail = blockReasonText(blockReasons)
 		}
 		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
 		if existing.State == core.StateBlocked && !fromRun {
-			_ = rt.rep.ReportBlocked(existing)
+			_ = rt.rep.ReportBlocked(existing, blockReasonText(blockReasons))
 		}
 		return nil
 	}
 	if previousState != existing.State {
 		eventType := core.EventUpdated
+		detail := fmt.Sprintf("状态变更: %s -> %s", previousState, existing.State)
 		if existing.State == core.StateBlocked {
 			eventType = core.EventBlocked
+			detail = blockReasonText(blockReasons)
 		}
-		_ = rt.store.AppendEvent(existing.TaskID, eventType, fmt.Sprintf("状态变更: %s -> %s", previousState, existing.State))
+		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
 		if existing.State == core.StateBlocked && !fromRun {
-			_ = rt.rep.ReportBlocked(existing)
+			_ = rt.rep.ReportBlocked(existing, blockReasonText(blockReasons))
 		}
 	}
 	return nil
@@ -421,6 +471,163 @@ func commandExists(command []string, binary string) error {
 		binary = "claude"
 	}
 	return requireCommand(binary)
+}
+
+func (rt *Runtime) resolveTargetRepo(body string) (string, []string) {
+	explicitTarget := parseTargetRepo(body)
+	if explicitTarget != "" {
+		if _, err := rt.cfg.EnabledTargetByRepo(explicitTarget); err != nil {
+			return "", []string{fmt.Sprintf("Issue 指定的 `target_repo: %s` 不可用: %v", explicitTarget, err)}
+		}
+		return explicitTarget, nil
+	}
+	if rt.cfg.DefaultTarget != "" {
+		if _, err := rt.cfg.EnabledTargetByRepo(rt.cfg.DefaultTarget); err != nil {
+			return "", []string{fmt.Sprintf("default_target `%s` 不可用: %v", rt.cfg.DefaultTarget, err)}
+		}
+		return rt.cfg.DefaultTarget, nil
+	}
+	if len(rt.cfg.EnabledTargets()) == 0 {
+		return "", []string{"当前未绑定任何可用 target，请先执行 `ccclaw target add --repo owner/repo --path /path`"}
+	}
+	return "", []string{"Issue 未声明 `target_repo:`，且当前未配置 `default_target`"}
+}
+
+func parseTargetRepo(body string) string {
+	matches := regexp.MustCompile(issueTargetRepoPattern).FindStringSubmatch(body)
+	if len(matches) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
+}
+
+func blockReasonText(reasons []string) string {
+	if len(reasons) == 0 {
+		return "无"
+	}
+	return strings.Join(reasons, "；")
+}
+
+func displayTargetRepo(repo string) string {
+	if repo == "" {
+		return "-"
+	}
+	return repo
+}
+
+func (rt *Runtime) describeTargetRouting() string {
+	enabled := rt.cfg.EnabledTargets()
+	return fmt.Sprintf("enabled=%d default_target=%s", len(enabled), displayTargetRepo(rt.cfg.DefaultTarget))
+}
+
+func (rt *Runtime) describeExecutor() string {
+	if len(rt.cfg.Executor.Command) > 0 {
+		return strings.Join(rt.cfg.Executor.Command, " ")
+	}
+	return rt.cfg.Executor.Binary
+}
+
+func (rt *Runtime) checkClaudeInstallChannel(ctx context.Context) error {
+	return probeHTTP(ctx, claudeInstallScriptURL, "")
+}
+
+func (rt *Runtime) detectClaudeState(ctx context.Context) (string, error) {
+	if err := requireCommand("claude"); err != nil {
+		if probeErr := rt.checkClaudeInstallChannel(ctx); probeErr != nil {
+			return claudeStateInstallBlocked, fmt.Errorf("未找到 claude，且官方安装通道不可达: %w", probeErr)
+		}
+		return claudeStateMissingCLI, errors.New("未找到 claude CLI")
+	}
+	if err := rt.checkClaudeProxyMode(ctx); err == nil {
+		return claudeStateInstalledProxy, nil
+	}
+	if err := rt.checkClaudeSetupToken(ctx); err == nil {
+		return claudeStateInstalledSetup, nil
+	}
+	return claudeStateInstalledBare, errors.New("claude 已安装，但 `setup-token` 或代理模式均未就绪")
+}
+
+func (rt *Runtime) checkClaudeSetupToken(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "claude", "auth", "status", "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("`claude auth status --json` 失败: %s", strings.TrimSpace(string(output)))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(output, &payload); err != nil {
+		return fmt.Errorf("解析 `claude auth status --json` 失败: %w", err)
+	}
+	return nil
+}
+
+func (rt *Runtime) checkClaudeProxyMode(ctx context.Context) error {
+	baseURL := strings.TrimSpace(rt.secrets.Values["ANTHROPIC_BASE_URL"])
+	token := strings.TrimSpace(rt.secrets.Values["ANTHROPIC_AUTH_TOKEN"])
+	if baseURL == "" || token == "" {
+		return errors.New("缺少 ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN")
+	}
+	if len(rt.cfg.Executor.Command) == 0 {
+		return errors.New("executor.command 未配置代理包装器")
+	}
+	if err := requireCommand(rt.cfg.Executor.Command[0]); err != nil {
+		return fmt.Errorf("代理包装器不可执行: %w", err)
+	}
+	return probeHTTP(ctx, baseURL, token)
+}
+
+func (rt *Runtime) checkPasswordlessSudo() (string, error) {
+	if err := requireCommand("sudo"); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("sudo", "-n", "true")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			msg = manualSudoGuide
+		}
+		return manualSudoGuide, errors.New(msg)
+	}
+	return "已开启", nil
+}
+
+func commandVersion(name string, args ...string) (string, error) {
+	if err := requireCommand(name); err != nil {
+		return "", err
+	}
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return name, nil
+	}
+	line := strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
+	return line, nil
+}
+
+func probeHTTP(ctx context.Context, rawURL, bearerToken string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("URL 无效: %w", err)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("URL 不完整: %s", rawURL)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("上游返回 %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func sortedKeys(values map[string]string) []string {

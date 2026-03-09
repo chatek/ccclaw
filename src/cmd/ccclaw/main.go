@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"text/tabwriter"
 
 	"github.com/41490/ccclaw/internal/app"
+	"github.com/41490/ccclaw/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -92,6 +94,90 @@ func newRootCmd() *cobra.Command {
 			return rt.ShowConfig(os.Stdout)
 		},
 	})
+
+	targetCmd := &cobra.Command{
+		Use:   "target",
+		Short: "管理目标仓库绑定",
+	}
+
+	targetCmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "列出当前 target 配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if len(cfg.Targets) == 0 {
+				_, _ = fmt.Fprintln(os.Stdout, "当前未绑定任何 target")
+				return nil
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "REPO\tSTATUS\tDEFAULT\tLOCAL_PATH\tKB_PATH")
+			for _, target := range cfg.Targets {
+				status := "enabled"
+				if target.Disabled {
+					status = "disabled"
+				}
+				isDefault := ""
+				if cfg.DefaultTarget == target.Repo {
+					isDefault = "*"
+				}
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", target.Repo, status, isDefault, target.LocalPath, target.KBPath)
+			}
+			return w.Flush()
+		},
+	})
+
+	var addRepo string
+	var addPath string
+	var addKBPath string
+	var makeDefault bool
+	targetAddCmd := &cobra.Command{
+		Use:   "add",
+		Short: "追加或更新一个 target",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if err := cfg.UpsertTarget(config.TargetConfig{
+				Repo:      addRepo,
+				LocalPath: addPath,
+				KBPath:    addKBPath,
+			}, makeDefault); err != nil {
+				return err
+			}
+			return config.Save(configPath, cfg)
+		},
+	}
+	targetAddCmd.Flags().StringVar(&addRepo, "repo", "", "target 仓库 owner/repo")
+	targetAddCmd.Flags().StringVar(&addPath, "path", "", "target 本地路径")
+	targetAddCmd.Flags().StringVar(&addKBPath, "kb-path", "", "target 对应 kb 路径，默认继承全局 kb_dir")
+	targetAddCmd.Flags().BoolVar(&makeDefault, "default", false, "设为默认 target")
+	_ = targetAddCmd.MarkFlagRequired("repo")
+	_ = targetAddCmd.MarkFlagRequired("path")
+	targetCmd.AddCommand(targetAddCmd)
+
+	var disableRepo string
+	targetDisableCmd := &cobra.Command{
+		Use:   "disable",
+		Short: "禁用一个 target",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			if err := cfg.DisableTarget(disableRepo); err != nil {
+				return err
+			}
+			return config.Save(configPath, cfg)
+		},
+	}
+	targetDisableCmd.Flags().StringVar(&disableRepo, "repo", "", "要禁用的 target 仓库 owner/repo")
+	_ = targetDisableCmd.MarkFlagRequired("repo")
+	targetCmd.AddCommand(targetDisableCmd)
+	rootCmd.AddCommand(targetCmd)
 
 	return rootCmd
 }

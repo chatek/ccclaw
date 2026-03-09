@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -9,48 +10,51 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	GitHub   GitHubConfig   `mapstructure:"github"`
-	Paths    PathsConfig    `mapstructure:"paths"`
-	Executor ExecutorConfig `mapstructure:"executor"`
-	Approval ApprovalConfig `mapstructure:"approval"`
-	Targets  []TargetConfig `mapstructure:"targets"`
+	DefaultTarget string         `mapstructure:"default_target" toml:"default_target"`
+	GitHub        GitHubConfig   `mapstructure:"github" toml:"github"`
+	Paths         PathsConfig    `mapstructure:"paths" toml:"paths"`
+	Executor      ExecutorConfig `mapstructure:"executor" toml:"executor"`
+	Approval      ApprovalConfig `mapstructure:"approval" toml:"approval"`
+	Targets       []TargetConfig `mapstructure:"targets" toml:"targets"`
 }
 
 type GitHubConfig struct {
-	ControlRepo string `mapstructure:"control_repo"`
-	IssueLabel  string `mapstructure:"issue_label"`
-	Limit       int    `mapstructure:"limit"`
+	ControlRepo string `mapstructure:"control_repo" toml:"control_repo"`
+	IssueLabel  string `mapstructure:"issue_label" toml:"issue_label"`
+	Limit       int    `mapstructure:"limit" toml:"limit"`
 }
 
 type PathsConfig struct {
-	AppDir   string `mapstructure:"app_dir"`
-	HomeRepo string `mapstructure:"home_repo"`
-	StateDB  string `mapstructure:"state_db"`
-	LogDir   string `mapstructure:"log_dir"`
-	KBDir    string `mapstructure:"kb_dir"`
-	EnvFile  string `mapstructure:"env_file"`
+	AppDir   string `mapstructure:"app_dir" toml:"app_dir"`
+	HomeRepo string `mapstructure:"home_repo" toml:"home_repo"`
+	StateDB  string `mapstructure:"state_db" toml:"state_db"`
+	LogDir   string `mapstructure:"log_dir" toml:"log_dir"`
+	KBDir    string `mapstructure:"kb_dir" toml:"kb_dir"`
+	EnvFile  string `mapstructure:"env_file" toml:"env_file"`
 }
 
 type ExecutorConfig struct {
-	Provider string   `mapstructure:"provider"`
-	Binary   string   `mapstructure:"binary"`
-	Command  []string `mapstructure:"command"`
-	Timeout  string   `mapstructure:"timeout"`
+	Provider string   `mapstructure:"provider" toml:"provider"`
+	Binary   string   `mapstructure:"binary" toml:"binary"`
+	Command  []string `mapstructure:"command" toml:"command"`
+	Timeout  string   `mapstructure:"timeout" toml:"timeout"`
 }
 
 type ApprovalConfig struct {
-	Command           string `mapstructure:"command"`
-	MinimumPermission string `mapstructure:"minimum_permission"`
+	Command           string `mapstructure:"command" toml:"command"`
+	MinimumPermission string `mapstructure:"minimum_permission" toml:"minimum_permission"`
 }
 
 type TargetConfig struct {
-	Repo      string `mapstructure:"repo"`
-	LocalPath string `mapstructure:"local_path"`
-	KBPath    string `mapstructure:"kb_path"`
+	Repo      string `mapstructure:"repo" toml:"repo"`
+	LocalPath string `mapstructure:"local_path" toml:"local_path"`
+	KBPath    string `mapstructure:"kb_path" toml:"kb_path"`
+	Disabled  bool   `mapstructure:"disabled" toml:"disabled,omitempty"`
 }
 
 type Secrets struct {
@@ -68,7 +72,8 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.command", []string{"claude"})
 	v.SetDefault("executor.timeout", "30m")
 	v.SetDefault("approval.command", "/ccclaw approve")
-	v.SetDefault("approval.minimum_permission", "write")
+	v.SetDefault("approval.minimum_permission", "admin")
+	v.SetDefault("default_target", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
@@ -128,12 +133,23 @@ func (cfg *Config) Validate() error {
 	if len(cfg.Executor.Command) == 0 && cfg.Executor.Binary == "" {
 		return errors.New("executor.command 或 executor.binary 至少需要一个")
 	}
-	if len(cfg.Targets) == 0 {
-		return errors.New("至少需要一个 targets 项")
-	}
+	seenTargets := map[string]struct{}{}
 	for _, target := range cfg.Targets {
 		if target.Repo == "" || target.LocalPath == "" {
 			return errors.New("targets.repo 与 targets.local_path 均不能为空")
+		}
+		if _, exists := seenTargets[target.Repo]; exists {
+			return fmt.Errorf("targets.repo 不允许重复: %s", target.Repo)
+		}
+		seenTargets[target.Repo] = struct{}{}
+	}
+	if cfg.DefaultTarget != "" {
+		target, err := cfg.TargetByRepo(cfg.DefaultTarget)
+		if err != nil {
+			return fmt.Errorf("default_target 无效: %w", err)
+		}
+		if target.Disabled {
+			return fmt.Errorf("default_target 指向的 target 已禁用: %s", cfg.DefaultTarget)
 		}
 	}
 	return nil
@@ -150,6 +166,93 @@ func (cfg *Config) TargetByRepo(repo string) (*TargetConfig, error) {
 		}
 	}
 	return nil, fmt.Errorf("未找到 repo=%s 的 target 配置", repo)
+}
+
+func (cfg *Config) EnabledTargets() []TargetConfig {
+	targets := make([]TargetConfig, 0, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		if target.Disabled {
+			continue
+		}
+		if target.KBPath == "" {
+			target.KBPath = cfg.Paths.KBDir
+		}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func (cfg *Config) EnabledTargetByRepo(repo string) (*TargetConfig, error) {
+	target, err := cfg.TargetByRepo(repo)
+	if err != nil {
+		return nil, err
+	}
+	if target.Disabled {
+		return nil, fmt.Errorf("repo=%s 的 target 已禁用", repo)
+	}
+	return target, nil
+}
+
+func (cfg *Config) UpsertTarget(target TargetConfig, makeDefault bool) error {
+	target.Repo = strings.TrimSpace(target.Repo)
+	target.LocalPath = ExpandPath(target.LocalPath)
+	target.KBPath = ExpandPath(target.KBPath)
+	if target.Repo == "" || target.LocalPath == "" {
+		return errors.New("repo 与 local_path 均不能为空")
+	}
+	if target.KBPath == "" {
+		target.KBPath = cfg.Paths.KBDir
+	}
+	for idx := range cfg.Targets {
+		if cfg.Targets[idx].Repo != target.Repo {
+			continue
+		}
+		cfg.Targets[idx].LocalPath = target.LocalPath
+		cfg.Targets[idx].KBPath = target.KBPath
+		cfg.Targets[idx].Disabled = target.Disabled
+		if makeDefault {
+			cfg.DefaultTarget = target.Repo
+		}
+		return cfg.Validate()
+	}
+	cfg.Targets = append(cfg.Targets, target)
+	if makeDefault {
+		cfg.DefaultTarget = target.Repo
+	}
+	return cfg.Validate()
+}
+
+func (cfg *Config) DisableTarget(repo string) error {
+	for idx := range cfg.Targets {
+		if cfg.Targets[idx].Repo != repo {
+			continue
+		}
+		cfg.Targets[idx].Disabled = true
+		if cfg.DefaultTarget == repo {
+			cfg.DefaultTarget = ""
+		}
+		return cfg.Validate()
+	}
+	return fmt.Errorf("未找到 repo=%s 的 target 配置", repo)
+}
+
+func Save(path string, cfg *Config) error {
+	if cfg == nil {
+		return errors.New("配置不能为空")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	encoder := toml.NewEncoder(&buf)
+	encoder.SetIndentTables(true)
+	if err := encoder.Encode(cfg); err != nil {
+		return fmt.Errorf("序列化配置文件失败: %w", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+	return nil
 }
 
 func LoadSecrets(path string) (*Secrets, error) {

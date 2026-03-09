@@ -17,8 +17,8 @@ func New(gh *github.Client) *Reporter {
 	return &Reporter{gh: gh}
 }
 
-func (r *Reporter) ReportBlocked(task *core.Task) error {
-	body := fmt.Sprintf("任务已进入阻塞状态。\n\n- Issue: #%d\n- 原因: 发起者 `%s` 不是管理员，等待管理员评论 `%s`\n- 当前状态: `%s`", task.IssueNumber, task.IssueAuthor, task.ApprovalCommand, task.State)
+func (r *Reporter) ReportBlocked(task *core.Task, reason string) error {
+	body := fmt.Sprintf("任务已进入阻塞状态。\n\n- Issue: #%d\n- 原因: %s\n- 当前状态: `%s`", task.IssueNumber, reason, task.State)
 	return r.gh.AddComment(task.IssueNumber, body)
 }
 

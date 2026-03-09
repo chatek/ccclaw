@@ -4,10 +4,11 @@
 
 `ccclaw` 是一个以 GitHub Issue 为异步任务入口的长期执行系统。
 
-当前仓库处于 `phase0/phase0.1`：
+当前仓库处于 `phase0/phase0.2`：
 
 - `phase0` 完成最小闭环骨架
-- `phase0.1` 继续把安装、工具链、Claude 生态接入与本体仓库初始化推进到可用
+- `phase0.1` 把安装、工具链、Claude 生态接入与本体仓库初始化推进到可用
+- `phase0.2` 补齐零 target 安装、target 路由、admin 门禁与 Claude 巡检
 
 ## 当前拓扑
 
@@ -49,16 +50,7 @@
 - 若本机已存在 Claude plugins，则直接继承；否则补装指定官方集合
 - 升级只覆盖程序发布树，不自动覆盖本体仓库内容
 
-## 快速开始
-
-```bash
-cd src
-make test
-make build
-./dist/install.sh --simulate
-```
-
-## 安装
+## 最简安装建议
 
 ```bash
 cd src
@@ -66,14 +58,54 @@ make build
 ./dist/install.sh
 ```
 
-安装脚本会：
+最小可用路径：
+
+```bash
+~/.ccclaw/bin/ccclaw doctor
+```
+
+如果 `doctor` 报 `claude` 缺失，并且你需要非交互安装，可显式执行：
+
+```bash
+cd src
+./dist/install.sh --yes --install-claude
+```
+
+Claude 授权只建议两条路径：
+
+- `claude setup-token`
+- 代理模式，在 `~/.ccclaw/.env` 中填写 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN`
+
+安装完成后，先绑定目标仓库，再启用定时器：
+
+```bash
+~/.ccclaw/bin/ccclaw target add \
+  --config ~/.ccclaw/ops/config/config.toml \
+  --repo owner/repo \
+  --path /abs/path/to/repo \
+  --default
+
+systemctl --user daemon-reload
+systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
+```
+
+## 安装说明
+
+安装脚本当前会：
 
 - 探查当前 `claude` / plugin / marketplace / CLI 工具环境
-- 尽量自动复用现有 Claude 配置
-- 安装 `sqlite3`、`rtk` 与基础 CLI 工具
+- 探查 Claude 官方安装通道可达性
+- 非交互模式仅在显式 `--install-claude` 时自动安装 Claude
+- 安装 `sqlite3`、`rtk`、`golang` 与基础 CLI 工具
 - 初始化本体仓库目录树与 Git 仓库
 - 生成 `.env` 与 `config.toml`
+- 安装阶段允许 `targets = []`
 - 生成 user-level systemd units
+
+`.env` 中最少应检查：
+
+- `GH_TOKEN`
+- `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`，如果走代理模式
 
 ## 常用命令
 
@@ -83,6 +115,9 @@ make build
 ~/.ccclaw/bin/ccclaw ingest
 ~/.ccclaw/bin/ccclaw run
 ~/.ccclaw/bin/ccclaw status
+~/.ccclaw/bin/ccclaw target list
+~/.ccclaw/bin/ccclaw target add --repo owner/repo --path /abs/path
+~/.ccclaw/bin/ccclaw target disable --repo owner/repo
 ```
 
 ## 工程报告

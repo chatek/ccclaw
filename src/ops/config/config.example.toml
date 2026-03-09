@@ -1,3 +1,5 @@
+default_target = ""
+
 [github]
 control_repo = "41490/ccclaw"
 issue_label = "ccclaw"
@@ -18,9 +20,4 @@ timeout = "30m"
 
 [approval]
 command = "/ccclaw approve"
-minimum_permission = "write"
-
-[[targets]]
-repo = "41490/ccclaw"
-local_path = "/opt/src/ccclaw"
-kb_path = "/opt/ccclaw/kb"
+minimum_permission = "admin"

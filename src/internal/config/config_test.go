@@ -57,7 +57,7 @@ timeout = "30m"
 
 [approval]
 command = "/ccclaw approve"
-minimum_permission = "write"
+minimum_permission = "admin"
 
 [[targets]]
 repo = "41490/ccclaw"
@@ -79,5 +79,73 @@ kb_path = "/opt/ccclaw/kb"
 	}
 	if cfg.Targets[0].LocalPath == "~/src/ccclaw" {
 		t.Fatal("expected target local path to be expanded")
+	}
+}
+
+func TestLoadConfigAllowsZeroTargets(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `default_target = ""
+
+[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "~/.ccclaw"
+home_repo = "/opt/ccclaw"
+state_db = "~/.ccclaw/var/state.db"
+log_dir = "~/.ccclaw/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "~/.ccclaw/.env"
+
+[executor]
+provider = "claude-code"
+command = ["~/.ccclaw/bin/ccclaude"]
+timeout = "30m"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Targets) != 0 {
+		t.Fatalf("expected no targets, got %d", len(cfg.Targets))
+	}
+}
+
+func TestDisableTargetClearsDefaultTarget(t *testing.T) {
+	cfg := &Config{
+		DefaultTarget: "41490/ccclaw",
+		GitHub:        GitHubConfig{ControlRepo: "41490/ccclaw"},
+		Paths: PathsConfig{
+			AppDir:   "/tmp/app",
+			HomeRepo: "/opt/ccclaw",
+			StateDB:  "/tmp/app/var/state.db",
+			LogDir:   "/tmp/app/log",
+			KBDir:    "/opt/ccclaw/kb",
+			EnvFile:  "/tmp/app/.env",
+		},
+		Executor: ExecutorConfig{Command: []string{"claude"}, Timeout: "30m"},
+		Approval: ApprovalConfig{Command: "/ccclaw approve", MinimumPermission: "admin"},
+		Targets: []TargetConfig{{
+			Repo:      "41490/ccclaw",
+			LocalPath: "/opt/src/ccclaw",
+			KBPath:    "/opt/ccclaw/kb",
+		}},
+	}
+	if err := cfg.DisableTarget("41490/ccclaw"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DefaultTarget != "" {
+		t.Fatalf("expected default target to be cleared, got %q", cfg.DefaultTarget)
+	}
+	if !cfg.Targets[0].Disabled {
+		t.Fatal("expected target to be disabled")
 	}
 }
