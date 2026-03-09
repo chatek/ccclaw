@@ -1,0 +1,8 @@
+[Unit]
+Description=ccclaw run service
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ccclaw
+ExecStart=/usr/local/bin/ccclaw run --config /opt/ccclaw/ops/config/config.toml --env-file /opt/ccclaw/.env
