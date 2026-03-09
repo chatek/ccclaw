@@ -131,7 +131,7 @@ func extractKeywords(t *task.Task) []string {
 	return kws
 }
 
-// buildPrompt 组装完整 prompt：任务 + docs 记忆 + skill + 自学习指令
+// buildPrompt 组装完整 prompt：任务 + Phase B 计划模板 + docs 记忆 + skill + 自学习指令
 func buildPrompt(t *task.Task, skillIdx *skill.Index, docsDir string) (string, error) {
 	keywords := extractKeywords(t)
 
@@ -139,6 +139,9 @@ func buildPrompt(t *task.Task, skillIdx *skill.Index, docsDir string) (string, e
 
 	// 基础任务描述
 	sb.WriteString(buildBasePrompt(t))
+
+	// Phase B：TodoWrite 风格计划模板 + Task 子任务拆分协议
+	sb.WriteString(buildPhaseBPrompt())
 
 	// 注入匹配的 docs/ 记忆（Q3=B：关键词匹配）
 	docs, err := skill.MatchDocs(docsDir, keywords)
@@ -208,6 +211,49 @@ func buildBasePrompt(t *task.Task) string {
 - 如需代码变更，直接修改文件（你有工具调用权限）
 - 输出结构化的执行报告
 `, t.IssueNumber, t.IssueTitle, t.IssueBody, t.Intent, t.RiskLevel, strings.Join(t.Labels, ", "))
+}
+
+func buildPhaseBPrompt() string {
+	return `
+
+## Phase B 执行协议（TodoWrite + Task）
+
+### TodoWrite 风格计划模板（必须先写）
+
+请先输出并维护以下计划，执行过程中持续更新状态：
+
+` + "```" + `markdown
+## 执行计划（TodoWrite）
+1. [ ] Explore：收集上下文与约束，列出已知/未知
+2. [ ] Plan：给出可执行步骤、风险与验证方案
+3. [ ] Code：实施改动并记录关键命令
+4. [ ] Verify：运行测试并记录结果
+5. [ ] Report：更新文档与 Issue 回复
+` + "```" + `
+
+每完成一步，必须把对应状态改为 [x]，并补充一句结果摘要。
+
+### Task 子任务编排协议（explore / plan / code）
+
+若任务复杂或包含多文件改动，按以下三个子任务阶段执行并输出产物：
+
+1. EXPLORE
+- 目标：确认代码现状、依赖关系、风险边界
+- 产物：现状摘要 + 待决策点（如无待决策点要明确写“无”）
+
+2. PLAN
+- 目标：给出最小可行变更方案与验证路径
+- 产物：步骤清单（文件级）+ 测试清单
+
+3. CODE
+- 目标：按计划实施，禁止跳步
+- 产物：变更摘要（文件+行为）+ 测试结果 + 回滚点
+
+最终输出必须包含：
+- 已完成的 TodoWrite 计划
+- explore/plan/code 三阶段结果
+- 风险与后续优化建议
+`
 }
 
 func mustEnv(key string) string {

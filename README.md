@@ -1,5 +1,4 @@
 # ccclaw
-
 > Claude Code + GH Issues + Supervisor + SKILL memory
 >
 > 以 GitHub Issue 为任务入口的长期异步任务闭环系统。
@@ -173,17 +172,17 @@ make clean           # 清理 bin/
 ## 里程碑
 
 - [x] **Phase A**：ingest / run / status CLI + systemd timer + 幂等键
-- [ ] **Phase B**：docs/ 记忆注入 + claude -p agent 模式 + SKILL 自学习闭环
+- [x] **Phase B**：docs/ 记忆注入 + claude -p agent 模式 + SKILL 自学习闭环 + TodoWrite/Task 计划编排
 - [ ] **Phase C**：重试/死信/告警 + Token 最小权限手册
 - [ ] **Phase D**：指标周报自动化 + 主动扫描 docs/plans/ 发现任务
 
 ## tracing
 
 - 260224 NOTAschool/sys4NOTA#253 Phase A MVP 完成，迁移至独立仓库
+- 260224 NOTAschool/ccclaw#2 Phase B 计划化与子任务化完成
 
 ## refer.
 
 - [NOTAschool/sys4NOTA#253](https://github.com/NOTAschool/sys4NOTA/issues/253) — 实效开发计划
 - [OpenClaw](https://github.com/openclaw/openclaw) — 上游参考架构
 - [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code) — SKILL 模式参考
-
