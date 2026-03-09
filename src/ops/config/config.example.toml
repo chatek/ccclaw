@@ -1,0 +1,24 @@
+[github]
+control_repo = "41490/ccclaw"
+issue_label = "ccclaw"
+limit = 20
+
+[paths]
+state_db = "/var/lib/ccclaw/state.db"
+log_dir = "/var/log/ccclaw"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/opt/ccclaw/.env"
+
+[executor]
+provider = "claude-code"
+binary = "claude"
+timeout = "30m"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "write"
+
+[[targets]]
+repo = "41490/ccclaw"
+local_path = "/opt/src/ccclaw"
+kb_path = "/opt/ccclaw/kb"

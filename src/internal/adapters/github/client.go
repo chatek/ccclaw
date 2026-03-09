@@ -1,0 +1,239 @@
+package github
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultTimeout = 20 * time.Second
+
+type Label struct {
+	Name string `json:"name"`
+}
+
+type User struct {
+	Login string `json:"login"`
+}
+
+type Issue struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	State     string    `json:"state"`
+	Labels    []Label   `json:"labels"`
+	User      User      `json:"user"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	PullReq   any       `json:"pull_request,omitempty"`
+}
+
+type Comment struct {
+	ID        int64     `json:"id"`
+	Body      string    `json:"body"`
+	User      User      `json:"user"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Approval struct {
+	Approved  bool
+	Actor     string
+	CommentID int64
+}
+
+type Client struct {
+	repo    string
+	secrets map[string]string
+	cache   map[string]string
+}
+
+func NewClient(repo string, secrets map[string]string) *Client {
+	cloned := make(map[string]string, len(secrets))
+	for key, value := range secrets {
+		cloned[key] = value
+	}
+	return &Client{repo: repo, secrets: cloned, cache: map[string]string{}}
+}
+
+func (c *Client) ListOpenIssues(label string, limit int) ([]Issue, error) {
+	endpoint := fmt.Sprintf("repos/%s/issues?state=open&per_page=%d", c.repo, limit)
+	if label != "" {
+		endpoint += "&labels=" + label
+	}
+	out, err := c.runGH(context.Background(), "api", endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	if err := json.Unmarshal(out, &issues); err != nil {
+		return nil, fmt.Errorf("解析 issue 列表失败: %w", err)
+	}
+	filtered := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.PullReq != nil {
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+	return filtered, nil
+}
+
+func (c *Client) GetIssue(number int) (*Issue, error) {
+	out, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/%d", c.repo, number))
+	if err != nil {
+		return nil, err
+	}
+	var issue Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		return nil, fmt.Errorf("解析 issue 失败: %w", err)
+	}
+	return &issue, nil
+}
+
+func (c *Client) ListComments(number int) ([]Comment, error) {
+	out, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/%d/comments?per_page=100", c.repo, number))
+	if err != nil {
+		return nil, err
+	}
+	var comments []Comment
+	if err := json.Unmarshal(out, &comments); err != nil {
+		return nil, fmt.Errorf("解析 issue 评论失败: %w", err)
+	}
+	return comments, nil
+}
+
+func (c *Client) AddComment(number int, body string) error {
+	_, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/%d/comments", c.repo, number), "-f", "body="+body)
+	if err != nil {
+		return fmt.Errorf("回写 issue 评论失败: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) NetworkCheck(ctx context.Context) error {
+	_, err := c.runGH(ctx, "api", "rate_limit")
+	return err
+}
+
+func (c *Client) IsTrustedActor(username, minimumPermission string) (bool, string, error) {
+	permission, err := c.permissionOf(username)
+	if err != nil {
+		return false, "", err
+	}
+	return permissionRank(permission) >= permissionRank(minimumPermission), permission, nil
+}
+
+func (c *Client) FindApproval(number int, command, minimumPermission string) (*Approval, error) {
+	comments, err := c.ListComments(number)
+	if err != nil {
+		return nil, err
+	}
+	for idx := len(comments) - 1; idx >= 0; idx-- {
+		comment := comments[idx]
+		if !HasApprovalCommand(comment.Body, command) {
+			continue
+		}
+		trusted, _, err := c.IsTrustedActor(comment.User.Login, minimumPermission)
+		if err != nil {
+			return nil, err
+		}
+		if trusted {
+			return &Approval{Approved: true, Actor: comment.User.Login, CommentID: comment.ID}, nil
+		}
+	}
+	return &Approval{}, nil
+}
+
+func HasApprovalCommand(body, command string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == strings.TrimSpace(command) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) permissionOf(username string) (string, error) {
+	if permission, ok := c.cache[username]; ok {
+		return permission, nil
+	}
+	out, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/collaborators/%s/permission", c.repo, username))
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			c.cache[username] = "none"
+			return "none", nil
+		}
+		return "", err
+	}
+	var payload struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		return "", fmt.Errorf("解析权限失败: %w", err)
+	}
+	if payload.Permission == "" {
+		payload.Permission = "none"
+	}
+	c.cache[username] = payload.Permission
+	return payload.Permission, nil
+}
+
+func (c *Client) runGH(parent context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, defaultTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Env = append(cmd.Environ(), c.envPairs()...)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("gh %s 失败: %w (stderr: %s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+func (c *Client) envPairs() []string {
+	pairs := make([]string, 0, len(c.secrets))
+	for key, value := range c.secrets {
+		pairs = append(pairs, key+"="+value)
+	}
+	return pairs
+}
+
+func permissionRank(permission string) int {
+	switch strings.ToLower(strings.TrimSpace(permission)) {
+	case "admin":
+		return 5
+	case "maintain":
+		return 4
+	case "write":
+		return 3
+	case "triage":
+		return 2
+	case "read":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func LabelNames(labels []Label) []string {
+	names := make([]string, 0, len(labels))
+	for _, label := range labels {
+		names = append(names, label.Name)
+	}
+	return names
+}
+
+func IssueURL(repo string, number int) string {
+	return "https://github.com/" + repo + "/issues/" + strconv.Itoa(number)
+}

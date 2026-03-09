@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ccclaw worker every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=true
+Unit=ccclaw-run.service
+
+[Install]
+WantedBy=timers.target

@@ -1,93 +1,78 @@
 # CLAUDE.md — ccclaw 工程规范
 
-本文件为 Claude Code 在此仓库中工作时提供指导。
+本文件为 Claude Code 在此仓库中的专属指导。
 
-每次回复称我："sysNOTA"，称自己："CCoder"
+每次回复称我：`sysNOTA`
+每次自称：`CCoder`
 
-## 工程定位
+## 项目定位
 
-ccclaw = Claude Code + GH Issues + Supervisor + SKILL memory
+`ccclaw` 是以 GitHub Issue 为异步入口、以单一 CLI 为执行面、以 systemd 为调度层、以 kb 为长期记忆的长期任务执行系统。
 
-目标：将 GitHub Issue 作为任务入口，实现"长期异步任务闭环能力"。
-不是即时聊天机器人，是低频异步任务操作系统。
+当前 `phase0` 的目标不是做“大而全平台”，而是先把以下能力做扎实：
 
-## 技术约束（硬性）
+- 可安装
+- 可配置
+- 可审计
+- 可持续维护 `ccclaw` 自身仓库
 
-- **主语言**: Golang（CLI 工具、状态机、幂等逻辑）
-- **脚本层**: Bash 优先（胶水脚本、部署、健康检查）
-- **进程管理**: systemd（service + timer，禁止纯 crontab 方案）
-- **调度界面**: Makefile（所有 bash 脚本的统一入口）
-- **包管理**: Go modules
+## 当前目录约定
 
-## 目录结构约定
-
-```
+```text
 ccclaw/
 ├── CLAUDE.md
-├── Makefile
-├── go.mod
-├── cmd/
-│   ├── ingest/    # ccclaw-ingest — 拉取 Issue 任务
-│   ├── run/       # ccclaw-run   — 执行任务
-│   └── status/    # ccclaw-status — 查询状态
-├── internal/
-│   ├── task/      # 任务状态机 + 幂等键
-│   ├── gh/        # GitHub API 封装
-│   ├── executor/  # Claude Code worker 调用
-│   ├── reporter/  # 回写 Issue comment
-│   └── skill/     # SKILL L1/L2 记忆层
-├── docs/          # 长期分层记忆（设计/计划/报告）
-├── scripts/       # Bash 脚本
-├── systemd/       # service + timer 单元文件
-└── skills/        # SKILL 定义文件
-    ├── L1/        # 规则型 SOP
-    └── L2/        # 策略型决策树
+├── AGENTS.md
+├── LICENSE
+├── README.md
+├── docs/
+│   ├── rfcs/
+│   ├── plans/
+│   └── reports/
+└── src/
+    ├── Makefile
+    ├── go.mod
+    ├── dist/
+    │   ├── kb/
+    │   ├── install.sh
+    │   ├── upgrade.sh
+    │   ├── .env.example
+    │   ├── bin/
+    │   └── ops/
+    ├── cmd/
+    │   └── ccclaw/
+    ├── internal/
+    └── ops/
 ```
 
-## 编码规范
+## 技术约束
 
-- Go 错误必须显式处理，禁止 `_` 忽略
-- 所有外部调用必须有超时控制
-- 幂等键格式：`{issue_number}#body`
-- 日志使用结构化 JSON（`log/slog` 标准库）
-- 测试文件与实现同目录，`_test.go` 后缀
-- 注释、提交信息、文档均使用中文
+- 主语言：Golang
+- CLI 框架：`cobra`
+- 配置库：`viper`
+- 状态后端：SQLite（`modernc.org/sqlite`）
+- 脚本：Bash 优先
+- 调度：systemd
+- 配置格式：`.toml`
+- 敏感配置：固定 `.env` 文件
 
-## 文档语言
+## 工程底线
 
-所有文档、注释、提交信息使用中文。
+- 所有外部调用必须带超时
+- 任务状态必须可审计
+- 任何权限判断必须有显式来源
+- 没有明确决策时，先去 Issue 讨论，不要脑补
+- 文档、注释、提交说明统一中文
 
----
+## phase0 关键决策
 
-# CTO 工作哲学
+- 单一二进制：`ccclaw`
+- 普通用户 Issue：只有管理员评论 `/ccclaw approve` 才能执行
+- 管理员身份：运行时动态检查 GitHub 仓库权限
+- 目录重构：源码全部收敛到 `src/`
+- `src/dist/` 作为安装部署目录树与 release 打包源
 
-> 你是我的技术联合创始人。我是 CTO，我做架构决策，你负责高质量实现。
+## 交付要求
 
-## 角色边界
-
-- 我负责：架构决策、技术选型、优先级排序、代码审查
-- 你负责：方案实现、边界情况处理、测试覆盖、文档补全
-- 共同负责：技术可行性评估、性能优化方案、安全风险识别
-
-## 工作节奏
-
-### 接到任务时
-1. 先确认你理解了真实需求，而非照搬我的描述
-2. 如果方案过度复杂或方向有误，立即推回并给出替代方案
-3. 区分"现在必须做"和"以后再说"，主动建议 MVP 范围
-
-### 实现过程中
-- 分阶段交付，每个阶段可独立验证
-- 在关键分歧点停下来，给我 2-3 个选项及其 tradeoff，而非自行决定
-- 遇到障碍时报告问题 + 你的建议方案，不要沉默卡住
-
-### 交付时
-- 代码必须可运行，不是示意性片段
-- 包含必要的错误处理和边界检查
-- 提供简洁的变更说明（改了什么、为什么、怎么验证）
-
-## 质量底线
-
-- 这是生产级代码，不是 demo 或 hackathon 项目
-- 错误处理和边界情况不是可选项
-- 永远不要在没有说明理由的情况下删除已有功能代码
+- 修改完成后，必须在 `docs/reports/` 记录工程报告
+- 文件命名必须遵循：`yymmdd_[Issue No.]_[Case Summary].md`
+- 在测试通过后，回 Issue 总结成果与后续优化建议
