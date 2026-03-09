@@ -1,0 +1,42 @@
+# phase0.1 安装流程草案
+
+## 安装拓扑
+
+- 程序目录：`~/.ccclaw`
+- 本体仓库：`/opt/ccclaw`
+- 首个目标仓库：由安装交互确认，默认当前 `ccclaw` 源码仓库
+
+## 交互项
+
+### 敏感项，写入 `.env`
+
+- `GH_TOKEN`：必须
+- `ANTHROPIC_API_KEY`：可选；若本机 Claude 凭据已可用，可留空
+- `GREPTILE_API_KEY`：可选
+
+### 普通项，写入 `config.toml`
+
+- `control_repo`
+- `target_repo`
+- `target_path`
+- `app_dir`
+- `home_repo`
+- `kb_dir`
+- `state_db`
+- `log_dir`
+
+## 自动探查项
+
+- `claude` 可执行文件与版本
+- `~/.claude/settings.json`
+- `~/.claude/.credentials.json`
+- 已安装 plugins / marketplaces
+- `gh` / `rg` / `sqlite3` / `rtk` / `git` / `node` / `npm` / `uv`
+
+## 默认策略
+
+- 若本机已有 Claude plugins：继承，不强行覆盖
+- 若本机无 Claude plugins：补装指定官方 plugins + `example-skills`
+- 若缺少 `rtk`：优先按官方 quick install 安装
+- 若缺少 `sqlite3`：优先通过系统包管理器安装
+- 升级只覆盖程序树，不覆盖本体仓库

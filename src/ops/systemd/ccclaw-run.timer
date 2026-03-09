@@ -1,5 +1,5 @@
 [Unit]
-Description=Run ccclaw worker every 10 minutes
+Description=Run ccclaw worker every 10 minutes (user)
 
 [Timer]
 OnCalendar=*:0/10

@@ -97,30 +97,44 @@ func newRootCmd() *cobra.Command {
 }
 
 func defaultConfigPath() string {
+	home, _ := os.UserHomeDir()
 	candidates := []string{
+		filepath.Join(home, ".ccclaw", "ops", "config", "config.toml"),
 		filepath.Join("ops", "config", "config.toml"),
 		filepath.Join("ops", "config", "config.example.toml"),
 		filepath.Join("dist", "ops", "config", "config.example.toml"),
-		"/opt/ccclaw/ops/config/config.toml",
 	}
 	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
 		}
+	}
+	if home != "" {
+		return filepath.Join(home, ".ccclaw", "ops", "config", "config.toml")
 	}
 	return filepath.Join("ops", "config", "config.toml")
 }
 
 func defaultEnvFilePath() string {
+	home, _ := os.UserHomeDir()
 	candidates := []string{
+		filepath.Join(home, ".ccclaw", ".env"),
 		".env",
 		filepath.Join("dist", ".env"),
-		"/opt/ccclaw/.env",
 	}
 	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
 		}
 	}
-	return "/opt/ccclaw/.env"
+	if home != "" {
+		return filepath.Join(home, ".ccclaw", ".env")
+	}
+	return ".env"
 }

@@ -27,16 +27,19 @@ type GitHubConfig struct {
 }
 
 type PathsConfig struct {
-	StateDB string `mapstructure:"state_db"`
-	LogDir  string `mapstructure:"log_dir"`
-	KBDir   string `mapstructure:"kb_dir"`
-	EnvFile string `mapstructure:"env_file"`
+	AppDir   string `mapstructure:"app_dir"`
+	HomeRepo string `mapstructure:"home_repo"`
+	StateDB  string `mapstructure:"state_db"`
+	LogDir   string `mapstructure:"log_dir"`
+	KBDir    string `mapstructure:"kb_dir"`
+	EnvFile  string `mapstructure:"env_file"`
 }
 
 type ExecutorConfig struct {
-	Provider string `mapstructure:"provider"`
-	Binary   string `mapstructure:"binary"`
-	Timeout  string `mapstructure:"timeout"`
+	Provider string   `mapstructure:"provider"`
+	Binary   string   `mapstructure:"binary"`
+	Command  []string `mapstructure:"command"`
+	Timeout  string   `mapstructure:"timeout"`
 }
 
 type ApprovalConfig struct {
@@ -62,7 +65,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("github.issue_label", "ccclaw")
 	v.SetDefault("github.limit", 20)
 	v.SetDefault("executor.provider", "claude-code")
-	v.SetDefault("executor.binary", "claude")
+	v.SetDefault("executor.command", []string{"claude"})
 	v.SetDefault("executor.timeout", "30m")
 	v.SetDefault("approval.command", "/ccclaw approve")
 	v.SetDefault("approval.minimum_permission", "write")
@@ -75,6 +78,7 @@ func Load(path string) (*Config, error) {
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
+	cfg.NormalizePaths()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -82,9 +86,32 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func (cfg *Config) NormalizePaths() {
+	cfg.Paths.AppDir = ExpandPath(cfg.Paths.AppDir)
+	cfg.Paths.HomeRepo = ExpandPath(cfg.Paths.HomeRepo)
+	cfg.Paths.StateDB = ExpandPath(cfg.Paths.StateDB)
+	cfg.Paths.LogDir = ExpandPath(cfg.Paths.LogDir)
+	cfg.Paths.KBDir = ExpandPath(cfg.Paths.KBDir)
+	cfg.Paths.EnvFile = ExpandPath(cfg.Paths.EnvFile)
+	for idx := range cfg.Targets {
+		cfg.Targets[idx].LocalPath = ExpandPath(cfg.Targets[idx].LocalPath)
+		cfg.Targets[idx].KBPath = ExpandPath(cfg.Targets[idx].KBPath)
+	}
+	for idx, arg := range cfg.Executor.Command {
+		cfg.Executor.Command[idx] = ExpandPath(arg)
+	}
+	cfg.Executor.Binary = ExpandPath(cfg.Executor.Binary)
+}
+
 func (cfg *Config) Validate() error {
 	if cfg.GitHub.ControlRepo == "" {
 		return errors.New("github.control_repo 不能为空")
+	}
+	if cfg.Paths.AppDir == "" {
+		return errors.New("paths.app_dir 不能为空")
+	}
+	if cfg.Paths.HomeRepo == "" {
+		return errors.New("paths.home_repo 不能为空")
 	}
 	if cfg.Paths.StateDB == "" {
 		return errors.New("paths.state_db 不能为空")
@@ -97,6 +124,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Paths.EnvFile == "" {
 		return errors.New("paths.env_file 不能为空")
+	}
+	if len(cfg.Executor.Command) == 0 && cfg.Executor.Binary == "" {
+		return errors.New("executor.command 或 executor.binary 至少需要一个")
 	}
 	if len(cfg.Targets) == 0 {
 		return errors.New("至少需要一个 targets 项")
@@ -126,6 +156,7 @@ func LoadSecrets(path string) (*Secrets, error) {
 	if path == "" {
 		return &Secrets{Values: map[string]string{}}, nil
 	}
+	path = ExpandPath(path)
 	if err := ValidateEnvFile(path); err != nil {
 		return nil, err
 	}
@@ -159,7 +190,7 @@ func LoadSecrets(path string) (*Secrets, error) {
 }
 
 func ValidateEnvFile(path string) error {
-	abs, err := filepath.Abs(path)
+	abs, err := filepath.Abs(ExpandPath(path))
 	if err != nil {
 		return fmt.Errorf("解析 .env 路径失败: %w", err)
 	}
@@ -200,4 +231,21 @@ func ValidateEnvFile(path string) error {
 		return fmt.Errorf("读取 .env 文件失败: %w", err)
 	}
 	return nil
+}
+
+func ExpandPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		if path == "~" {
+			return home
+		}
+		if strings.HasPrefix(path, "~/") {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }

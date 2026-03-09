@@ -208,10 +208,12 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	}{
 		{name: "配置文件", run: func() error { return rt.cfg.Validate() }},
 		{name: ".env 权限", run: func() error { return config.ValidateEnvFile(rt.secrets.Path) }},
-		{name: "gh CLI", run: func() error {
-			_, err := exec.LookPath("gh")
-			return err
-		}},
+		{name: "claude CLI", run: func() error { return commandExists(rt.cfg.Executor.Command, rt.cfg.Executor.Binary) }},
+		{name: "rtk CLI", run: func() error { return requireCommand("rtk") }},
+		{name: "rg CLI", run: func() error { return requireCommand("rg") }},
+		{name: "sqlite3 CLI", run: func() error { return requireCommand("sqlite3") }},
+		{name: "git CLI", run: func() error { return requireCommand("git") }},
+		{name: "gh CLI", run: func() error { return requireCommand("gh") }},
 		{name: "GitHub 网络", run: func() error { return rt.gh.NetworkCheck(ctx) }},
 		{name: "SQLite 读写", run: func() error { return rt.store.Ping() }},
 		{name: "systemd timers", run: rt.checkSystemd},
@@ -349,7 +351,7 @@ func (rt *Runtime) newExecutor() (*executor.Executor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析执行超时失败: %w", err)
 	}
-	return executor.New(rt.cfg.Executor.Binary, timeout, rt.cfg.Paths.LogDir, rt.secrets.Values)
+	return executor.New(rt.cfg.Executor.Command, rt.cfg.Executor.Binary, timeout, rt.cfg.Paths.LogDir, rt.secrets.Values)
 }
 
 func (rt *Runtime) checkSystemd() error {
@@ -387,12 +389,38 @@ func (rt *Runtime) checkDisk() error {
 }
 
 func systemctl(action, unit string) error {
-	cmd := exec.Command("systemctl", action, unit)
-	output, err := cmd.CombinedOutput()
+	variants := [][]string{
+		{"systemctl", "--user", action, unit},
+		{"systemctl", action, unit},
+	}
+	var errors []string
+	for _, argv := range variants {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		errors = append(errors, fmt.Sprintf("%s", strings.TrimSpace(string(output))))
+	}
+	return fmt.Errorf("systemctl %s %s 失败: %s", action, unit, strings.Join(errors, " | "))
+}
+
+func requireCommand(name string) error {
+	_, err := exec.LookPath(name)
 	if err != nil {
-		return fmt.Errorf("systemctl %s %s 失败: %s", action, unit, strings.TrimSpace(string(output)))
+		return fmt.Errorf("未找到 %s: %w", name, err)
 	}
 	return nil
+}
+
+func commandExists(command []string, binary string) error {
+	if len(command) > 0 {
+		return requireCommand(command[0])
+	}
+	if binary == "" {
+		binary = "claude"
+	}
+	return requireCommand(binary)
 }
 
 func sortedKeys(values map[string]string) []string {

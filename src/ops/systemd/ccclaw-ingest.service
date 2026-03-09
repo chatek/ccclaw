@@ -1,8 +1,8 @@
 [Unit]
-Description=ccclaw ingest service
+Description=ccclaw ingest service (user)
 After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/ccclaw
-ExecStart=/usr/local/bin/ccclaw ingest --config /opt/ccclaw/ops/config/config.toml --env-file /opt/ccclaw/.env
+WorkingDirectory=%h/.ccclaw
+ExecStart=%h/.ccclaw/bin/ccclaw ingest --config %h/.ccclaw/ops/config/config.toml --env-file %h/.ccclaw/.env

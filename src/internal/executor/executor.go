@@ -20,23 +20,32 @@ type Result struct {
 }
 
 type Executor struct {
-	binary  string
+	command []string
 	timeout time.Duration
 	logDir  string
 	secrets map[string]string
 }
 
-func New(binary string, timeout time.Duration, logDir string, secrets map[string]string) (*Executor, error) {
-	if binary == "" {
-		binary = "claude"
+func New(command []string, binary string, timeout time.Duration, logDir string, secrets map[string]string) (*Executor, error) {
+	resolved := make([]string, 0, len(command))
+	for _, item := range command {
+		if strings.TrimSpace(item) != "" {
+			resolved = append(resolved, item)
+		}
 	}
-	if _, err := exec.LookPath(binary); err != nil {
-		return nil, fmt.Errorf("找不到执行器二进制 %q: %w", binary, err)
+	if len(resolved) == 0 {
+		if binary == "" {
+			binary = "claude"
+		}
+		resolved = []string{binary}
+	}
+	if _, err := exec.LookPath(resolved[0]); err != nil {
+		return nil, fmt.Errorf("找不到执行器命令 %q: %w", resolved[0], err)
 	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建日志目录失败: %w", err)
 	}
-	return &Executor{binary: binary, timeout: timeout, logDir: logDir, secrets: copyMap(secrets)}, nil
+	return &Executor{command: resolved, timeout: timeout, logDir: logDir, secrets: copyMap(secrets)}, nil
 }
 
 func (e *Executor) Run(parent context.Context, repoPath, taskID, prompt string) (*Result, error) {
@@ -51,11 +60,13 @@ func (e *Executor) Run(parent context.Context, repoPath, taskID, prompt string) 
 	}
 	defer logHandle.Close()
 
-	cmd := exec.CommandContext(ctx, e.binary,
+	args := append([]string{}, e.command[1:]...)
+	args = append(args,
 		"-p", prompt,
 		"--dangerously-skip-permissions",
 		"--output-format", "text",
 	)
+	cmd := exec.CommandContext(ctx, e.command[0], args...)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), mapToEnv(e.secrets)...)
 
