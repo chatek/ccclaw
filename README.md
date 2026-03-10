@@ -48,7 +48,9 @@
 - 一般配置固定落在 `~/.ccclaw/ops/config/config.toml`
 - Claude 执行默认通过 `rtk proxy claude` 包装
 - 若本机已存在 Claude plugins，则直接继承；否则补装指定官方集合
-- 升级只覆盖程序发布树，不自动覆盖本体仓库内容
+- 升级不覆盖本体仓库中的用户记忆；仅无损刷新关键 `kb/**/CLAUDE.md` 约定
+- 本体仓库安装支持 `init|remote|local`
+- 任务仓库绑定支持 `remote|local`
 
 ## 最简安装建议
 
@@ -76,7 +78,7 @@ Claude 授权只建议两条路径：
 - `claude setup-token`
 - 代理模式，在 `~/.ccclaw/.env` 中填写 `ANTHROPIC_BASE_URL` 与 `ANTHROPIC_AUTH_TOKEN`
 
-安装完成后，先绑定目标仓库，再启用定时器：
+安装完成后，可先检查安装阶段写入的仓库绑定，再启用定时器：
 
 ```bash
 ~/.ccclaw/bin/ccclaw target add \
@@ -97,8 +99,9 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
 - 探查 Claude 官方安装通道可达性
 - 非交互模式仅在显式 `--install-claude` 时自动安装 Claude
 - 安装 `sqlite3`、`rtk`、`golang` 与基础 CLI 工具
-- 初始化本体仓库目录树与 Git 仓库
+- 按安装模式初始化或接管本体仓库
 - 生成 `.env` 与 `config.toml`
+- 按安装交互绑定任务仓库并写入 `targets`
 - 安装阶段允许 `targets = []`
 - 生成 user-level systemd units
 
@@ -128,17 +131,18 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
 cd src
 make package
 make checksum
-make sign GPG_KEY_ID=<gpg-key-id> MINISIGN_KEY_FILE=/path/to/minisign.key
-make release GPG_KEY_ID=<gpg-key-id> MINISIGN_KEY_FILE=/path/to/minisign.key
+make sign
+make release
 ```
 
 约束：
 
 - release tag 使用 `yy.mm.dd.HHMM`
 - 首轮默认平台为 `linux/amd64`
-- release 资产至少包含 `tar.gz`、`SHA256SUMS`、`gpg` 签名与 `minisign` 签名
+- release 资产至少包含 `tar.gz` 与 `SHA256SUMS`
 - 开发机本地归档目录固定为 `/ops/logs/ccclaw/`，不纳入版本控制
-- 若 minisign 私钥无密码保护，可追加 `MINISIGN_UNPROTECTED=1`
+- `make sign` 当前保留为 `make checksum` 的兼容别名
+- `make release` 仅允许在干净工作树上执行
 
 ## 工程报告
 

@@ -5,6 +5,7 @@ YES=0
 SIMULATE=0
 SKIP_DEPS=0
 INSTALL_CLAUDE=0
+
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
 CONTROL_REPO_DEFAULT="41490/ccclaw"
@@ -14,9 +15,19 @@ DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
 HOME_REPO="${HOME_REPO:-$HOME_REPO_DEFAULT}"
+HOME_REPO_MODE="${HOME_REPO_MODE:-init}"
+HOME_REPO_REMOTE="${HOME_REPO_REMOTE:-}"
 CONTROL_REPO="${CONTROL_REPO:-$CONTROL_REPO_DEFAULT}"
 BIN_LINK="${BIN_LINK:-$BIN_LINK_DEFAULT}"
 SYSTEMD_USER_DIR="$SYSTEMD_USER_DIR_DEFAULT"
+
+TASK_REPO_MODE="${TASK_REPO_MODE:-none}"
+TASK_REPO_REMOTE="${TASK_REPO_REMOTE:-}"
+TASK_REPO_LOCAL="${TASK_REPO_LOCAL:-}"
+TASK_REPO="${TASK_REPO:-}"
+TASK_REPO_PATH="${TASK_REPO_PATH:-}"
+TASK_KB_PATH="${TASK_KB_PATH:-}"
+
 ENV_FILE=""
 CONFIG_FILE=""
 STATE_DB=""
@@ -26,6 +37,10 @@ CLAUDE_WRAPPER=""
 
 expand_path() {
   local path="$1"
+  if [[ -z "$path" ]]; then
+    printf '\n'
+    return 0
+  fi
   if [[ "$path" == ~* ]]; then
     printf '%s\n' "${path/#\~/$HOME}"
   else
@@ -37,6 +52,9 @@ refresh_paths() {
   APP_DIR="$(expand_path "$APP_DIR")"
   HOME_REPO="$(expand_path "$HOME_REPO")"
   BIN_LINK="$(expand_path "$BIN_LINK")"
+  TASK_REPO_LOCAL="$(expand_path "$TASK_REPO_LOCAL")"
+  TASK_REPO_PATH="$(expand_path "$TASK_REPO_PATH")"
+  TASK_KB_PATH="$(expand_path "$TASK_KB_PATH")"
   ENV_FILE="$APP_DIR/.env"
   CONFIG_FILE="$APP_DIR/ops/config/config.toml"
   STATE_DB="$APP_DIR/var/state.db"
@@ -54,14 +72,22 @@ usage() {
 用法: $(basename "$0") [选项]
 
 选项:
-  --yes                 非交互模式，尽量使用默认值
-  --simulate            只打印安装流程与当前探查结果，不写入文件
-  --skip-deps           跳过系统依赖安装
-  --install-claude      非交互模式下自动执行 Claude 官方安装
-  --app-dir PATH        程序目录，默认 ~/.ccclaw
-  --home-repo PATH      本体仓库目录，默认 /opt/ccclaw
-  --control-repo REPO   控制仓库，默认 41490/ccclaw
-  -h, --help            显示帮助
+  --yes                     非交互模式，尽量使用默认值
+  --simulate                只打印安装流程与当前探查结果，不写入文件
+  --skip-deps               跳过系统依赖安装
+  --install-claude          非交互模式下自动执行 Claude 官方安装
+  --app-dir PATH            程序目录，默认 ~/.ccclaw
+  --home-repo PATH          本体仓库目录，默认 /opt/ccclaw
+  --home-repo-mode MODE     本体仓库模式: init|remote|local
+  --home-repo-remote URL    本体远程仓库 URL 或 owner/repo；传入后自动切换 remote 模式
+  --control-repo REPO       控制仓库，默认 41490/ccclaw
+  --task-repo-mode MODE     任务仓库模式: none|remote|local
+  --task-repo-remote URL    任务远程仓库 URL 或 owner/repo；传入后自动切换 remote 模式
+  --task-repo-local PATH    本地已有任务仓库路径；传入后自动切换 local 模式
+  --task-repo REPO          任务仓库 owner/repo；未传时尽量自动推断
+  --task-repo-path PATH     任务仓库本地路径；remote 模式默认 ~/repo-name
+  --task-repo-kb-path PATH  任务仓库对应 kb 路径，默认继承全局 kb_dir
+  -h, --help                显示帮助
 USAGE
 }
 
@@ -73,7 +99,15 @@ while (($#)); do
     --install-claude) INSTALL_CLAUDE=1 ;;
     --app-dir) shift; APP_DIR="$1" ;;
     --home-repo) shift; HOME_REPO="$1" ;;
+    --home-repo-mode) shift; HOME_REPO_MODE="$1" ;;
+    --home-repo-remote) shift; HOME_REPO_REMOTE="$1"; HOME_REPO_MODE="remote" ;;
     --control-repo) shift; CONTROL_REPO="$1" ;;
+    --task-repo-mode) shift; TASK_REPO_MODE="$1" ;;
+    --task-repo-remote) shift; TASK_REPO_REMOTE="$1"; TASK_REPO_MODE="remote" ;;
+    --task-repo-local) shift; TASK_REPO_LOCAL="$1"; TASK_REPO_MODE="local" ;;
+    --task-repo) shift; TASK_REPO="$1" ;;
+    --task-repo-path) shift; TASK_REPO_PATH="$1" ;;
+    --task-repo-kb-path) shift; TASK_KB_PATH="$1" ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -102,22 +136,195 @@ prompt_default() {
   printf -v "$var_name" '%s' "$input"
 }
 
-need_sudo() {
-  [[ "$HOME_REPO" == /opt/* || "$HOME_REPO" == /srv/* || "$HOME_REPO" == /var/* ]]
+prompt_mode() {
+  local var_name="$1" label="$2" default_value="$3" allowed="$4"
+  local input="$default_value"
+  while true; do
+    prompt_default input "$label" "$input"
+    case " $allowed " in
+      *" $input "*) printf -v "$var_name" '%s' "$input"; return 0 ;;
+      *) warn "无效取值: $input；允许值: $allowed" ;;
+    esac
+  done
 }
 
-run_maybe_sudo() {
-  if need_sudo && [[ ! -w "$(dirname "$HOME_REPO")" && ! -w "$HOME_REPO" ]]; then
+path_needs_sudo() {
+  local path="$1"
+  [[ "$path" == /opt/* || "$path" == /srv/* || "$path" == /var/* ]]
+}
+
+run_maybe_sudo_for_path() {
+  local path="$1"
+  shift
+  if path_needs_sudo "$path" && [[ ! -w "$(dirname "$path")" && ! -w "$path" ]]; then
     sudo "$@"
   else
     "$@"
   fi
 }
 
-ensure_home_repo_owner() {
-  if need_sudo && [[ ! -w "$HOME_REPO" ]]; then
-    sudo chown -R "$(id -un)":"$(id -gn)" "$HOME_REPO"
+ensure_path_owner() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    return 0
   fi
+  if path_needs_sudo "$path" && [[ ! -w "$path" ]]; then
+    sudo chown -R "$(id -un)":"$(id -gn)" "$path"
+  fi
+}
+
+ensure_dir() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] mkdir -p $*"
+    return 0
+  fi
+  mkdir -p "$@"
+}
+
+dir_has_entries() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  find "$path" -mindepth 1 -maxdepth 1 | read -r _
+}
+
+append_line_if_missing() {
+  local file="$1" line="$2"
+  if grep -Fqx "$line" "$file" 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$line" >> "$file"
+}
+
+managed_file_has_markers() {
+  local file="$1"
+  grep -Fq '<!-- ccclaw:managed:start -->' "$file" 2>/dev/null \
+    && grep -Fq '<!-- ccclaw:managed:end -->' "$file" 2>/dev/null \
+    && grep -Fq '<!-- ccclaw:user:start -->' "$file" 2>/dev/null \
+    && grep -Fq '<!-- ccclaw:user:end -->' "$file" 2>/dev/null
+}
+
+extract_marked_block() {
+  local file="$1" start_marker="$2" end_marker="$3"
+  awk -v start_marker="$start_marker" -v end_marker="$end_marker" '
+    $0 == start_marker { in_block=1; next }
+    $0 == end_marker { in_block=0; exit }
+    in_block { print }
+  ' "$file"
+}
+
+render_template_with_user_block() {
+  local template="$1" user_block_file="$2" output="$3"
+  awk -v user_start='<!-- ccclaw:user:start -->' \
+      -v user_end='<!-- ccclaw:user:end -->' \
+      -v user_block_file="$user_block_file" '
+    $0 == user_start {
+      print
+      while ((getline line < user_block_file) > 0) {
+        print line
+      }
+      close(user_block_file)
+      in_user=1
+      next
+    }
+    $0 == user_end {
+      in_user=0
+      print
+      next
+    }
+    in_user { next }
+    { print }
+  ' "$template" > "$output"
+}
+
+merge_managed_markdown() {
+  local template="$1" target="$2" tmp_file user_block_file
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] merge managed markdown $template -> $target"
+    return 0
+  fi
+  mkdir -p "$(dirname "$target")"
+  if [[ ! -f "$target" ]]; then
+    install -m 644 "$template" "$target"
+    return 0
+  fi
+
+  tmp_file="$(mktemp)"
+  user_block_file="$(mktemp)"
+  if managed_file_has_markers "$target"; then
+    extract_marked_block "$target" '<!-- ccclaw:user:start -->' '<!-- ccclaw:user:end -->' > "$user_block_file"
+  else
+    {
+      printf '<!-- 从升级前本地版本迁入；以下内容视为用户自定义补充，后续升级保留。 -->\n'
+      cat "$target"
+    } > "$user_block_file"
+  fi
+
+  render_template_with_user_block "$template" "$user_block_file" "$tmp_file"
+  if ! cmp -s "$tmp_file" "$target"; then
+    cat "$tmp_file" > "$target"
+  fi
+  rm -f "$tmp_file" "$user_block_file"
+}
+
+merge_kb_contracts() {
+  local template relative target
+  while IFS= read -r template; do
+    relative="${template#$DIST_DIR/kb/}"
+    target="$HOME_REPO/kb/$relative"
+    merge_managed_markdown "$template" "$target"
+  done < <(find "$DIST_DIR/kb" -type f -name 'CLAUDE.md' | sort)
+}
+
+normalize_repo_slug() {
+  local repo="$1"
+  repo="${repo%.git}"
+  repo="${repo%/}"
+  case "$repo" in
+    git@github.com:*) repo="${repo#git@github.com:}" ;;
+    ssh://git@github.com/*) repo="${repo#ssh://git@github.com/}" ;;
+    https://github.com/*) repo="${repo#https://github.com/}" ;;
+    http://github.com/*) repo="${repo#http://github.com/}" ;;
+  esac
+  if [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    printf '%s\n' "$repo"
+    return 0
+  fi
+  return 1
+}
+
+clone_url_from_repo_input() {
+  local input="$1"
+  if slug="$(normalize_repo_slug "$input" 2>/dev/null)"; then
+    printf 'https://github.com/%s.git\n' "$slug"
+    return 0
+  fi
+  printf '%s\n' "$input"
+}
+
+repo_name_from_slug() {
+  local slug="$1"
+  printf '%s\n' "${slug##*/}"
+}
+
+repo_slug_from_local_repo() {
+  local repo_path="$1" remote_url
+  remote_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$remote_url" ]]; then
+    return 1
+  fi
+  normalize_repo_slug "$remote_url"
+}
+
+validate_mode() {
+  local label="$1" value="$2" allowed="$3"
+  case " $allowed " in
+    *" $value "*) return 0 ;;
+    *) fail "$label 取值无效: $value；允许值: $allowed" ;;
+  esac
+}
+
+config_has_targets() {
+  grep -q '^\[\[targets\]\]' "$CONFIG_FILE" 2>/dev/null
 }
 
 probe_claude() {
@@ -157,16 +364,17 @@ print_flow() {
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
-   - 首次安装默认允许 targets = []
+   - 本体仓库模式: $HOME_REPO_MODE
 3. 生成固定隐私配置：
    - .env: $ENV_FILE
    - 仅记录会造成经济损失的敏感信息
 4. 生成普通配置：
    - config.toml: $CONFIG_FILE
    - 记录 repo/path/执行器/systemd 等非敏感配置
-5. 初始化本体仓库：
-   - 若目录为空：git init + 写入 kb/docs/README/CLAUDE
-   - 若目录已是 git 仓库：接管并检查结构
+5. 初始化或接管本体仓库：
+   - init: 在目标目录 git init，并写入 dist/kb 初始记忆树
+   - remote: clone 指定仓库到目标目录，再补齐 kb 初始树
+   - local: 接管本地已有 git 仓库，再补齐 kb 初始树
 6. Claude 适配：
    - 先探查官方安装通道可达性
    - 交互模式可确认后执行官方安装脚本
@@ -175,7 +383,9 @@ print_flow() {
 7. 安装程序文件：
    - $APP_DIR/bin/ccclaw
    - $APP_DIR/bin/ccclaude
-   - $APP_DIR/ops/systemd/*.service|*.timer
+   - $APP_DIR/install.sh
+   - $APP_DIR/upgrade.sh
+   - $APP_DIR/ops/*
 8. 安装基础工具：
    - 必装: git gh rg sqlite3 curl wget golang
    - 能力工具: node npm uv
@@ -187,8 +397,13 @@ print_flow() {
 10. 安装 user systemd 单元：
    - $SYSTEMD_USER_DIR/ccclaw-ingest.service
    - $SYSTEMD_USER_DIR/ccclaw-run.service
-11. 升级策略：
+11. 任务仓库绑定：
+   - none: 本轮不绑定
+   - remote: clone 到指定本地路径，并写入 config.toml
+   - local: 接管已有本地仓库，并写入 config.toml
+12. 升级策略：
    - upgrade.sh 只升级程序发布树与插件/marketplace
+   - kb/**/CLAUDE.md 采用受管区块刷新，保留用户自定义区块
    - 不自动覆盖本体仓库记忆内容
 
 == 交互项矩阵 ==
@@ -196,23 +411,78 @@ print_flow() {
 - 可选且敏感(.env): ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, GREPTILE_API_KEY
 - 必填但可默认(config.toml): control_repo
 - 必填但可默认(config.toml): app_dir, home_repo, kb_dir, state_db, log_dir
+- 本体仓库模式: init|remote|local
+- 任务仓库模式: none|remote|local
 - 可自动探查并默认继承: claude 路径、plugin marketplace、已装插件
 FLOW
 }
 
 collect_inputs() {
   prompt_default APP_DIR "程序目录" "$APP_DIR"
-  prompt_default HOME_REPO "本体仓库目录" "$HOME_REPO"
   prompt_default CONTROL_REPO "控制仓库 owner/repo" "$CONTROL_REPO"
+  prompt_mode HOME_REPO_MODE "本体仓库模式(init/remote/local)" "$HOME_REPO_MODE" "init remote local"
+  prompt_default HOME_REPO "本体仓库目录" "$HOME_REPO"
+  case "$HOME_REPO_MODE" in
+    remote)
+      prompt_default HOME_REPO_REMOTE "本体远程仓库(owner/repo 或 URL)" "$HOME_REPO_REMOTE"
+      ;;
+    local)
+      prompt_default HOME_REPO "本地本体仓库路径" "$HOME_REPO"
+      ;;
+  esac
+
+  prompt_mode TASK_REPO_MODE "任务仓库模式(none/remote/local)" "$TASK_REPO_MODE" "none remote local"
+  case "$TASK_REPO_MODE" in
+    remote)
+      prompt_default TASK_REPO_REMOTE "任务远程仓库(owner/repo 或 URL)" "$TASK_REPO_REMOTE"
+      if [[ -z "$TASK_REPO" ]]; then
+        TASK_REPO="$(normalize_repo_slug "$TASK_REPO_REMOTE" 2>/dev/null || true)"
+      fi
+      if [[ -z "$TASK_REPO_PATH" && -n "$TASK_REPO" ]]; then
+        TASK_REPO_PATH="$HOME/$(repo_name_from_slug "$TASK_REPO")"
+      fi
+      prompt_default TASK_REPO "任务仓库 owner/repo" "$TASK_REPO"
+      prompt_default TASK_REPO_PATH "任务仓库本地路径" "$TASK_REPO_PATH"
+      prompt_default TASK_KB_PATH "任务仓库 kb 路径(可留空继承全局)" "$TASK_KB_PATH"
+      ;;
+    local)
+      prompt_default TASK_REPO_LOCAL "本地任务仓库路径" "$TASK_REPO_LOCAL"
+      if [[ -z "$TASK_REPO" && -d "$TASK_REPO_LOCAL/.git" ]]; then
+        TASK_REPO="$(repo_slug_from_local_repo "$TASK_REPO_LOCAL" 2>/dev/null || true)"
+      fi
+      prompt_default TASK_REPO "任务仓库 owner/repo" "$TASK_REPO"
+      prompt_default TASK_KB_PATH "任务仓库 kb 路径(可留空继承全局)" "$TASK_KB_PATH"
+      ;;
+  esac
   refresh_paths
 }
 
-ensure_dir() {
-  if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] mkdir -p $*"
-    return 0
-  fi
-  mkdir -p "$@"
+validate_inputs() {
+  validate_mode "本体仓库模式" "$HOME_REPO_MODE" "init remote local"
+  validate_mode "任务仓库模式" "$TASK_REPO_MODE" "none remote local"
+  case "$HOME_REPO_MODE" in
+    remote)
+      [[ -n "$HOME_REPO_REMOTE" ]] || fail "remote 模式下必须提供 --home-repo-remote"
+      ;;
+    local)
+      [[ -n "$HOME_REPO" ]] || fail "local 模式下必须提供本地本体仓库路径"
+      ;;
+  esac
+  case "$TASK_REPO_MODE" in
+    remote)
+      [[ -n "$TASK_REPO_REMOTE" ]] || fail "remote 模式下必须提供 --task-repo-remote"
+      if ! normalize_repo_slug "$TASK_REPO" >/dev/null 2>&1; then
+        fail "无法识别任务仓库 owner/repo: $TASK_REPO"
+      fi
+      [[ -n "$TASK_REPO_PATH" ]] || fail "remote 模式下必须提供任务仓库本地路径"
+      ;;
+    local)
+      [[ -n "$TASK_REPO_LOCAL" ]] || fail "local 模式下必须提供 --task-repo-local"
+      if ! normalize_repo_slug "$TASK_REPO" >/dev/null 2>&1; then
+        fail "无法识别任务仓库 owner/repo: $TASK_REPO"
+      fi
+      ;;
+  esac
 }
 
 ensure_system_packages() {
@@ -343,6 +613,7 @@ create_env_file() {
   local anthropic_base_url="${ANTHROPIC_BASE_URL:-}"
   local anthropic_auth_token="${ANTHROPIC_AUTH_TOKEN:-}"
   local greptile_key="${GREPTILE_API_KEY:-}"
+  local previous_umask
   if [[ -f "$ENV_FILE" ]]; then
     log "复用已有隐私配置: $ENV_FILE"
     ensure_env_key "ANTHROPIC_BASE_URL"
@@ -358,6 +629,7 @@ create_env_file() {
     log "[simulate] write $ENV_FILE"
     return 0
   fi
+  previous_umask="$(umask)"
   umask 177
   cat > "$ENV_FILE" <<ENV
 # 所有会导致经济损失的隐私信息都在这里。
@@ -367,6 +639,7 @@ ANTHROPIC_BASE_URL=${anthropic_base_url}
 ANTHROPIC_AUTH_TOKEN=${anthropic_auth_token}
 GREPTILE_API_KEY=${greptile_key}
 ENV
+  umask "$previous_umask"
   chmod 600 "$ENV_FILE"
 }
 
@@ -462,6 +735,24 @@ WantedBy=timers.target
 UNIT
 }
 
+copy_ops_tree() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] cp -R $DIST_DIR/ops/. $APP_DIR/ops/"
+    return 0
+  fi
+  cp -R "$DIST_DIR/ops/." "$APP_DIR/ops/"
+}
+
+install_release_scripts() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] install $DIST_DIR/install.sh -> $APP_DIR/install.sh"
+    log "[simulate] install $DIST_DIR/upgrade.sh -> $APP_DIR/upgrade.sh"
+    return 0
+  fi
+  install -m 755 "$DIST_DIR/install.sh" "$APP_DIR/install.sh"
+  install -m 755 "$DIST_DIR/upgrade.sh" "$APP_DIR/upgrade.sh"
+}
+
 create_app_layout() {
   ensure_dir "$APP_DIR/bin" "$APP_DIR/ops/config" "$APP_DIR/ops/systemd" "$APP_DIR/ops/scripts" "$APP_DIR/var" "$APP_DIR/log" "$HOME/.local/bin"
   if [[ "$SIMULATE" -eq 1 ]]; then
@@ -469,6 +760,8 @@ create_app_layout() {
   else
     install -m 755 "$DIST_DIR/bin/ccclaw" "$APP_DIR/bin/ccclaw"
   fi
+  install_release_scripts
+  copy_ops_tree
   create_claude_wrapper
   create_env_file
   create_config_file
@@ -480,22 +773,16 @@ create_app_layout() {
   fi
 }
 
-init_home_repo() {
+seed_home_repo_tree() {
   if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] initialize home repo at $HOME_REPO"
+    log "[simulate] seed kb/docs tree into $HOME_REPO"
     return 0
   fi
-  if [[ ! -d "$HOME_REPO" ]]; then
-    run_maybe_sudo mkdir -p "$HOME_REPO"
-  fi
-  ensure_home_repo_owner
-  if [[ ! -d "$HOME_REPO/.git" ]]; then
-    log "初始化本体仓库: $HOME_REPO"
-    git init "$HOME_REPO"
-  fi
   mkdir -p "$HOME_REPO/kb/designs" "$HOME_REPO/kb/assay" "$HOME_REPO/kb/journal" "$HOME_REPO/kb/skills/L1" "$HOME_REPO/kb/skills/L2" "$HOME_REPO/docs/reports" "$HOME_REPO/docs/plans" "$HOME_REPO/docs/rfcs"
-  cp -R "$DIST_DIR/kb/." "$HOME_REPO/kb/"
-  cat > "$HOME_REPO/README.md" <<'README'
+  cp -R -n "$DIST_DIR/kb/." "$HOME_REPO/kb/"
+  merge_kb_contracts
+  if [[ ! -f "$HOME_REPO/README.md" ]]; then
+    cat > "$HOME_REPO/README.md" <<'README'
 # ccclaw-home
 
 这是本机 `ccclaw` 的封闭本体仓库。
@@ -504,7 +791,9 @@ init_home_repo() {
 - `docs/` 保存本体级计划、报告与架构文档
 - 该仓库不参与程序升级覆盖
 README
-  cat > "$HOME_REPO/CLAUDE.md" <<'CLAUDE'
+  fi
+  if [[ ! -f "$HOME_REPO/CLAUDE.md" ]]; then
+    cat > "$HOME_REPO/CLAUDE.md" <<'CLAUDE'
 # CLAUDE.md
 
 此目录是 `ccclaw` 的本体记忆仓库，不是程序发布树。
@@ -513,15 +802,105 @@ README
 - 升级程序时不要覆盖这里的用户记忆
 - 所有变更优先保持可追溯、可提交、可回滚
 CLAUDE
-  cat > "$HOME_REPO/.gitignore" <<'GITIGNORE'
-.DS_Store
-*.swp
-*.tmp
-GITIGNORE
-  if ! git -C "$HOME_REPO" rev-parse HEAD >/dev/null 2>&1; then
-    git -C "$HOME_REPO" add .
-    git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m 'init ccclaw home repo'
   fi
+  touch "$HOME_REPO/.gitignore"
+  append_line_if_missing "$HOME_REPO/.gitignore" ".DS_Store"
+  append_line_if_missing "$HOME_REPO/.gitignore" "*.swp"
+  append_line_if_missing "$HOME_REPO/.gitignore" "*.tmp"
+}
+
+commit_home_repo_seed() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] git add/commit seeded files in $HOME_REPO"
+    return 0
+  fi
+  git -C "$HOME_REPO" add kb README.md CLAUDE.md .gitignore
+  if git -C "$HOME_REPO" diff --cached --quiet; then
+    return 0
+  fi
+  git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m 'seed ccclaw home repo'
+}
+
+init_or_attach_home_repo() {
+  case "$HOME_REPO_MODE" in
+    init)
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] initialize home repo at $HOME_REPO"
+        return 0
+      fi
+      if [[ ! -d "$HOME_REPO" ]]; then
+        run_maybe_sudo_for_path "$HOME_REPO" mkdir -p "$HOME_REPO"
+      fi
+      ensure_path_owner "$HOME_REPO"
+      if [[ ! -d "$HOME_REPO/.git" ]]; then
+        log "初始化本体仓库: $HOME_REPO"
+        git -C "$HOME_REPO" init
+      fi
+      ;;
+    remote)
+      [[ -n "$HOME_REPO_REMOTE" ]] || fail "本体 remote 模式缺少远程仓库"
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] git clone $(clone_url_from_repo_input "$HOME_REPO_REMOTE") $HOME_REPO"
+        return 0
+      fi
+      if [[ -e "$HOME_REPO" ]] && dir_has_entries "$HOME_REPO"; then
+        fail "本体 remote 模式要求目标目录为空: $HOME_REPO"
+      fi
+      run_maybe_sudo_for_path "$HOME_REPO" mkdir -p "$(dirname "$HOME_REPO")"
+      run_maybe_sudo_for_path "$HOME_REPO" git clone "$(clone_url_from_repo_input "$HOME_REPO_REMOTE")" "$HOME_REPO"
+      ensure_path_owner "$HOME_REPO"
+      ;;
+    local)
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] attach local home repo at $HOME_REPO"
+        return 0
+      fi
+      [[ -d "$HOME_REPO/.git" ]] || fail "本地本体仓库不是 git 仓库: $HOME_REPO"
+      ensure_path_owner "$HOME_REPO"
+      ;;
+  esac
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    return 0
+  fi
+  seed_home_repo_tree
+  commit_home_repo_seed
+}
+
+bind_task_repo() {
+  local target_args
+  case "$TASK_REPO_MODE" in
+    none)
+      return 0
+      ;;
+    remote)
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] git clone $(clone_url_from_repo_input "$TASK_REPO_REMOTE") $TASK_REPO_PATH"
+      else
+        if [[ -e "$TASK_REPO_PATH" ]] && dir_has_entries "$TASK_REPO_PATH"; then
+          fail "任务 remote 模式要求目标目录为空: $TASK_REPO_PATH"
+        fi
+        mkdir -p "$(dirname "$TASK_REPO_PATH")"
+        git clone "$(clone_url_from_repo_input "$TASK_REPO_REMOTE")" "$TASK_REPO_PATH"
+      fi
+      ;;
+    local)
+      [[ -d "$TASK_REPO_LOCAL/.git" ]] || fail "本地任务仓库不是 git 仓库: $TASK_REPO_LOCAL"
+      TASK_REPO_PATH="$TASK_REPO_LOCAL"
+      ;;
+  esac
+
+  target_args=(target add --config "$CONFIG_FILE" --repo "$TASK_REPO" --path "$TASK_REPO_PATH")
+  if [[ -n "$TASK_KB_PATH" ]]; then
+    target_args+=(--kb-path "$TASK_KB_PATH")
+  fi
+  if ! config_has_targets; then
+    target_args+=(--default)
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] $APP_DIR/bin/ccclaw ${target_args[*]}"
+    return 0
+  fi
+  "$APP_DIR/bin/ccclaw" "${target_args[@]}"
 }
 
 ensure_marketplace() {
@@ -587,10 +966,20 @@ configure_claude_assets() {
 
 print_summary() {
   local installed_version="unknown"
-  local trigger_mode="systemd --user"
+  local task_summary="未绑定"
+  local home_source_summary="$HOME_REPO_MODE"
   if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
     installed_version="$("$APP_DIR/bin/ccclaw" -V 2>/dev/null || echo unknown)"
   fi
+  case "$HOME_REPO_MODE" in
+    remote) home_source_summary="remote -> $HOME_REPO_REMOTE" ;;
+    local) home_source_summary="local -> $HOME_REPO" ;;
+    init) home_source_summary="init -> $HOME_REPO" ;;
+  esac
+  case "$TASK_REPO_MODE" in
+    remote) task_summary="$TASK_REPO @ $TASK_REPO_PATH (from $TASK_REPO_REMOTE)" ;;
+    local) task_summary="$TASK_REPO @ $TASK_REPO_PATH (local)" ;;
+  esac
   cat <<MSG
 安装完成。
 
@@ -598,12 +987,14 @@ print_summary() {
 - 版本: $installed_version
 - 程序目录: $APP_DIR
 - 本体仓库: $HOME_REPO
+- 本体仓库来源: $home_source_summary
 - 可执行文件: $APP_DIR/bin/ccclaw
 - 执行器包装: $CLAUDE_WRAPPER
 - 隐私配置: $ENV_FILE
 - 普通配置: $CONFIG_FILE
 - 本地命令链接: $BIN_LINK
-- 默认触发方式: $trigger_mode
+- 任务仓库绑定: $task_summary
+- 默认触发方式: systemd --user
 - user systemd 单元目录: $SYSTEMD_USER_DIR
 - user systemd 单元:
   - ccclaw-ingest.service
@@ -618,17 +1009,19 @@ print_summary() {
 3. 进入本体仓库: cd $HOME_REPO && git status
 4. 运行一次体检:
    $APP_DIR/bin/ccclaw doctor --config $CONFIG_FILE --env-file $ENV_FILE
-5. 绑定目标仓库:
-   $APP_DIR/bin/ccclaw target add --config $CONFIG_FILE --repo owner/repo --path /abs/path --default
+5. 若需要补绑任务仓库:
+   $APP_DIR/bin/ccclaw target list --config $CONFIG_FILE
 6. 按需启用用户定时器:
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
 7. 若当前环境不适合 systemd --user，可改为手工写入 crontab 样板:
    */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE
-8. 若 sudo 无口令未开启，请手工执行:
-   sudo visudo
-   # 为当前用户追加 NOPASSWD 规则
+8. 若本体仓库目前还没有 upstream，可按需执行:
+   git -C $HOME_REPO remote add origin <repo-url>
+   git -C $HOME_REPO branch -M main
+   git -C $HOME_REPO push -u origin main
+9. 若任务仓库后续迁移目录，请同步修改 $CONFIG_FILE 中对应 target 的 local_path
 
 日常使用流程
 1. 绑定工作任务仓库
@@ -646,6 +1039,10 @@ main() {
   print_flow
   probe_claude
   collect_inputs
+  validate_inputs
+  if [[ "$TASK_REPO_MODE" == "local" && -z "$TASK_REPO_PATH" ]]; then
+    TASK_REPO_PATH="$TASK_REPO_LOCAL"
+  fi
   if [[ "$SIMULATE" -eq 1 ]]; then
     print_summary
     exit 0
@@ -654,7 +1051,8 @@ main() {
   install_claude_official
   install_rtk
   create_app_layout
-  init_home_repo
+  init_or_attach_home_repo
+  bind_task_repo
   configure_claude_assets
   print_summary
 }

@@ -46,36 +46,18 @@ checksum: package
 	cd $(RELEASE_DIR) && sha256sum $(notdir $(PACKAGE_FILE)) > $(notdir $(CHECKSUM_FILE))
 
 sign: checksum
-	@if ! command -v gpg >/dev/null 2>&1; then echo "缺少 gpg，无法生成签名"; exit 1; fi
-	@if ! command -v minisign >/dev/null 2>&1; then echo "缺少 minisign，无法生成签名"; exit 1; fi
-	@if [ -n "$(GPG_KEY_ID)" ]; then \
-		gpg --batch --yes --armor --local-user "$(GPG_KEY_ID)" --detach-sign -o $(PACKAGE_FILE).asc $(PACKAGE_FILE); \
-		gpg --batch --yes --armor --local-user "$(GPG_KEY_ID)" --detach-sign -o $(CHECKSUM_FILE).asc $(CHECKSUM_FILE); \
-	else \
-		gpg --batch --yes --armor --detach-sign -o $(PACKAGE_FILE).asc $(PACKAGE_FILE); \
-		gpg --batch --yes --armor --detach-sign -o $(CHECKSUM_FILE).asc $(CHECKSUM_FILE); \
-	fi
-	@if [ -z "$(MINISIGN_KEY_FILE)" ]; then echo "请提供 MINISIGN_KEY_FILE=/path/to/minisign.key"; exit 1; fi
-	@if [ "$(MINISIGN_UNPROTECTED)" = "1" ]; then \
-		minisign -S -W -s "$(MINISIGN_KEY_FILE)" -m $(PACKAGE_FILE) -x $(PACKAGE_FILE).minisig -t "$(VERSION)"; \
-		minisign -S -W -s "$(MINISIGN_KEY_FILE)" -m $(CHECKSUM_FILE) -x $(CHECKSUM_FILE).minisig -t "$(VERSION)"; \
-	else \
-		minisign -S -s "$(MINISIGN_KEY_FILE)" -m $(PACKAGE_FILE) -x $(PACKAGE_FILE).minisig -t "$(VERSION)"; \
-		minisign -S -s "$(MINISIGN_KEY_FILE)" -m $(CHECKSUM_FILE) -x $(CHECKSUM_FILE).minisig -t "$(VERSION)"; \
-	fi
+	@echo "当前发布链路已改为 SHA256SUMS 校验；sign 目标保留为 checksum 兼容别名"
 
-archive: sign
+archive: checksum
 	mkdir -p $(ARCHIVE_ROOT)/$(VERSION)
-	cp $(PACKAGE_FILE) $(PACKAGE_FILE).asc $(PACKAGE_FILE).minisig $(CHECKSUM_FILE) $(CHECKSUM_FILE).asc $(CHECKSUM_FILE).minisig $(ARCHIVE_ROOT)/$(VERSION)/
+	cp $(PACKAGE_FILE) $(CHECKSUM_FILE) $(ARCHIVE_ROOT)/$(VERSION)/
 
 release: archive
+	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
+	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
 	gh release create $(VERSION) \
 		$(PACKAGE_FILE) \
-		$(PACKAGE_FILE).asc \
-		$(PACKAGE_FILE).minisig \
 		$(CHECKSUM_FILE) \
-		$(CHECKSUM_FILE).asc \
-		$(CHECKSUM_FILE).minisig \
 		--title "$(VERSION)" \
 		--generate-notes
 

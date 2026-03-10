@@ -3,8 +3,8 @@
 ## 安装拓扑
 
 - 程序目录：`~/.ccclaw`
-- 本体仓库：`/opt/ccclaw`
-- 首个目标仓库：由安装交互确认，默认当前 `ccclaw` 源码仓库
+- 本体仓库：`/opt/ccclaw`，支持 `init|remote|local`
+- 首个任务仓库：由安装交互确认，支持 `remote|local`
 
 ## 交互项
 
@@ -17,13 +17,14 @@
 ### 普通项，写入 `config.toml`
 
 - `control_repo`
-- `target_repo`
-- `target_path`
 - `app_dir`
 - `home_repo`
 - `kb_dir`
 - `state_db`
 - `log_dir`
+- `targets[].repo`
+- `targets[].local_path`
+- `targets[].kb_path`
 
 ## 自动探查项
 
@@ -39,4 +40,6 @@
 - 若本机无 Claude plugins：补装指定官方 plugins + `example-skills`
 - 若缺少 `rtk`：优先按官方 quick install 安装
 - 若缺少 `sqlite3`：优先通过系统包管理器安装
+- 本体仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
+- 任务仓库默认不绑定；若指定远程仓库，则 clone 到当前用户家目录根
 - 升级只覆盖程序树，不覆盖本体仓库

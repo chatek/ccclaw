@@ -12,7 +12,7 @@ echo "升级分轨:"
 echo "- 程序发布树: $([[ "$UPGRADE_PROGRAM" == "1" ]] && echo enabled || echo skipped)"
 echo "- Claude 安装: $([[ "$UPGRADE_CLAUDE" == "1" ]] && echo enabled || echo skipped)"
 echo "- plugins/skills 刷新: $([[ "$REFRESH_CLAUDE_ASSETS" == "1" ]] && echo enabled || echo skipped)"
-echo "- 本体仓库保护: 不自动修改 $HOME_REPO"
+echo "- 本体仓库保护: 不覆盖用户记忆；仅无损刷新关键 kb/CLAUDE.md 受管区块"
 
 if [[ "$UPGRADE_PROGRAM" == "1" ]]; then
   args=(--yes --app-dir "$APP_DIR" --home-repo "$HOME_REPO")

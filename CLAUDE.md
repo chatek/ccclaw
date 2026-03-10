@@ -18,6 +18,10 @@
 - `rtk` 作为 Claude 默认 token 优化前缀
 - release 打包源固定为 `src/dist/`
 - 版本号固定为 `yy.mm.dd.HHMM`
+- release 校验统一使用 `SHA256SUMS`
+- 安装时本体仓库支持 `init|remote|local`
+- 安装时任务仓库绑定支持 `remote|local`
+- 升级仅允许无损刷新关键 `kb/**/CLAUDE.md`，不得覆盖用户记忆
 
 ## 全局底线
 

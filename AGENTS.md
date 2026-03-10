@@ -36,5 +36,5 @@
 
 - `src/Makefile` 是统一发布入口
 - release 必须从 `src/dist/` 打包
-- release 至少包含安装包、`SHA256SUMS`、`gpg` 签名与 `minisign` 签名
+- release 至少包含安装包与 `SHA256SUMS`
 - 发布与升级禁止覆盖 `/opt/ccclaw` 本体仓库中的用户记忆
