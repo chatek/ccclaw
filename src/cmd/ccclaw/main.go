@@ -82,6 +82,30 @@ func newRootCmd() *cobra.Command {
 	})
 
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "stats",
+		Short: "查看 token 使用统计",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := app.NewRuntime(configPath, envFile)
+			if err != nil {
+				return err
+			}
+			return rt.Stats(os.Stdout)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "patrol",
+		Short: "巡查 tmux 会话与运行中任务",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := app.NewRuntime(configPath, envFile)
+			if err != nil {
+				return err
+			}
+			return rt.Patrol(cmd.Context(), os.Stdout)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "doctor",
 		Short: "执行环境与部署健康检查",
 		RunE: func(cmd *cobra.Command, args []string) error {

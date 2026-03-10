@@ -24,6 +24,7 @@ import (
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
 	"github.com/41490/ccclaw/internal/memory"
+	"github.com/41490/ccclaw/internal/tmux"
 )
 
 type Runtime struct {
@@ -126,33 +127,177 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 		_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
 
 		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, prompt)
-		if runErr != nil {
-			fresh.RetryCount++
-			fresh.ErrorMsg = runErr.Error()
-			fresh.State = core.StateFailed
-			eventType := core.EventFailed
-			if fresh.RetryCount >= core.MaxRetry {
-				fresh.State = core.StateDead
-				eventType = core.EventDead
+		if result != nil && result.Pending {
+			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
+			continue
+		}
+		if result != nil {
+			if result.SessionID != "" {
+				fresh.LastSessionID = result.SessionID
 			}
-			if err := rt.store.UpsertTask(fresh); err != nil {
+		}
+		if err := rt.finishTaskExecution(fresh, result, runErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
+	defer rt.store.Close()
+	execEngine, err := rt.newExecutor()
+	if err != nil {
+		return err
+	}
+	manager := execEngine.TMux()
+	if manager == nil {
+		_, _ = fmt.Fprintln(out, "当前未启用 tmux，会话巡查已跳过")
+		return nil
+	}
+
+	timeout := execEngine.Timeout()
+	runningTasks, err := rt.store.ListRunning()
+	if err != nil {
+		return err
+	}
+	sessions, err := manager.List("ccclaw-")
+	if err != nil {
+		return err
+	}
+	sessionMap := make(map[string]tmux.SessionStatus, len(sessions))
+	for _, session := range sessions {
+		sessionMap[session.Name] = session
+	}
+
+	var (
+		completed int
+		timedOut  int
+		warnings  int
+		orphaned  int
+	)
+	taskSessions := make(map[string]struct{}, len(runningTasks))
+	for _, task := range runningTasks {
+		artifacts := execEngine.ArtifactPaths(task.TaskID)
+		taskSessions[artifacts.SessionName] = struct{}{}
+		status, exists := sessionMap[artifacts.SessionName]
+		if !exists {
+			if handled, err := rt.finalizeMissingSession(task, execEngine); err != nil {
+				return err
+			} else if handled {
+				completed++
+				continue
+			}
+			if err := rt.markTaskDead(task, fmt.Sprintf("tmux 会话 %s 已丢失，且未找到结果文件", artifacts.SessionName), artifacts.LogFile); err != nil {
 				return err
 			}
-			_ = rt.store.AppendEvent(fresh.TaskID, eventType, fresh.ErrorMsg)
-			_ = rt.rep.ReportFailure(fresh)
+			timedOut++
+			continue
+		}
+		if status.PaneDead {
+			if err := rt.finalizePatrolSession(task, execEngine, status); err != nil {
+				return err
+			}
+			completed++
+			if killErr := manager.Kill(status.Name); killErr != nil {
+				_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("清理 tmux 会话失败: %v", killErr))
+			}
 			continue
 		}
 
-		fresh.State = core.StateDone
-		fresh.ErrorMsg = ""
-		fresh.ReportPath = filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), fresh.IssueNumber, fresh.IssueTitle)))
-		if err := rt.store.UpsertTask(fresh); err != nil {
-			return err
+		runningFor := time.Since(status.CreatedAt)
+		if timeout > 0 && runningFor >= timeout {
+			tail, _ := manager.CaptureOutput(status.Name, 80)
+			if killErr := manager.Kill(status.Name); killErr != nil {
+				return fmt.Errorf("终止超时 tmux 会话失败: %w", killErr)
+			}
+			reason := fmt.Sprintf("tmux 会话 %s 已运行 %s，超过超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout)
+			if tail != "" {
+				reason += "\n最后输出:\n" + tail
+			}
+			if err := rt.markTaskDead(task, reason, artifacts.LogFile); err != nil {
+				return err
+			}
+			timedOut++
+			continue
 		}
-		_ = rt.store.AppendEvent(fresh.TaskID, core.EventDone, "任务执行完成")
-		_ = rt.rep.ReportSuccess(fresh, result.Duration, result.LogFile)
+		if timeout > 0 && runningFor >= timeout*8/10 {
+			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("tmux 会话 %s 已运行 %s，接近超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout))
+			warnings++
+		}
 	}
+
+	for _, session := range sessions {
+		if _, exists := taskSessions[session.Name]; exists {
+			continue
+		}
+		if err := manager.Kill(session.Name); err != nil {
+			return fmt.Errorf("清理孤儿 tmux 会话失败: %w", err)
+		}
+		orphaned++
+	}
+
+	_, _ = fmt.Fprintf(out, "巡查完成: completed=%d timeout=%d warning=%d orphaned=%d running=%d\n", completed, timedOut, warnings, orphaned, len(runningTasks))
+	_ = ctx
 	return nil
+}
+
+func (rt *Runtime) Stats(out io.Writer) error {
+	defer rt.store.Close()
+	summary, err := rt.store.TokenStats()
+	if err != nil {
+		return err
+	}
+	if summary.Runs == 0 {
+		_, _ = fmt.Fprintln(out, "暂无 token 使用记录")
+		return nil
+	}
+	_, _ = fmt.Fprintf(out, "执行次数: %d\n", summary.Runs)
+	_, _ = fmt.Fprintf(out, "会话数: %d\n", summary.Sessions)
+	_, _ = fmt.Fprintf(out, "输入 tokens: %d\n", summary.InputTokens)
+	_, _ = fmt.Fprintf(out, "输出 tokens: %d\n", summary.OutputTokens)
+	_, _ = fmt.Fprintf(out, "缓存创建 tokens: %d\n", summary.CacheCreate)
+	_, _ = fmt.Fprintf(out, "缓存命中 tokens: %d\n", summary.CacheRead)
+	_, _ = fmt.Fprintf(out, "累计成本(USD): %.4f\n", summary.CostUSD)
+	if !summary.FirstUsedAt.IsZero() {
+		_, _ = fmt.Fprintf(out, "首次记录: %s\n", summary.FirstUsedAt.Format(time.RFC3339))
+	}
+	if !summary.LastUsedAt.IsZero() {
+		_, _ = fmt.Fprintf(out, "最近记录: %s\n", summary.LastUsedAt.Format(time.RFC3339))
+	}
+	stats, err := rt.store.TaskTokenStats(20)
+	if err != nil {
+		return err
+	}
+	if len(stats) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(out)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ISSUE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD\tSESSION\tTITLE")
+	for _, item := range stats {
+		title := item.IssueTitle
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
+		sessionID := item.LastSessionID
+		if sessionID == "" {
+			sessionID = "-"
+		}
+		_, _ = fmt.Fprintf(
+			w,
+			"#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
+			item.IssueNumber,
+			item.Runs,
+			item.InputTokens,
+			item.OutputTokens,
+			item.CacheCreate,
+			item.CacheRead,
+			item.CostUSD,
+			sessionID,
+			title,
+		)
+	}
+	return w.Flush()
 }
 
 func (rt *Runtime) Status(out io.Writer) error {
@@ -243,6 +388,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "Go 工具链", run: func() (string, error) { return commandVersion("go", "version") }},
 		{name: "sudo 无口令", run: rt.checkPasswordlessSudo},
 		{name: "rtk CLI", run: func() (string, error) { return commandVersion("rtk", "--version") }},
+		{name: "tmux CLI", run: func() (string, error) { return commandVersion("tmux", "-V") }},
 		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
 		{name: "sqlite3 CLI", run: func() (string, error) { return commandVersion("sqlite3", "--version") }},
 		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
@@ -345,7 +491,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		}
 		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
 		if existing.State == core.StateBlocked && !fromRun {
-			_ = rt.rep.ReportBlocked(existing, blockReasonText(blockReasons))
+			rt.reportBlocked(existing, blockReasonText(blockReasons))
 		}
 		return nil
 	}
@@ -358,7 +504,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		}
 		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
 		if existing.State == core.StateBlocked && !fromRun {
-			_ = rt.rep.ReportBlocked(existing, blockReasonText(blockReasons))
+			rt.reportBlocked(existing, blockReasonText(blockReasons))
 		}
 	}
 	return nil
@@ -402,7 +548,136 @@ func (rt *Runtime) newExecutor() (*executor.Executor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析执行超时失败: %w", err)
 	}
-	return executor.New(rt.cfg.Executor.Command, rt.cfg.Executor.Binary, timeout, rt.cfg.Paths.LogDir, rt.secrets.Values)
+	var manager tmux.Manager
+	if tmux.Available("tmux") {
+		tmuxManager, err := tmux.New("tmux")
+		if err != nil {
+			return nil, err
+		}
+		manager = tmuxManager
+	}
+	return executor.New(
+		rt.cfg.Executor.Command,
+		rt.cfg.Executor.Binary,
+		timeout,
+		rt.cfg.Paths.LogDir,
+		filepath.Join(rt.cfg.Paths.AppDir, "var", "results"),
+		rt.secrets.Values,
+		manager,
+	)
+}
+
+func (rt *Runtime) persistExecutionMetrics(task *core.Task, result *executor.Result) error {
+	if task == nil || result == nil {
+		return nil
+	}
+	if result.SessionID == "" && result.CostUSD == 0 && result.Usage == (core.TokenUsage{}) {
+		return nil
+	}
+	if err := rt.store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     task.TaskID,
+		SessionID:  result.SessionID,
+		Usage:      result.Usage,
+		CostUSD:    result.CostUSD,
+		DurationMS: result.Duration.Milliseconds(),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result, runErr error) error {
+	if task == nil {
+		return nil
+	}
+	if result != nil {
+		if result.SessionID != "" {
+			task.LastSessionID = result.SessionID
+		}
+		if err := rt.persistExecutionMetrics(task, result); err != nil {
+			return err
+		}
+	}
+	if runErr != nil {
+		task.RetryCount++
+		task.ErrorMsg = runErr.Error()
+		task.State = core.StateFailed
+		eventType := core.EventFailed
+		if task.RetryCount >= core.MaxRetry {
+			task.State = core.StateDead
+			eventType = core.EventDead
+		}
+		if err := rt.store.UpsertTask(task); err != nil {
+			return err
+		}
+		_ = rt.store.AppendEvent(task.TaskID, eventType, task.ErrorMsg)
+		rt.reportFailure(task)
+		return nil
+	}
+	task.State = core.StateDone
+	task.ErrorMsg = ""
+	task.ReportPath = filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), task.IssueNumber, task.IssueTitle)))
+	if err := rt.store.UpsertTask(task); err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(task.TaskID, core.EventDone, "任务执行完成")
+	if result != nil {
+		rt.reportSuccess(task, result.Duration, result.LogFile)
+	}
+	return nil
+}
+
+func (rt *Runtime) finalizePatrolSession(task *core.Task, execEngine *executor.Executor, status tmux.SessionStatus) error {
+	result, resultErr := execEngine.LoadResult(task.TaskID)
+	if result != nil {
+		result.ExitCode = status.ExitCode
+	}
+	if resultErr == nil && status.ExitCode != 0 {
+		resultErr = fmt.Errorf("tmux 会话退出码=%d", status.ExitCode)
+	}
+	return rt.finishTaskExecution(task, result, resultErr)
+}
+
+func (rt *Runtime) finalizeMissingSession(task *core.Task, execEngine *executor.Executor) (bool, error) {
+	result, resultErr := execEngine.LoadResult(task.TaskID)
+	if result == nil && resultErr != nil {
+		return false, nil
+	}
+	return true, rt.finishTaskExecution(task, result, resultErr)
+}
+
+func (rt *Runtime) markTaskDead(task *core.Task, reason, logFile string) error {
+	task.RetryCount++
+	task.ErrorMsg = reason
+	task.State = core.StateDead
+	if err := rt.store.UpsertTask(task); err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(task.TaskID, core.EventDead, reason)
+	rt.reportFailure(task)
+	_ = logFile
+	return nil
+}
+
+func (rt *Runtime) reportBlocked(task *core.Task, reason string) {
+	if rt.rep == nil {
+		return
+	}
+	_ = rt.rep.ReportBlocked(task, reason)
+}
+
+func (rt *Runtime) reportFailure(task *core.Task) {
+	if rt.rep == nil {
+		return
+	}
+	_ = rt.rep.ReportFailure(task)
+}
+
+func (rt *Runtime) reportSuccess(task *core.Task, duration time.Duration, logFile string) {
+	if rt.rep == nil {
+		return
+	}
+	_ = rt.rep.ReportSuccess(task, duration, logFile)
 }
 
 type schedulerProbe struct {
@@ -583,22 +858,22 @@ func systemdRepairHint(reason string, installed bool) string {
 	switch {
 	case strings.TrimSpace(reason) == "":
 		if installed {
-			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
 	case strings.Contains(reason, "未找到 systemctl"):
 		return "当前环境缺少 systemctl；请安装 systemd 组件，或改用 cron/none"
 	case isUserBusUnavailable(reason):
-		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer；若仍失败，请先确认 user bus 已建立"
+		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer；若仍失败，请先确认 user bus 已建立"
 	case strings.Contains(reason, "is-enabled"), strings.Contains(reason, "disabled"), strings.Contains(reason, "not-found"):
-		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
 	case strings.Contains(reason, "is-active"), strings.Contains(reason, "inactive"), strings.Contains(reason, "failed"):
-		return "请执行 systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer，并检查 journalctl --user -u ccclaw-ingest.service -u ccclaw-run.service"
+		return "请执行 systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer，并检查 journalctl --user -u ccclaw-ingest.service -u ccclaw-run.service -u ccclaw-patrol.service"
 	default:
 		if installed {
 			return "请检查 user systemd 状态后重新执行 daemon-reload / enable --now"
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
 	}
 }
 
@@ -652,6 +927,8 @@ func (rt *Runtime) hasSystemdUnitFiles(unitDir string) bool {
 		"ccclaw-ingest.timer",
 		"ccclaw-run.service",
 		"ccclaw-run.timer",
+		"ccclaw-patrol.service",
+		"ccclaw-patrol.timer",
 	}
 	for _, name := range required {
 		if _, err := os.Stat(filepath.Join(unitDir, name)); err != nil {
@@ -665,7 +942,7 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 	if err := requireCommand("systemctl"); err != nil {
 		return false, err.Error()
 	}
-	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer"}
+	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer", "ccclaw-patrol.timer"}
 	for _, unit := range units {
 		if _, err := systemctlUser("is-enabled", unit); err != nil {
 			return false, err.Error()
@@ -674,7 +951,7 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 			return false, err.Error()
 		}
 	}
-	return true, "ccclaw-ingest.timer, ccclaw-run.timer 已启用且运行中"
+	return true, "ccclaw-ingest.timer, ccclaw-run.timer, ccclaw-patrol.timer 已启用且运行中"
 }
 
 func (rt *Runtime) detectCronEntries() (bool, string) {

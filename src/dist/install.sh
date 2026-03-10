@@ -594,7 +594,7 @@ INFO
 print_flow() {
   cat <<FLOW
 == 计划执行流程 ==
-1. 探查现有环境：claude / gh / rg / sqlite3 / rtk / git / node / npm / uv / systemd --user
+1. 探查现有环境：claude / gh / rg / sqlite3 / tmux / rtk / git / node / npm / uv / systemd --user
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
@@ -622,7 +622,7 @@ print_flow() {
    - $APP_DIR/upgrade.sh
    - $APP_DIR/ops/*
 8. 安装基础工具：
-   - 必装: git gh rg sqlite3 curl wget golang
+   - 必装: git gh rg sqlite3 tmux curl wget golang
    - 能力工具: node npm uv
    - token 优化: rtk
 9. 若 Claude 已可用：
@@ -738,7 +738,7 @@ validate_inputs() {
 ensure_system_packages() {
   local missing_tools=()
   local missing_packages=()
-  local required=(git gh rg sqlite3 curl wget)
+  local required=(git gh rg sqlite3 tmux curl wget)
   local optional=(node npm uv)
   for tool in "${required[@]}"; do
     if ! have "$tool"; then
@@ -999,6 +999,8 @@ create_user_systemd_units() {
   local ingest_timer="$SYSTEMD_USER_DIR/ccclaw-ingest.timer"
   local run_service="$SYSTEMD_USER_DIR/ccclaw-run.service"
   local run_timer="$SYSTEMD_USER_DIR/ccclaw-run.timer"
+  local patrol_service="$SYSTEMD_USER_DIR/ccclaw-patrol.service"
+  local patrol_timer="$SYSTEMD_USER_DIR/ccclaw-patrol.timer"
   if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
     log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
     return 0
@@ -1048,6 +1050,28 @@ Description=Run ccclaw worker every 10 minutes
 OnCalendar=*:0/10
 Persistent=true
 Unit=ccclaw-run.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+  cat > "$patrol_service" <<UNIT
+[Unit]
+Description=ccclaw patrol service
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/bin/ccclaw patrol --config $CONFIG_FILE --env-file $ENV_FILE
+UNIT
+  cat > "$patrol_timer" <<UNIT
+[Unit]
+Description=Run ccclaw patrol every 2 minutes
+
+[Timer]
+OnCalendar=*:0/2
+Persistent=true
+Unit=ccclaw-patrol.service
 
 [Install]
 WantedBy=timers.target
@@ -1332,7 +1356,7 @@ print_summary() {
     systemd)
       scheduler_step_6="6. 按需启用用户定时器:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
       scheduler_step_7="7. 若后续环境不适合 systemd --user，可改为手工写入 crontab 样板:
    */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
@@ -1343,7 +1367,7 @@ print_summary() {
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
       ;;
     none|*)
       scheduler_step_6="6. 当前调度模式为 none；如需后台调度，可手工写入 crontab:
@@ -1351,7 +1375,7 @@ print_summary() {
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
       ;;
   esac
   cat <<MSG
@@ -1378,6 +1402,8 @@ $result_title
   - ccclaw-ingest.timer
   - ccclaw-run.service
   - ccclaw-run.timer
+  - ccclaw-patrol.service
+  - ccclaw-patrol.timer
 - crontab: 默认不自动写入，仅提供样板
 
 建议下一步
