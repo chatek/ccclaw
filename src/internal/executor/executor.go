@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,11 +24,19 @@ type Result struct {
 	Duration    time.Duration
 	LogFile     string
 	ResultFile  string
+	MetaFile    string
+	PromptFile  string
 	SessionID   string
 	SessionName string
 	CostUSD     float64
 	Usage       core.TokenUsage
+	RTKEnabled  bool
 	Pending     bool
+}
+
+type RunOptions struct {
+	Prompt          string
+	ResumeSessionID string
 }
 
 type Executor struct {
@@ -35,6 +44,7 @@ type Executor struct {
 	timeout     time.Duration
 	logDir      string
 	resultDir   string
+	promptDir   string
 	secrets     map[string]string
 	tmuxManager tmux.Manager
 }
@@ -61,21 +71,26 @@ func New(command []string, binary string, timeout time.Duration, logDir, resultD
 	if err := os.MkdirAll(resultDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建结果目录失败: %w", err)
 	}
+	promptDir := filepath.Join(filepath.Dir(resultDir), "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建 prompt 归档目录失败: %w", err)
+	}
 	return &Executor{
 		command:     resolved,
 		timeout:     timeout,
 		logDir:      logDir,
 		resultDir:   resultDir,
+		promptDir:   promptDir,
 		secrets:     copyMap(secrets),
 		tmuxManager: tmuxManager,
 	}, nil
 }
 
-func (e *Executor) Run(parent context.Context, repoPath, taskID, prompt string) (*Result, error) {
+func (e *Executor) Run(parent context.Context, repoPath, taskID string, opts RunOptions) (*Result, error) {
 	if e.tmuxManager != nil {
-		return e.launchTMux(repoPath, taskID, prompt)
+		return e.launchTMux(repoPath, taskID, opts)
 	}
-	return e.runSync(parent, repoPath, taskID, prompt)
+	return e.runSync(parent, repoPath, taskID, opts)
 }
 
 func (e *Executor) ArtifactPaths(taskID string) Result {
@@ -84,20 +99,23 @@ func (e *Executor) ArtifactPaths(taskID string) Result {
 		SessionName: sessionName(taskID),
 		LogFile:     filepath.Join(e.logDir, safe+".log"),
 		ResultFile:  filepath.Join(e.resultDir, safe+".json"),
+		MetaFile:    filepath.Join(e.resultDir, safe+".meta.json"),
 	}
 }
 
 func (e *Executor) LoadResult(taskID string) (*Result, error) {
 	artifacts := e.ArtifactPaths(taskID)
+	meta, metaErr := e.loadRunMetadata(artifacts.MetaFile)
+	if metaErr != nil {
+		return nil, metaErr
+	}
 	payload, err := os.ReadFile(artifacts.ResultFile)
 	if err != nil {
 		return nil, fmt.Errorf("读取结果文件失败: %w", err)
 	}
 	result, parseErr := parseClaudeResult(payload, 0, artifacts.LogFile, artifacts.ResultFile)
 	if result != nil {
-		result.SessionName = artifacts.SessionName
-		result.LogFile = artifacts.LogFile
-		result.ResultFile = artifacts.ResultFile
+		e.applyArtifactMetadata(result, artifacts, meta)
 	}
 	return result, parseErr
 }
@@ -110,15 +128,24 @@ func (e *Executor) TMux() tmux.Manager {
 	return e.tmuxManager
 }
 
-func (e *Executor) launchTMux(repoPath, taskID, prompt string) (*Result, error) {
-	artifacts := e.ArtifactPaths(taskID)
+func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result, error) {
+	artifacts, meta, err := e.prepareArtifacts(taskID, opts)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.Remove(artifacts.LogFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧日志失败: %w", err)
 	}
 	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧结果失败: %w", err)
 	}
-	launchCommand := e.buildTMuxCommand(prompt, artifacts.ResultFile)
+	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
+	}
+	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
+		return nil, err
+	}
+	launchCommand := e.buildTMuxCommand(opts, artifacts.ResultFile)
 	if err := e.tmuxManager.Launch(tmux.SessionSpec{
 		Name:    artifacts.SessionName,
 		WorkDir: repoPath,
@@ -131,36 +158,40 @@ func (e *Executor) launchTMux(repoPath, taskID, prompt string) (*Result, error) 
 	return &artifacts, nil
 }
 
-func (e *Executor) buildTMuxCommand(prompt, resultFile string) string {
-	args := append([]string{}, e.command...)
-	args = append(args,
-		"-p", prompt,
-		"--dangerously-skip-permissions",
-		"--output-format", "json",
-	)
-	commandLine := shellJoin(args)
+func (e *Executor) buildTMuxCommand(opts RunOptions, resultFile string) string {
+	commandLine := shellJoin(e.commandWithEnv(opts))
 	script := fmt.Sprintf("set -o pipefail; %s | tee %s", commandLine, shellQuote(resultFile))
 	return fmt.Sprintf("bash -lc %s", shellQuote(script))
 }
 
-func (e *Executor) runSync(parent context.Context, repoPath, taskID, prompt string) (*Result, error) {
+func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts RunOptions) (*Result, error) {
 	ctx, cancel := context.WithTimeout(parent, e.timeout)
 	defer cancel()
 
-	artifacts := e.ArtifactPaths(taskID)
-	logFile := filepath.Join(e.logDir, fmt.Sprintf("%s_%d.log", safeTaskID(taskID), time.Now().Unix()))
-	logHandle, err := os.Create(logFile)
+	artifacts, meta, err := e.prepareArtifacts(taskID, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Remove(artifacts.LogFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧日志失败: %w", err)
+	}
+	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧结果失败: %w", err)
+	}
+	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
+	}
+	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
+		return nil, err
+	}
+
+	logHandle, err := os.Create(artifacts.LogFile)
 	if err != nil {
 		return nil, fmt.Errorf("创建日志文件失败: %w", err)
 	}
 	defer logHandle.Close()
 
-	args := append([]string{}, e.command[1:]...)
-	args = append(args,
-		"-p", prompt,
-		"--dangerously-skip-permissions",
-		"--output-format", "json",
-	)
+	args := e.commandArgs(opts)
 	cmd := exec.CommandContext(ctx, e.command[0], args...)
 	cmd.Dir = repoPath
 	cmd.Env = append(cmd.Environ(), mapToEnv(e.secrets)...)
@@ -174,14 +205,21 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID, prompt stri
 	runErr := cmd.Run()
 	duration := time.Since(start)
 	exitCode := 0
-	result, parseErr := parseClaudeResult(stdout.Bytes(), duration, logFile, artifacts.ResultFile)
+	if writeErr := os.WriteFile(artifacts.ResultFile, stdout.Bytes(), 0o644); writeErr != nil {
+		return nil, fmt.Errorf("写入结果文件失败: %w", writeErr)
+	}
+	result, parseErr := parseClaudeResult(stdout.Bytes(), duration, artifacts.LogFile, artifacts.ResultFile)
+	if result != nil {
+		e.applyArtifactMetadata(result, artifacts, meta)
+	}
 	if runErr != nil {
 		exitCode = 1
 		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		}
 		if result == nil {
-			result = &Result{Output: strings.TrimSpace(stdout.String() + stderr.String()), Duration: duration, LogFile: logFile}
+			result = &Result{Output: strings.TrimSpace(stdout.String() + stderr.String()), Duration: duration}
+			e.applyArtifactMetadata(result, artifacts, meta)
 		}
 		result.ExitCode = exitCode
 		if parseErr != nil {
@@ -194,15 +232,22 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID, prompt stri
 			result.ExitCode = exitCode
 			return result, parseErr
 		}
-		return &Result{
+		fallback := &Result{
 			Output:   strings.TrimSpace(stdout.String() + stderr.String()),
 			ExitCode: exitCode,
 			Duration: duration,
-			LogFile:  logFile,
-		}, fmt.Errorf("解析 Claude JSON 输出失败: %w", parseErr)
+		}
+		e.applyArtifactMetadata(fallback, artifacts, meta)
+		return fallback, fmt.Errorf("解析 Claude JSON 输出失败: %w", parseErr)
 	}
 	result.ExitCode = exitCode
 	return result, nil
+}
+
+type runMetadata struct {
+	PromptFile      string `json:"prompt_file"`
+	RTKEnabled      bool   `json:"rtk_enabled"`
+	ResumeSessionID string `json:"resume_session_id,omitempty"`
 }
 
 type claudeJSONResult struct {
@@ -262,6 +307,126 @@ func sessionName(taskID string) string {
 		checksum += (idx + 1) * int(r)
 	}
 	return fmt.Sprintf("ccclaw-%s-%04x", safeTaskID(taskID), checksum&0xffff)
+}
+
+func (e *Executor) prepareArtifacts(taskID string, opts RunOptions) (Result, runMetadata, error) {
+	artifacts := e.ArtifactPaths(taskID)
+	promptFile, err := e.archivePrompt(taskID, opts)
+	if err != nil {
+		return Result{}, runMetadata{}, err
+	}
+	meta := runMetadata{
+		PromptFile:      promptFile,
+		RTKEnabled:      e.inferRTKEnabled(),
+		ResumeSessionID: opts.ResumeSessionID,
+	}
+	e.applyArtifactMetadata(&artifacts, artifacts, meta)
+	return artifacts, meta, nil
+}
+
+func (e *Executor) archivePrompt(taskID string, opts RunOptions) (string, error) {
+	if err := os.MkdirAll(e.promptDir, 0o755); err != nil {
+		return "", fmt.Errorf("创建 prompt 归档目录失败: %w", err)
+	}
+	ts := time.Now().Format("20060102_150405")
+	path := filepath.Join(e.promptDir, fmt.Sprintf("%s_%s.md", safeTaskID(taskID), ts))
+	var sb strings.Builder
+	sb.WriteString("# ccclaw prompt archive\n\n")
+	sb.WriteString(fmt.Sprintf("- task_id: %s\n", taskID))
+	sb.WriteString(fmt.Sprintf("- archived_at: %s\n", time.Now().Format(time.RFC3339)))
+	if strings.TrimSpace(opts.ResumeSessionID) != "" {
+		sb.WriteString(fmt.Sprintf("- resume_session_id: %s\n", opts.ResumeSessionID))
+	}
+	sb.WriteString("\n---\n\n")
+	sb.WriteString(opts.Prompt)
+	sb.WriteString("\n")
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		return "", fmt.Errorf("写入 prompt 归档失败: %w", err)
+	}
+	return path, nil
+}
+
+func (e *Executor) writeRunMetadata(path string, meta runMetadata) error {
+	payload, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化执行元数据失败: %w", err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		return fmt.Errorf("写入执行元数据失败: %w", err)
+	}
+	return nil
+}
+
+func (e *Executor) loadRunMetadata(path string) (runMetadata, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return runMetadata{}, nil
+		}
+		return runMetadata{}, fmt.Errorf("读取执行元数据失败: %w", err)
+	}
+	var meta runMetadata
+	if err := json.Unmarshal(payload, &meta); err != nil {
+		return runMetadata{}, fmt.Errorf("解析执行元数据失败: %w", err)
+	}
+	return meta, nil
+}
+
+func (e *Executor) applyArtifactMetadata(result *Result, artifacts Result, meta runMetadata) {
+	if result == nil {
+		return
+	}
+	result.SessionName = artifacts.SessionName
+	result.LogFile = artifacts.LogFile
+	result.ResultFile = artifacts.ResultFile
+	result.MetaFile = artifacts.MetaFile
+	result.PromptFile = meta.PromptFile
+	result.RTKEnabled = meta.RTKEnabled
+}
+
+func (e *Executor) commandArgs(opts RunOptions) []string {
+	args := append([]string{}, e.command[1:]...)
+	if strings.TrimSpace(opts.ResumeSessionID) != "" {
+		args = append(args, "--resume", opts.ResumeSessionID)
+	}
+	args = append(args,
+		"-p", opts.Prompt,
+		"--dangerously-skip-permissions",
+		"--output-format", "json",
+	)
+	return args
+}
+
+func (e *Executor) commandWithEnv(opts RunOptions) []string {
+	commandLine := append([]string{}, e.command...)
+	if len(e.secrets) == 0 {
+		return append(commandLine, e.commandArgs(opts)...)
+	}
+	envArgs := []string{"env"}
+	keys := make([]string, 0, len(e.secrets))
+	for key := range e.secrets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		envArgs = append(envArgs, key+"="+e.secrets[key])
+	}
+	envArgs = append(envArgs, commandLine...)
+	envArgs = append(envArgs, e.commandArgs(opts)...)
+	return envArgs
+}
+
+func (e *Executor) inferRTKEnabled() bool {
+	for _, part := range e.command {
+		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
+		if base == "rtk" {
+			return true
+		}
+		if strings.Contains(base, "ccclaude") {
+			return tmux.Available("rtk")
+		}
+	}
+	return false
 }
 
 func safeTaskID(taskID string) string {

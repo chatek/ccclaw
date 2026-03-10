@@ -41,7 +41,7 @@ func TestExecutorRunParsesJSONResult(t *testing.T) {
 		t.Fatalf("创建执行器失败: %v", err)
 	}
 
-	result, err := execEngine.Run(context.Background(), tmpDir, "10#body", "test prompt")
+	result, err := execEngine.Run(context.Background(), tmpDir, "10#body", RunOptions{Prompt: "test prompt"})
 	if err != nil {
 		t.Fatalf("执行器运行失败: %v", err)
 	}
@@ -57,6 +57,9 @@ func TestExecutorRunParsesJSONResult(t *testing.T) {
 	if result.Output != "任务完成" {
 		t.Fatalf("unexpected result output: %q", result.Output)
 	}
+	if result.PromptFile == "" {
+		t.Fatalf("预期写入 prompt 归档，实际为 %#v", result)
+	}
 }
 
 func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
@@ -71,7 +74,7 @@ func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
 		t.Fatalf("创建执行器失败: %v", err)
 	}
 
-	result, runErr := execEngine.Run(context.Background(), tmpDir, "10#body", "test prompt")
+	result, runErr := execEngine.Run(context.Background(), tmpDir, "10#body", RunOptions{Prompt: "test prompt", ResumeSessionID: "sess-error"})
 	if runErr == nil {
 		t.Fatal("预期返回结构化错误")
 	}
@@ -84,6 +87,9 @@ func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
 	if result.CostUSD != 0.5 {
 		t.Fatalf("unexpected cost: %v", result.CostUSD)
 	}
+	if result.PromptFile == "" {
+		t.Fatalf("预期返回 prompt 归档路径，实际为 %#v", result)
+	}
 }
 
 func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
@@ -94,7 +100,7 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 		t.Fatalf("创建执行器失败: %v", err)
 	}
 
-	result, runErr := execEngine.Run(context.Background(), tmpDir, "10#body", "test prompt")
+	result, runErr := execEngine.Run(context.Background(), tmpDir, "10#body", RunOptions{Prompt: "test prompt", ResumeSessionID: "sess-9"})
 	if runErr != nil {
 		t.Fatalf("tmux launch 失败: %v", runErr)
 	}
@@ -104,7 +110,13 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	if !strings.Contains(manager.spec.Command, "--output-format") || !strings.Contains(manager.spec.Command, "json") {
 		t.Fatalf("预期 tmux 命令包含 json 输出，实际为 %q", manager.spec.Command)
 	}
+	if !strings.Contains(manager.spec.Command, "--resume") || !strings.Contains(manager.spec.Command, "sess-9") {
+		t.Fatalf("预期 tmux 命令包含 resume 参数，实际为 %q", manager.spec.Command)
+	}
 	if manager.spec.Name == "" || !strings.HasPrefix(manager.spec.Name, "ccclaw-") {
 		t.Fatalf("unexpected session name: %#v", manager.spec)
+	}
+	if result.PromptFile == "" || result.MetaFile == "" {
+		t.Fatalf("预期返回 prompt/meta 路径，实际为 %#v", result)
 	}
 }

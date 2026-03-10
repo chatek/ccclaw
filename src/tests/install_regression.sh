@@ -159,6 +159,8 @@ test_first_install_and_idempotent_reinstall() {
   assert_file_missing "$xdg/systemd/user/ccclaw-run.timer"
   assert_file_missing "$xdg/systemd/user/ccclaw-patrol.service"
   assert_file_missing "$xdg/systemd/user/ccclaw-patrol.timer"
+  assert_file_missing "$xdg/systemd/user/ccclaw-journal.service"
+  assert_file_missing "$xdg/systemd/user/ccclaw-journal.timer"
   assert_contains "$config_file" "repo = '41490/task-local'"
   assert_contains "$config_file" "local_path = '$task_repo'"
   assert_contains "$config_file" "default_target = '41490/task-local'"

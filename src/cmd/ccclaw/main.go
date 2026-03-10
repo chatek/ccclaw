@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"text/tabwriter"
+	"time"
 
 	"github.com/41490/ccclaw/internal/app"
 	"github.com/41490/ccclaw/internal/buildinfo"
@@ -24,6 +25,8 @@ func newRootCmd() *cobra.Command {
 	var envFile string
 	var runLimit int
 	var showVersion bool
+	var showRTKComparison bool
+	var journalDate string
 
 	rootCmd := &cobra.Command{
 		Use:           "ccclaw",
@@ -81,7 +84,7 @@ func newRootCmd() *cobra.Command {
 		},
 	})
 
-	rootCmd.AddCommand(&cobra.Command{
+	statsCmd := &cobra.Command{
 		Use:   "stats",
 		Short: "查看 token 使用统计",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -89,9 +92,11 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return rt.Stats(os.Stdout)
+			return rt.StatsWithOptions(os.Stdout, showRTKComparison)
 		},
-	})
+	}
+	statsCmd.Flags().BoolVar(&showRTKComparison, "rtk-comparison", false, "显示 rtk 与非 rtk 的对比统计")
+	rootCmd.AddCommand(statsCmd)
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "patrol",
@@ -104,6 +109,28 @@ func newRootCmd() *cobra.Command {
 			return rt.Patrol(cmd.Context(), os.Stdout)
 		},
 	})
+
+	journalCmd := &cobra.Command{
+		Use:   "journal",
+		Short: "生成指定日期的 journal 日报",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := app.NewRuntime(configPath, envFile)
+			if err != nil {
+				return err
+			}
+			day := time.Now()
+			if journalDate != "" {
+				parsed, err := time.ParseInLocation("2006-01-02", journalDate, time.Local)
+				if err != nil {
+					return fmt.Errorf("解析 --date 失败: %w", err)
+				}
+				day = parsed
+			}
+			return rt.Journal(day, os.Stdout)
+		},
+	}
+	journalCmd.Flags().StringVar(&journalDate, "date", "", "按 YYYY-MM-DD 生成指定日期 journal")
+	rootCmd.AddCommand(journalCmd)
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "doctor",

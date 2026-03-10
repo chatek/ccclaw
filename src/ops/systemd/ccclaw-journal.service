@@ -1,0 +1,8 @@
+[Unit]
+Description=ccclaw journal service (user)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.ccclaw
+ExecStart=%h/.ccclaw/bin/ccclaw journal --config %h/.ccclaw/ops/config/config.toml --env-file %h/.ccclaw/.env

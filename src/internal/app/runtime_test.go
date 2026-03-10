@@ -201,11 +201,113 @@ func TestStatsRendersSummaryAndTaskTable(t *testing.T) {
 
 	rt := &Runtime{store: store}
 	var out bytes.Buffer
-	if err := rt.Stats(&out); err != nil {
+	if err := rt.StatsWithOptions(&out, false); err != nil {
 		t.Fatalf("执行 stats 失败: %v", err)
 	}
 	text := out.String()
 	for _, want := range []string{"执行次数: 1", "会话数: 1", "#10", "sess-10", "累计成本(USD): 0.0900"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+}
+
+func TestBuildExecutionOptionsUsesResumeSession(t *testing.T) {
+	rt := &Runtime{}
+	task := &core.Task{
+		TaskID:        "10#body",
+		IssueNumber:   10,
+		IssueTitle:    "resume task",
+		IssueBody:     "继续修复",
+		IssueAuthor:   "zoomq",
+		Labels:        []string{"ccclaw"},
+		Intent:        core.IntentFix,
+		RiskLevel:     core.RiskLow,
+		State:         core.StateFailed,
+		RetryCount:    1,
+		LastSessionID: "sess-10",
+		ErrorMsg:      "tmux 会话超时",
+	}
+	target := &config.TargetConfig{
+		Repo:      "41490/ccclaw",
+		LocalPath: "/opt/src/ccclaw",
+	}
+	opts := rt.buildExecutionOptions(task, target)
+	if opts.ResumeSessionID != "sess-10" {
+		t.Fatalf("unexpected resume session: %#v", opts)
+	}
+	if !strings.Contains(opts.Prompt, "上次任务执行中断") || !strings.Contains(opts.Prompt, "sess-10") {
+		t.Fatalf("unexpected resume prompt: %q", opts.Prompt)
+	}
+}
+
+func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	for _, task := range []*core.Task{
+		{
+			TaskID:         "10#body",
+			IdempotencyKey: "10#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    10,
+			IssueTitle:     "rtk on",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateDone,
+		},
+		{
+			TaskID:         "11#body",
+			IdempotencyKey: "11#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    11,
+			IssueTitle:     "rtk off",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateDone,
+		},
+	} {
+		if err := store.UpsertTask(task); err != nil {
+			t.Fatalf("写入任务失败: %v", err)
+		}
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     "10#body",
+		SessionID:  "sess-10",
+		PromptFile: "/tmp/10.md",
+		Usage:      core.TokenUsage{InputTokens: 30, OutputTokens: 10},
+		CostUSD:    0.10,
+		RTKEnabled: true,
+		RecordedAt: time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("写入 rtk 记录失败: %v", err)
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     "11#body",
+		SessionID:  "sess-11",
+		PromptFile: "/tmp/11.md",
+		Usage:      core.TokenUsage{InputTokens: 60, OutputTokens: 20},
+		CostUSD:    0.30,
+		RTKEnabled: false,
+		RecordedAt: time.Date(2026, 3, 10, 16, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("写入 plain 记录失败: %v", err)
+	}
+
+	rt := &Runtime{store: store}
+	var out bytes.Buffer
+	if err := rt.StatsWithOptions(&out, true); err != nil {
+		t.Fatalf("执行 stats --rtk-comparison 失败: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{"RTK 对比:", "RTK runs: 1", "Plain runs: 1", "Estimated savings:"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
@@ -335,5 +437,75 @@ exit 0
 	}
 	if summary.Runs != 1 || summary.InputTokens != 50 {
 		t.Fatalf("unexpected summary after patrol: %#v", summary)
+	}
+}
+
+func TestJournalWritesDailyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+
+	task := &core.Task{
+		TaskID:         "10#body",
+		IdempotencyKey: "10#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    10,
+		IssueTitle:     "journal",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentResearch,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateDone,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	if err := store.AppendEvent(task.TaskID, core.EventDone, "tmux 会话完成"); err != nil {
+		t.Fatalf("写入事件失败: %v", err)
+	}
+	day := time.Date(2026, 3, 10, 12, 0, 0, 0, time.UTC)
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     task.TaskID,
+		SessionID:  "sess-10",
+		PromptFile: filepath.Join(tmpDir, "prompt.md"),
+		Usage:      core.TokenUsage{InputTokens: 40, OutputTokens: 15},
+		CostUSD:    0.12,
+		RTKEnabled: true,
+		RecordedAt: day,
+	}); err != nil {
+		t.Fatalf("写入 token 失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				HomeRepo: tmpDir,
+				StateDB:  stateDB,
+				KBDir:    filepath.Join(tmpDir, "kb"),
+			},
+		},
+		store: store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Journal(day, &out); err != nil {
+		t.Fatalf("执行 journal 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "journal 已生成:") {
+		t.Fatalf("unexpected journal output: %q", out.String())
+	}
+	path := filepath.Join(tmpDir, "kb", "journal", "2026", "03", "2026.03.10."+journalUserName()+".ccclaw_log.md")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 journal 文件失败: %v", err)
+	}
+	text := string(payload)
+	for _, want := range []string{"# ccclaw journal 2026-03-10", "任务触达数", "巡查事件"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
 	}
 }

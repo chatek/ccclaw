@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ccclaw journal every day at 23:50 (user)
+
+[Timer]
+OnCalendar=*-*-* 23:50:00
+Persistent=true
+Unit=ccclaw-journal.service
+
+[Install]
+WantedBy=timers.target

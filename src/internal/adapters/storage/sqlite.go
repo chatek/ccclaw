@@ -20,6 +20,7 @@ type Store struct {
 type TokenUsageRecord struct {
 	TaskID     string
 	SessionID  string
+	PromptFile string
 	Usage      core.TokenUsage
 	CostUSD    float64
 	DurationMS int64
@@ -51,6 +52,50 @@ type TaskTokenStat struct {
 	CacheRead      int
 	CostUSD        float64
 	LastRecordedAt time.Time
+}
+
+type RTKComparison struct {
+	RTKRuns         int
+	PlainRuns       int
+	RTKAvgCostUSD   float64
+	PlainAvgCostUSD float64
+	RTKAvgTokens    float64
+	PlainAvgTokens  float64
+	SavingsPercent  float64
+}
+
+type JournalDaySummary struct {
+	TasksTouched int
+	Started      int
+	Done         int
+	Failed       int
+	Dead         int
+	InputTokens  int
+	OutputTokens int
+	CacheCreate  int
+	CacheRead    int
+	CostUSD      float64
+}
+
+type JournalTaskSummary struct {
+	TaskID       string
+	IssueNumber  int
+	IssueTitle   string
+	State        core.State
+	Runs         int
+	InputTokens  int
+	OutputTokens int
+	CacheCreate  int
+	CacheRead    int
+	CostUSD      float64
+	UpdatedAt    time.Time
+}
+
+type EventRecord struct {
+	TaskID    string
+	EventType core.EventType
+	Detail    string
+	CreatedAt time.Time
 }
 
 func Open(path string) (*Store, error) {
@@ -149,8 +194,8 @@ func (s *Store) RecordTokenUsage(record TokenUsageRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO token_usage (
 			task_id, session_id, input_tokens, output_tokens, cache_create, cache_read,
-			cost_usd, duration_ms, rtk_enabled, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			cost_usd, duration_ms, rtk_enabled, prompt_file, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		record.TaskID,
 		record.SessionID,
@@ -161,6 +206,7 @@ func (s *Store) RecordTokenUsage(record TokenUsageRecord) error {
 		record.CostUSD,
 		record.DurationMS,
 		boolToInt(record.RTKEnabled),
+		record.PromptFile,
 		recordedAt,
 	)
 	if err != nil {
@@ -170,6 +216,11 @@ func (s *Store) RecordTokenUsage(record TokenUsageRecord) error {
 }
 
 func (s *Store) TokenStats() (*TokenStatsSummary, error) {
+	return s.TokenStatsBetween(time.Time{}, time.Time{})
+}
+
+func (s *Store) TokenStatsBetween(start, end time.Time) (*TokenStatsSummary, error) {
+	where, args := buildTimeRangeClause("created_at", start, end)
 	row := s.db.QueryRow(`
 		SELECT
 			COUNT(*) AS runs,
@@ -181,8 +232,7 @@ func (s *Store) TokenStats() (*TokenStatsSummary, error) {
 			COALESCE(SUM(cost_usd), 0),
 			COALESCE(MIN(created_at), ''),
 			COALESCE(MAX(created_at), '')
-		FROM token_usage
-	`)
+		FROM token_usage`+where, args...)
 	var (
 		summary   TokenStatsSummary
 		firstUsed string
@@ -216,6 +266,48 @@ func (s *Store) TokenStats() (*TokenStatsSummary, error) {
 		summary.LastUsedAt = parsed
 	}
 	return &summary, nil
+}
+
+func (s *Store) RTKComparisonBetween(start, end time.Time) (*RTKComparison, error) {
+	where, args := buildTimeRangeClause("created_at", start, end)
+	row := s.db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN rtk_enabled = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN rtk_enabled = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN rtk_enabled = 1 THEN cost_usd ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN rtk_enabled = 0 THEN cost_usd ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN rtk_enabled = 1 THEN input_tokens + output_tokens + cache_create + cache_read ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN rtk_enabled = 0 THEN input_tokens + output_tokens + cache_create + cache_read ELSE 0 END), 0)
+		FROM token_usage`+where, args...)
+	var (
+		item             RTKComparison
+		rtkTotalCost     float64
+		plainTotalCost   float64
+		rtkTotalTokens   int
+		plainTotalTokens int
+	)
+	if err := row.Scan(
+		&item.RTKRuns,
+		&item.PlainRuns,
+		&rtkTotalCost,
+		&plainTotalCost,
+		&rtkTotalTokens,
+		&plainTotalTokens,
+	); err != nil {
+		return nil, fmt.Errorf("读取 rtk 对比统计失败: %w", err)
+	}
+	if item.RTKRuns > 0 {
+		item.RTKAvgCostUSD = rtkTotalCost / float64(item.RTKRuns)
+		item.RTKAvgTokens = float64(rtkTotalTokens) / float64(item.RTKRuns)
+	}
+	if item.PlainRuns > 0 {
+		item.PlainAvgCostUSD = plainTotalCost / float64(item.PlainRuns)
+		item.PlainAvgTokens = float64(plainTotalTokens) / float64(item.PlainRuns)
+	}
+	if item.PlainAvgCostUSD > 0 {
+		item.SavingsPercent = (item.PlainAvgCostUSD - item.RTKAvgCostUSD) / item.PlainAvgCostUSD * 100
+	}
+	return &item, nil
 }
 
 func (s *Store) TaskTokenStats(limit int) ([]TaskTokenStat, error) {
@@ -365,6 +457,150 @@ func (s *Store) ListRunning() ([]*core.Task, error) {
 	return tasks, nil
 }
 
+func (s *Store) JournalDaySummary(day time.Time) (*JournalDaySummary, error) {
+	start, end := dayBounds(day)
+	tokenSummary, err := s.TokenStatsBetween(start, end)
+	if err != nil {
+		return nil, err
+	}
+	row := s.db.QueryRow(`
+		SELECT
+			COUNT(DISTINCT task_id),
+			COUNT(DISTINCT CASE WHEN event_type = 'STARTED' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'DONE' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'FAILED' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'DEAD' THEN task_id END)
+		FROM (
+			SELECT task_id, event_type FROM task_events WHERE created_at >= ? AND created_at < ?
+			UNION ALL
+			SELECT task_id, '' AS event_type FROM token_usage WHERE created_at >= ? AND created_at < ?
+		)
+	`, start, end, start, end)
+	summary := &JournalDaySummary{
+		InputTokens:  tokenSummary.InputTokens,
+		OutputTokens: tokenSummary.OutputTokens,
+		CacheCreate:  tokenSummary.CacheCreate,
+		CacheRead:    tokenSummary.CacheRead,
+		CostUSD:      tokenSummary.CostUSD,
+	}
+	if err := row.Scan(&summary.TasksTouched, &summary.Started, &summary.Done, &summary.Failed, &summary.Dead); err != nil {
+		return nil, fmt.Errorf("读取 journal 日汇总失败: %w", err)
+	}
+	return summary, nil
+}
+
+func (s *Store) JournalTaskSummaries(day time.Time) ([]JournalTaskSummary, error) {
+	start, end := dayBounds(day)
+	rows, err := s.db.Query(`
+		SELECT
+			t.task_id,
+			t.issue_number,
+			t.issue_title,
+			t.state,
+			COALESCE(COUNT(u.id), 0),
+			COALESCE(SUM(u.input_tokens), 0),
+			COALESCE(SUM(u.output_tokens), 0),
+			COALESCE(SUM(u.cache_create), 0),
+			COALESCE(SUM(u.cache_read), 0),
+			COALESCE(SUM(u.cost_usd), 0),
+			COALESCE(MAX(t.updated_at), '')
+		FROM tasks t
+		LEFT JOIN token_usage u
+			ON t.task_id = u.task_id
+			AND u.created_at >= ? AND u.created_at < ?
+		WHERE t.task_id IN (
+			SELECT task_id FROM task_events WHERE created_at >= ? AND created_at < ?
+			UNION
+			SELECT task_id FROM token_usage WHERE created_at >= ? AND created_at < ?
+			UNION
+			SELECT task_id FROM tasks WHERE updated_at >= ? AND updated_at < ?
+		)
+		GROUP BY t.task_id, t.issue_number, t.issue_title, t.state
+		ORDER BY MAX(t.updated_at) DESC, t.issue_number DESC
+	`, start, end, start, end, start, end, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("读取 journal 任务汇总失败: %w", err)
+	}
+	defer rows.Close()
+
+	var items []JournalTaskSummary
+	for rows.Next() {
+		var (
+			item      JournalTaskSummary
+			state     string
+			updatedAt string
+		)
+		if err := rows.Scan(
+			&item.TaskID,
+			&item.IssueNumber,
+			&item.IssueTitle,
+			&state,
+			&item.Runs,
+			&item.InputTokens,
+			&item.OutputTokens,
+			&item.CacheCreate,
+			&item.CacheRead,
+			&item.CostUSD,
+			&updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("扫描 journal 任务汇总失败: %w", err)
+		}
+		item.State = core.State(state)
+		if updatedAt != "" {
+			parsed, err := parseSQLiteTime(updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			item.UpdatedAt = parsed
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历 journal 任务汇总失败: %w", err)
+	}
+	return items, nil
+}
+
+func (s *Store) ListTaskEventsBetween(start, end time.Time, limit int) ([]EventRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT task_id, event_type, detail, created_at
+		FROM task_events
+		WHERE created_at >= ? AND created_at < ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?
+	`, start, end, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读取任务事件失败: %w", err)
+	}
+	defer rows.Close()
+
+	var items []EventRecord
+	for rows.Next() {
+		var (
+			item      EventRecord
+			eventType string
+			createdAt string
+		)
+		if err := rows.Scan(&item.TaskID, &eventType, &item.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("扫描任务事件失败: %w", err)
+		}
+		item.EventType = core.EventType(eventType)
+		parsed, err := parseSQLiteTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parsed
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历任务事件失败: %w", err)
+	}
+	return items, nil
+}
+
 func (s *Store) init() error {
 	ddl := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (
@@ -411,6 +647,7 @@ func (s *Store) init() error {
 			cost_usd REAL DEFAULT 0,
 			duration_ms INTEGER DEFAULT 0,
 			rtk_enabled INTEGER DEFAULT 0,
+			prompt_file TEXT NOT NULL DEFAULT '',
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY(task_id) REFERENCES tasks(task_id)
 		)`,
@@ -423,6 +660,9 @@ func (s *Store) init() error {
 		}
 	}
 	if err := s.ensureTaskColumn("last_session_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureTokenUsageColumn("prompt_file", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
@@ -462,9 +702,17 @@ func scanTask(row scanner) (*core.Task, error) {
 }
 
 func (s *Store) ensureTaskColumn(name, columnDef string) error {
-	rows, err := s.db.Query(`PRAGMA table_info(tasks)`)
+	return s.ensureTableColumn("tasks", name, columnDef)
+}
+
+func (s *Store) ensureTokenUsageColumn(name, columnDef string) error {
+	return s.ensureTableColumn("token_usage", name, columnDef)
+}
+
+func (s *Store) ensureTableColumn(table, name, columnDef string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
-		return fmt.Errorf("读取 tasks 表结构失败: %w", err)
+		return fmt.Errorf("读取 %s 表结构失败: %w", table, err)
 	}
 	defer rows.Close()
 
@@ -478,19 +726,42 @@ func (s *Store) ensureTaskColumn(name, columnDef string) error {
 			pk         int
 		)
 		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultVal, &pk); err != nil {
-			return fmt.Errorf("扫描 tasks 表结构失败: %w", err)
+			return fmt.Errorf("扫描 %s 表结构失败: %w", table, err)
 		}
 		if columnName == name {
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("遍历 tasks 表结构失败: %w", err)
+		return fmt.Errorf("遍历 %s 表结构失败: %w", table, err)
 	}
-	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", name, columnDef)); err != nil {
-		return fmt.Errorf("补充 tasks.%s 字段失败: %w", name, err)
+	if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, columnDef)); err != nil {
+		return fmt.Errorf("补充 %s.%s 字段失败: %w", table, name, err)
 	}
 	return nil
+}
+
+func buildTimeRangeClause(column string, start, end time.Time) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if !start.IsZero() {
+		clauses = append(clauses, column+" >= ?")
+		args = append(args, start)
+	}
+	if !end.IsZero() {
+		clauses = append(clauses, column+" < ?")
+		args = append(args, end)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func dayBounds(day time.Time) (time.Time, time.Time) {
+	loc := day.Location()
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+	return start, start.Add(24 * time.Hour)
 }
 
 func parseSQLiteTime(value string) (time.Time, error) {

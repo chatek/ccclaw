@@ -119,14 +119,17 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 		if err != nil {
 			return err
 		}
-		prompt := rt.buildPrompt(fresh, target)
+		runOpts := rt.buildExecutionOptions(fresh, target)
 		fresh.State = core.StateRunning
 		if err := rt.store.UpsertTask(fresh); err != nil {
 			return err
 		}
 		_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
+		if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
+			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
+		}
 
-		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, prompt)
+		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
 		if result != nil && result.Pending {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
 			continue
@@ -242,6 +245,10 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 }
 
 func (rt *Runtime) Stats(out io.Writer) error {
+	return rt.StatsWithOptions(out, false)
+}
+
+func (rt *Runtime) StatsWithOptions(out io.Writer, showRTKComparison bool) error {
 	defer rt.store.Close()
 	summary, err := rt.store.TokenStats()
 	if err != nil {
@@ -297,7 +304,26 @@ func (rt *Runtime) Stats(out io.Writer) error {
 			title,
 		)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if !showRTKComparison {
+		return nil
+	}
+	comparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "RTK 对比:")
+	_, _ = fmt.Fprintf(out, "  RTK runs: %d\n", comparison.RTKRuns)
+	_, _ = fmt.Fprintf(out, "  Plain runs: %d\n", comparison.PlainRuns)
+	_, _ = fmt.Fprintf(out, "  RTK avg cost(USD): %.4f\n", comparison.RTKAvgCostUSD)
+	_, _ = fmt.Fprintf(out, "  Plain avg cost(USD): %.4f\n", comparison.PlainAvgCostUSD)
+	_, _ = fmt.Fprintf(out, "  RTK avg tokens: %.1f\n", comparison.RTKAvgTokens)
+	_, _ = fmt.Fprintf(out, "  Plain avg tokens: %.1f\n", comparison.PlainAvgTokens)
+	_, _ = fmt.Fprintf(out, "  Estimated savings: %.2f%%\n", comparison.SavingsPercent)
+	return nil
 }
 
 func (rt *Runtime) Status(out io.Writer) error {
@@ -543,6 +569,42 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 	return sb.String()
 }
 
+func (rt *Runtime) buildExecutionOptions(task *core.Task, target *config.TargetConfig) executor.RunOptions {
+	basePrompt := rt.buildPrompt(task, target)
+	opts := executor.RunOptions{Prompt: basePrompt}
+	if !rt.shouldResumeTask(task) {
+		return opts
+	}
+	opts.ResumeSessionID = task.LastSessionID
+	opts.Prompt = rt.buildResumePrompt(task, basePrompt)
+	return opts
+}
+
+func (rt *Runtime) shouldResumeTask(task *core.Task) bool {
+	if task == nil {
+		return false
+	}
+	if task.State != core.StateFailed {
+		return false
+	}
+	if task.RetryCount <= 0 || task.RetryCount >= core.MaxRetry {
+		return false
+	}
+	return strings.TrimSpace(task.LastSessionID) != ""
+}
+
+func (rt *Runtime) buildResumePrompt(task *core.Task, basePrompt string) string {
+	var sb strings.Builder
+	sb.WriteString("上次任务执行中断，请基于已有 session 上下文继续完成，不要从头重复分析。\n")
+	sb.WriteString(fmt.Sprintf("恢复 session_id: %s\n", task.LastSessionID))
+	if strings.TrimSpace(task.ErrorMsg) != "" {
+		sb.WriteString(fmt.Sprintf("上次失败原因: %s\n", task.ErrorMsg))
+	}
+	sb.WriteString("\n以下是原始任务提示词，继续执行时请保持同一交付边界：\n\n")
+	sb.WriteString(basePrompt)
+	return sb.String()
+}
+
 func (rt *Runtime) newExecutor() (*executor.Executor, error) {
 	timeout, err := time.ParseDuration(rt.cfg.Executor.Timeout)
 	if err != nil {
@@ -577,9 +639,11 @@ func (rt *Runtime) persistExecutionMetrics(task *core.Task, result *executor.Res
 	if err := rt.store.RecordTokenUsage(storage.TokenUsageRecord{
 		TaskID:     task.TaskID,
 		SessionID:  result.SessionID,
+		PromptFile: result.PromptFile,
 		Usage:      result.Usage,
 		CostUSD:    result.CostUSD,
 		DurationMS: result.Duration.Milliseconds(),
+		RTKEnabled: result.RTKEnabled,
 	}); err != nil {
 		return err
 	}
@@ -858,22 +922,22 @@ func systemdRepairHint(reason string, installed bool) string {
 	switch {
 	case strings.TrimSpace(reason) == "":
 		if installed {
-			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
 	case strings.Contains(reason, "未找到 systemctl"):
 		return "当前环境缺少 systemctl；请安装 systemd 组件，或改用 cron/none"
 	case isUserBusUnavailable(reason):
-		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer；若仍失败，请先确认 user bus 已建立"
+		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer；若仍失败，请先确认 user bus 已建立"
 	case strings.Contains(reason, "is-enabled"), strings.Contains(reason, "disabled"), strings.Contains(reason, "not-found"):
-		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
 	case strings.Contains(reason, "is-active"), strings.Contains(reason, "inactive"), strings.Contains(reason, "failed"):
-		return "请执行 systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer，并检查 journalctl --user -u ccclaw-ingest.service -u ccclaw-run.service -u ccclaw-patrol.service"
+		return "请执行 systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer，并检查 journalctl --user -u ccclaw-ingest.service -u ccclaw-run.service -u ccclaw-patrol.service -u ccclaw-journal.service"
 	default:
 		if installed {
 			return "请检查 user systemd 状态后重新执行 daemon-reload / enable --now"
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
 	}
 }
 
@@ -929,6 +993,8 @@ func (rt *Runtime) hasSystemdUnitFiles(unitDir string) bool {
 		"ccclaw-run.timer",
 		"ccclaw-patrol.service",
 		"ccclaw-patrol.timer",
+		"ccclaw-journal.service",
+		"ccclaw-journal.timer",
 	}
 	for _, name := range required {
 		if _, err := os.Stat(filepath.Join(unitDir, name)); err != nil {
@@ -942,7 +1008,7 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 	if err := requireCommand("systemctl"); err != nil {
 		return false, err.Error()
 	}
-	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer", "ccclaw-patrol.timer"}
+	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer", "ccclaw-patrol.timer", "ccclaw-journal.timer"}
 	for _, unit := range units {
 		if _, err := systemctlUser("is-enabled", unit); err != nil {
 			return false, err.Error()
@@ -951,7 +1017,7 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 			return false, err.Error()
 		}
 	}
-	return true, "ccclaw-ingest.timer, ccclaw-run.timer, ccclaw-patrol.timer 已启用且运行中"
+	return true, "ccclaw-ingest.timer, ccclaw-run.timer, ccclaw-patrol.timer, ccclaw-journal.timer 已启用且运行中"
 }
 
 func (rt *Runtime) detectCronEntries() (bool, string) {
@@ -1165,6 +1231,143 @@ func commandVersion(name string, args ...string) (string, error) {
 	}
 	line := strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
 	return line, nil
+}
+
+func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
+	defer rt.store.Close()
+	if day.IsZero() {
+		day = time.Now()
+	}
+	summary, err := rt.store.JournalDaySummary(day)
+	if err != nil {
+		return err
+	}
+	comparison, err := rt.store.RTKComparisonBetween(dayStart(day), dayEnd(day))
+	if err != nil {
+		return err
+	}
+	tasks, err := rt.store.JournalTaskSummaries(day)
+	if err != nil {
+		return err
+	}
+	events, err := rt.store.ListTaskEventsBetween(dayStart(day), dayEnd(day), 100)
+	if err != nil {
+		return err
+	}
+	path := rt.journalFilePath(day)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建 journal 目录失败: %w", err)
+	}
+	content := rt.renderJournal(day, summary, comparison, tasks, events)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("写入 journal 失败: %w", err)
+	}
+	_, _ = fmt.Fprintf(out, "journal 已生成: %s\n", path)
+	return nil
+}
+
+func (rt *Runtime) journalFilePath(day time.Time) string {
+	year := day.Format("2006")
+	month := day.Format("01")
+	username := journalUserName()
+	return filepath.Join(
+		rt.cfg.Paths.HomeRepo,
+		"kb",
+		"journal",
+		year,
+		month,
+		fmt.Sprintf("%s.%s.ccclaw_log.md", day.Format("2006.01.02"), username),
+	)
+}
+
+func (rt *Runtime) renderJournal(day time.Time, summary *storage.JournalDaySummary, comparison *storage.RTKComparison, tasks []storage.JournalTaskSummary, events []storage.EventRecord) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# ccclaw journal %s\n\n", day.Format("2006-01-02")))
+	sb.WriteString("## 日汇总\n\n")
+	sb.WriteString(fmt.Sprintf("- 任务触达数: %d\n", summary.TasksTouched))
+	sb.WriteString(fmt.Sprintf("- 启动任务数: %d\n", summary.Started))
+	sb.WriteString(fmt.Sprintf("- 完成任务数: %d\n", summary.Done))
+	sb.WriteString(fmt.Sprintf("- 失败任务数: %d\n", summary.Failed))
+	sb.WriteString(fmt.Sprintf("- 僵死任务数: %d\n", summary.Dead))
+	sb.WriteString(fmt.Sprintf("- 输入 tokens: %d\n", summary.InputTokens))
+	sb.WriteString(fmt.Sprintf("- 输出 tokens: %d\n", summary.OutputTokens))
+	sb.WriteString(fmt.Sprintf("- 缓存创建 tokens: %d\n", summary.CacheCreate))
+	sb.WriteString(fmt.Sprintf("- 缓存命中 tokens: %d\n", summary.CacheRead))
+	sb.WriteString(fmt.Sprintf("- 累计成本(USD): %.4f\n", summary.CostUSD))
+	sb.WriteString(fmt.Sprintf("- RTK 平均成本(USD): %.4f\n", comparison.RTKAvgCostUSD))
+	sb.WriteString(fmt.Sprintf("- 非 RTK 平均成本(USD): %.4f\n", comparison.PlainAvgCostUSD))
+	sb.WriteString(fmt.Sprintf("- 估算节省比例: %.2f%%\n", comparison.SavingsPercent))
+
+	sb.WriteString("\n## 任务摘要\n\n")
+	if len(tasks) == 0 {
+		sb.WriteString("- 当日无任务变更\n")
+	} else {
+		for _, item := range tasks {
+			sb.WriteString(fmt.Sprintf("- #%d `%s` 状态=`%s` runs=%d cost=%.4f tokens=%d/%d cache=%d/%d updated_at=%s\n",
+				item.IssueNumber,
+				item.IssueTitle,
+				item.State,
+				item.Runs,
+				item.CostUSD,
+				item.InputTokens,
+				item.OutputTokens,
+				item.CacheCreate,
+				item.CacheRead,
+				formatJournalTime(item.UpdatedAt),
+			))
+		}
+	}
+
+	sb.WriteString("\n## 巡查事件\n\n")
+	patrolEvents := filterPatrolEvents(events)
+	if len(patrolEvents) == 0 {
+		sb.WriteString("- 当日无巡查事件\n")
+	} else {
+		for _, event := range patrolEvents {
+			sb.WriteString(fmt.Sprintf("- %s [%s] %s %s\n",
+				formatJournalTime(event.CreatedAt),
+				event.EventType,
+				event.TaskID,
+				strings.TrimSpace(event.Detail),
+			))
+		}
+	}
+	return sb.String()
+}
+
+func filterPatrolEvents(events []storage.EventRecord) []storage.EventRecord {
+	filtered := make([]storage.EventRecord, 0, len(events))
+	for _, event := range events {
+		detail := strings.ToLower(strings.TrimSpace(event.Detail))
+		if strings.Contains(detail, "tmux") || strings.Contains(detail, "巡查") {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func journalUserName() string {
+	for _, key := range []string{"USER", "LOGNAME", "USERNAME"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return "unknown"
+}
+
+func formatJournalTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
+	return ts.Format(time.RFC3339)
+}
+
+func dayStart(day time.Time) time.Time {
+	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, day.Location())
+}
+
+func dayEnd(day time.Time) time.Time {
+	return dayStart(day).Add(24 * time.Hour)
 }
 
 func probeHTTP(ctx context.Context, rawURL, bearerToken string) error {

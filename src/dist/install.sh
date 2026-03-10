@@ -1001,6 +1001,8 @@ create_user_systemd_units() {
   local run_timer="$SYSTEMD_USER_DIR/ccclaw-run.timer"
   local patrol_service="$SYSTEMD_USER_DIR/ccclaw-patrol.service"
   local patrol_timer="$SYSTEMD_USER_DIR/ccclaw-patrol.timer"
+  local journal_service="$SYSTEMD_USER_DIR/ccclaw-journal.service"
+  local journal_timer="$SYSTEMD_USER_DIR/ccclaw-journal.timer"
   if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
     log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
     return 0
@@ -1072,6 +1074,28 @@ Description=Run ccclaw patrol every 2 minutes
 OnCalendar=*:0/2
 Persistent=true
 Unit=ccclaw-patrol.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+  cat > "$journal_service" <<UNIT
+[Unit]
+Description=ccclaw journal service
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/bin/ccclaw journal --config $CONFIG_FILE --env-file $ENV_FILE
+UNIT
+  cat > "$journal_timer" <<UNIT
+[Unit]
+Description=Run ccclaw journal every day at 23:50
+
+[Timer]
+OnCalendar=*-*-* 23:50:00
+Persistent=true
+Unit=ccclaw-journal.service
 
 [Install]
 WantedBy=timers.target
@@ -1356,7 +1380,7 @@ print_summary() {
     systemd)
       scheduler_step_6="6. 按需启用用户定时器:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
       scheduler_step_7="7. 若后续环境不适合 systemd --user，可改为手工写入 crontab 样板:
    */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
@@ -1367,7 +1391,7 @@ print_summary() {
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
       ;;
     none|*)
       scheduler_step_6="6. 当前调度模式为 none；如需后台调度，可手工写入 crontab:
@@ -1375,7 +1399,7 @@ print_summary() {
    */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
       ;;
   esac
   cat <<MSG
@@ -1404,6 +1428,8 @@ $result_title
   - ccclaw-run.timer
   - ccclaw-patrol.service
   - ccclaw-patrol.timer
+  - ccclaw-journal.service
+  - ccclaw-journal.timer
 - crontab: 默认不自动写入，仅提供样板
 
 建议下一步
