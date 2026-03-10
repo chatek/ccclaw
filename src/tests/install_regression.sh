@@ -98,6 +98,28 @@ prepare_dist() {
   [[ -x "$BIN_PATH" ]] || fail "缺少构建产物: $BIN_PATH"
 }
 
+create_fake_systemctl() {
+  local dir="$1"
+  local mode="${2:-showenv-fail}"
+  mkdir -p "$dir"
+  case "$mode" in
+    showenv-fail)
+      cat > "$dir/systemctl" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'Failed to connect to bus: No medium found\n' >&2
+  exit 1
+fi
+exit 0
+SCRIPT
+      ;;
+    *)
+      fail "未知 fake systemctl 模式: $mode"
+      ;;
+  esac
+  chmod 755 "$dir/systemctl"
+}
+
 test_first_install_and_idempotent_reinstall() {
   local sandbox app_dir home_repo task_repo xdg log1 log2 config_file env_file target_count gh_count
   sandbox="$(setup_sandbox first-install)"
@@ -193,6 +215,32 @@ test_systemd_degrade_preflight() {
   assert_matches "$log" 'dir_not_writable|user_bus_unavailable'
 }
 
+test_systemd_preflight_accepts_busless_deploy() {
+  local sandbox fakebin log
+  sandbox="$(setup_sandbox systemd-busless-deploy)"
+  fakebin="$sandbox/fakebin"
+  log="$sandbox/preflight.log"
+  create_fake_systemctl "$fakebin"
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --preflight-only \
+      --home-repo "$sandbox/home-repo" \
+      --home-repo-mode init \
+      --task-repo-mode none \
+      --scheduler auto
+
+  assert_contains "$log" '请求=auto, 生效=systemd'
+  assert_contains "$log" '未直连 user bus'
+  assert_contains "$log" '手工启用 timer'
+}
+
 test_local_repo_without_origin_requires_repo() {
   local sandbox task_repo log
   sandbox="$(setup_sandbox local-no-origin)"
@@ -252,6 +300,8 @@ main() {
   log "已通过: 首装 + 幂等重装"
   test_systemd_degrade_preflight
   log "已通过: systemd 降级体检"
+  test_systemd_preflight_accepts_busless_deploy
+  log "已通过: systemd 无 user bus 仍允许部署"
   test_local_repo_without_origin_requires_repo
   log "已通过: local 无 origin 失败路径"
   test_remote_repo_path_must_stay_within_clone_root

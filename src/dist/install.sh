@@ -44,7 +44,9 @@ CLAUDE_WRAPPER=""
 SCHEDULER_EFFECTIVE=""
 SCHEDULER_REASON="未判定"
 SYSTEMD_READY=0
+SYSTEMD_CONTROL_READY=0
 SYSTEMD_CHECK_STATUS="未探查"
+SYSTEMD_CONTROL_STATUS="未探查"
 GH_AUTH_STATUS="未探查"
 GH_TOKEN_DETECTED=""
 CLAUDE_AUTH_READY=0
@@ -483,31 +485,38 @@ probe_gh_auth() {
 probe_systemd_user() {
   local dir_owner=""
   SYSTEMD_READY=0
+  SYSTEMD_CONTROL_READY=0
   if [[ -d "$SYSTEMD_USER_DIR" ]]; then
     dir_owner="$(stat -c '%U' "$SYSTEMD_USER_DIR" 2>/dev/null || true)"
   fi
   if [[ "$SCHEDULER" == "cron" || "$SCHEDULER" == "none" ]]; then
     SYSTEMD_CHECK_STATUS="skip(${SCHEDULER})"
+    SYSTEMD_CONTROL_STATUS="skip(${SCHEDULER})"
     return 0
   fi
   if ! have systemctl; then
     SYSTEMD_CHECK_STATUS="missing_systemctl"
-    return 0
-  fi
-  if ! systemctl --user show-environment >/dev/null 2>&1; then
-    SYSTEMD_CHECK_STATUS="user_bus_unavailable"
+    SYSTEMD_CONTROL_STATUS="missing_systemctl"
     return 0
   fi
   if [[ -d "$SYSTEMD_USER_DIR" && -n "$dir_owner" && "$dir_owner" != "$(id -un)" ]]; then
     SYSTEMD_CHECK_STATUS="dir_owner=${dir_owner}"
+    SYSTEMD_CONTROL_STATUS="skip(dir_owner)"
     return 0
   fi
   if ! path_writable_or_creatable "$SYSTEMD_USER_DIR"; then
     SYSTEMD_CHECK_STATUS="dir_not_writable"
+    SYSTEMD_CONTROL_STATUS="skip(dir_not_writable)"
     return 0
   fi
   SYSTEMD_READY=1
   SYSTEMD_CHECK_STATUS="ready"
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    SYSTEMD_CONTROL_READY=1
+    SYSTEMD_CONTROL_STATUS="ready"
+  else
+    SYSTEMD_CONTROL_STATUS="user_bus_unavailable"
+  fi
 }
 
 decide_scheduler() {
@@ -515,7 +524,11 @@ decide_scheduler() {
     systemd)
       if [[ "$SYSTEMD_READY" -eq 1 ]]; then
         SCHEDULER_EFFECTIVE="systemd"
-        SCHEDULER_REASON="user systemd 就绪"
+        if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+          SCHEDULER_REASON="user systemd 可部署，且当前会话可直接控制"
+        else
+          SCHEDULER_REASON="user systemd 单元可部署，但当前会话未直连 user bus，安装后需手工启用 timer"
+        fi
       else
         fail "已显式指定 --scheduler systemd，但当前环境不可用: $SYSTEMD_CHECK_STATUS"
       fi
@@ -523,7 +536,11 @@ decide_scheduler() {
     auto)
       if [[ "$SYSTEMD_READY" -eq 1 ]]; then
         SCHEDULER_EFFECTIVE="systemd"
-        SCHEDULER_REASON="自动选择 user systemd"
+        if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+          SCHEDULER_REASON="自动选择 user systemd"
+        else
+          SCHEDULER_REASON="自动选择 user systemd；当前会话未直连 user bus，安装后需手工启用 timer"
+        fi
       else
         SCHEDULER_EFFECTIVE="none"
         SCHEDULER_REASON="user systemd 不可用，自动降级为 none ($SYSTEMD_CHECK_STATUS)"
@@ -549,7 +566,13 @@ print_preflight() {
     *) gh_line="WARN: gh 状态未知" ;;
   esac
   case "$SYSTEMD_CHECK_STATUS" in
-    ready) systemd_line="OK: user systemd 可用" ;;
+    ready)
+      if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+        systemd_line="OK: user systemd 可部署，当前会话可直接控制"
+      else
+        systemd_line="WARN: user systemd 单元可部署，但当前会话未直连 user bus；安装后需在登录会话中手工启用 timer"
+      fi
+      ;;
     skip*) systemd_line="OK: 已跳过 user systemd 探查，当前调度模式 $SCHEDULER" ;;
     *) systemd_line="WARN: user systemd 不可直接使用($SYSTEMD_CHECK_STATUS)，将按 $SCHEDULER_EFFECTIVE 继续" ;;
   esac
