@@ -26,4 +26,4 @@ if [[ "$REFRESH_CLAUDE_ASSETS" == "1" ]]; then
   echo "plugins/skills 刷新依赖 install.sh 中的 Claude 资产配置逻辑；若 Claude 当前不可用，此步会被跳过。"
 fi
 
-echo "升级完成。若使用 user systemd，请执行: systemctl --user daemon-reload && systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer"
+echo "升级完成。若使用 user systemd，请执行: systemctl --user daemon-reload && systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer"

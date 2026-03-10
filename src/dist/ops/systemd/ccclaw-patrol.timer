@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ccclaw patrol every 2 minutes (user)
+
+[Timer]
+OnCalendar=*:0/2
+Persistent=true
+Unit=ccclaw-patrol.service
+
+[Install]
+WantedBy=timers.target
