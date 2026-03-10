@@ -586,9 +586,16 @@ configure_claude_assets() {
 }
 
 print_summary() {
+  local installed_version="unknown"
+  local trigger_mode="systemd --user"
+  if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
+    installed_version="$("$APP_DIR/bin/ccclaw" -V 2>/dev/null || echo unknown)"
+  fi
   cat <<MSG
 安装完成。
 
+当前主机部署成果
+- 版本: $installed_version
 - 程序目录: $APP_DIR
 - 本体仓库: $HOME_REPO
 - 可执行文件: $APP_DIR/bin/ccclaw
@@ -596,22 +603,42 @@ print_summary() {
 - 隐私配置: $ENV_FILE
 - 普通配置: $CONFIG_FILE
 - 本地命令链接: $BIN_LINK
-- user systemd: $SYSTEMD_USER_DIR
+- 默认触发方式: $trigger_mode
+- user systemd 单元目录: $SYSTEMD_USER_DIR
+- user systemd 单元:
+  - ccclaw-ingest.service
+  - ccclaw-ingest.timer
+  - ccclaw-run.service
+  - ccclaw-run.timer
+- crontab: 默认不自动写入，仅提供样板
 
-建议下一步:
+建议下一步
 1. 检查 $ENV_FILE 中的敏感项是否齐全
 2. 检查 $CONFIG_FILE 中的 repo/path 是否正确
 3. 进入本体仓库: cd $HOME_REPO && git status
-4. 启用用户定时器:
+4. 运行一次体检:
+   $APP_DIR/bin/ccclaw doctor --config $CONFIG_FILE --env-file $ENV_FILE
+5. 绑定目标仓库:
+   $APP_DIR/bin/ccclaw target add --config $CONFIG_FILE --repo owner/repo --path /abs/path --default
+6. 按需启用用户定时器:
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
-5. 运行一次体检:
-   $APP_DIR/bin/ccclaw doctor --config $CONFIG_FILE --env-file $ENV_FILE
-6. 如需后续绑定目标仓库:
-   $APP_DIR/bin/ccclaw target add --config $CONFIG_FILE --repo owner/repo --path /abs/path
-7. 若 sudo 无口令未开启，请手工执行:
+7. 若当前环境不适合 systemd --user，可改为手工写入 crontab 样板:
+   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
+   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE
+8. 若 sudo 无口令未开启，请手工执行:
    sudo visudo
    # 为当前用户追加 NOPASSWD 规则
+
+日常使用流程
+1. 绑定工作任务仓库
+2. 在控制仓库创建或维护 Issue
+3. 检验工作成果，并继续在 Issue 中回复交流
+
+开源协作流程
+1. 管理员创建的 Issue 会自动进入执行判定
+2. 外部成员 Issue 默认只巡查与讨论，不自动执行
+3. 值得接受的提案，由管理员评论 /ccclaw approve 后进入执行
 MSG
 }
 

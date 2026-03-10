@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/41490/ccclaw/internal/app"
+	"github.com/41490/ccclaw/internal/buildinfo"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -22,16 +23,25 @@ func newRootCmd() *cobra.Command {
 	var configPath string
 	var envFile string
 	var runLimit int
+	var showVersion bool
 
 	rootCmd := &cobra.Command{
 		Use:           "ccclaw",
 		Short:         "ccclaw 长期异步任务执行器",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if showVersion {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), buildinfo.Short())
+				return nil
+			}
+			return cmd.Help()
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&configPath, "config", defaultConfigPath(), "TOML 配置文件路径")
 	rootCmd.PersistentFlags().StringVar(&envFile, "env-file", defaultEnvFilePath(), "固定 .env 隐私配置文件路径")
+	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "ingest",
@@ -178,6 +188,14 @@ func newRootCmd() *cobra.Command {
 	_ = targetDisableCmd.MarkFlagRequired("repo")
 	targetCmd.AddCommand(targetDisableCmd)
 	rootCmd.AddCommand(targetCmd)
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "显示版本",
+		Run: func(cmd *cobra.Command, args []string) {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), buildinfo.Short())
+		},
+	})
 
 	return rootCmd
 }

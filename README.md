@@ -120,6 +120,26 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
 ~/.ccclaw/bin/ccclaw target disable --repo owner/repo
 ```
 
+## release 发布
+
+发布统一从 `src/Makefile` 进入：
+
+```bash
+cd src
+make package
+make checksum
+make sign GPG_KEY_ID=<gpg-key-id> MINISIGN_KEY_FILE=/path/to/minisign.key
+make release GPG_KEY_ID=<gpg-key-id> MINISIGN_KEY_FILE=/path/to/minisign.key
+```
+
+约束：
+
+- release tag 使用 `yy.mm.dd.HHMM`
+- 首轮默认平台为 `linux/amd64`
+- release 资产至少包含 `tar.gz`、`SHA256SUMS`、`gpg` 签名与 `minisign` 签名
+- 开发机本地归档目录固定为 `/ops/logs/ccclaw/`，不纳入版本控制
+- 若 minisign 私钥无密码保护，可追加 `MINISIGN_UNPROTECTED=1`
+
 ## 工程报告
 
 工程报告统一落在 `docs/reports/`，文件命名约定：

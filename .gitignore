@@ -31,6 +31,12 @@ src/dist/.env
 src/dist/bin/
 src/bin/
 src/.cache/
+src/.build/
+src/.release/
+*.tar.gz
+*.minisig
+*.asc
+SHA256SUMS
 
 # Editor/IDE
 # .idea/
