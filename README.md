@@ -36,7 +36,7 @@ O     O     O     |  oo o   o   o
 
 - **省 token**：把轮询、门禁、调度、目录治理、日志归档交给本地程序和 `systemd`，把高价值 token 留给真正需要 Claude Code 动手的阶段。
 - **Issue 驱动**：直接复用开源项目最自然的协作入口，不额外引入新的任务系统。
-- **Linux 原生**：默认依赖 `systemd --user`，不强绑 Docker、K8s、外部 SaaS 控制面。
+- **Linux 原生**：优先使用 `systemd --user`，异常时允许降级为 `cron` 样板或 `none`，不强绑 Docker、K8s、外部 SaaS 控制面。
 - **记忆与程序分离**：程序树固定在 `~/.ccclaw`，本体记忆仓库固定在 `/opt/ccclaw`，升级不覆盖用户记忆。
 - **安装边界清晰**：敏感信息只进 `.env`，普通配置只进 `.toml`，运行时不依赖调用者预先 `export` 环境变量。
 - **开源协作可控**：管理员 Issue 自动执行；非管理员 Issue 必须管理员评论 `/ccclaw approve` 后才进入执行。
@@ -59,7 +59,7 @@ O     O     O     |  oo o   o   o
 - 默认本体仓库：`/opt/ccclaw`
 - 本体仓库模式：`init | remote | local`
 - 任务仓库模式：`none | remote | local`
-- 默认调度方式：`systemd --user`
+- 默认调度方式：`auto`，优先 `systemd --user`
 - 版本命名：`yy.mm.dd.HHMM`
 
 ## 工作拓扑
@@ -107,6 +107,273 @@ systemd --user timers
     └── rfcs/
 ```
 
+## 三类仓库的职责分工
+
+`ccclaw` 运行时会同时涉及三类仓库。它们可以有关联，但职责不同，不应混为一谈。
+
+### 控制仓库是什么
+
+控制仓库对应 `config.toml` 中的 `github.control_repo`。
+
+它的主要作用不是承载业务代码，而是作为 `ccclaw` 的控制平面入口：
+
+- Issue 是任务事实源
+- Comment 是审批、追问、补充上下文和回执的载体
+- admin 权限检查基于这个仓库的 GitHub 权限
+- `/ccclaw approve` 等门禁命令也发生在这里
+- 执行结果、阻塞原因、审计痕迹最终都会回到这里
+
+可以把控制仓库理解为：
+
+- **任务入口**
+- **审计入口**
+- **协作入口**
+- **门禁入口**
+
+控制仓库最适合具备以下特征：
+
+- 管理员权限边界清晰
+- 长期稳定存在
+- 适合集中追踪自动化任务
+- 不一定等于实际被修改的代码仓库
+
+单仓库场景下，控制仓库也可以与任务仓库是同一个仓库；但在多项目协作中，通常更推荐把它单独作为控制面仓库。
+
+### 本体仓库是什么
+
+本体仓库对应 `paths.home_repo`，默认是 `/opt/ccclaw`。
+
+它不是程序安装目录，也不是业务代码仓库。它的职责是保存 `ccclaw` 的长期记忆和工程沉淀：
+
+- `kb/` 中的长期知识、设计、日报、skills
+- `docs/` 中的计划、报告、RFC
+- 随机器持续演化、但不应被程序升级覆盖的内容
+
+之所以把本体仓库单独拆出来，是为了解决两个长期问题：
+
+1. **程序升级不应覆盖记忆**
+2. **跨任务、跨仓库的知识不应散落在每个业务仓库里**
+
+也就是说：
+
+- `~/.ccclaw` 是程序树
+- `/opt/ccclaw` 是记忆树
+
+这两个目录故意分离，是 `ccclaw` 当前设计的关键边界。
+
+### 任务仓库是什么
+
+任务仓库对应 `config.toml` 中的 `[[targets]]`。
+
+它们才是 `ccclaw` 真正要进入、检查、修改、提交成果的工作仓库。一个 `target` 至少包含：
+
+- `repo`
+- `local_path`
+- 可选 `kb_path`
+- 可选 `disabled`
+
+任务仓库的职责包括：
+
+- 承载实际代码、文档或配置修改
+- 作为运行时路由的目标
+- 让同一个控制仓库下的多个项目可以共用一套编排入口
+
+简化理解：
+
+- 控制仓库负责“接任务”
+- 本体仓库负责“存记忆”
+- 任务仓库负责“干活”
+
+## 本体仓库模式说明
+
+安装阶段本体仓库支持 `init | remote | local` 三种模式。
+
+### `init`
+
+含义：
+
+- 在目标目录初始化一个新的 git 仓库
+- 用 release 内置的 `dist/kb/` 初始树进行种子化
+
+适合场景：
+
+- 第一次安装 `ccclaw`
+- 还没有现成的本体记忆仓库
+- 希望先在当前机器快速落一个本地封闭仓库
+
+这是默认、也是最稳妥的起步方式。
+
+### `remote`
+
+含义：
+
+- 从远程仓库 clone 到本地 `home_repo`
+- 再补齐 `kb/` 与必要初始化内容
+
+适合场景：
+
+- 你已经有一个专门保存 `ccclaw` 记忆的私有仓库
+- 需要在多台机器之间共享同一套本体记忆
+- 希望本体仓库天然具备异地备份和远程同步能力
+
+通常更推荐远程仓库使用私有仓库，而不是公开暴露长期记忆与内部报告。
+
+### `local`
+
+含义：
+
+- 接管一个本机已存在的 git 仓库
+- 不重新 clone，只在当前路径补齐 `ccclaw` 需要的目录与契约文件
+
+适合场景：
+
+- 你已经手工 clone 了本体仓库
+- 你有自定义目录布局，不想让安装脚本重新决定路径
+- 你正在迁移旧环境，希望平滑接入现有仓库
+
+### 如何选择
+
+- **第一次安装，先求稳**：选 `init`
+- **已经有专门的远程记忆仓库**：选 `remote`
+- **本地已有仓库且你明确知道路径与内容**：选 `local`
+
+## 任务仓库模式说明
+
+安装阶段任务仓库支持 `none | remote | local`。
+
+### `none`
+
+含义：
+
+- 本轮安装只完成程序树和本体仓库，不立即绑定任何工作仓库
+
+适合场景：
+
+- 你想先把 `ccclaw` 装起来，再慢慢添加 target
+- 你还没决定第一批要接入哪些业务仓库
+- 你希望安装与项目接管分两步完成
+
+### `remote`
+
+含义：
+
+- 从远程仓库 clone 到本地路径
+- 然后自动写入 `config.toml` 的 `[[targets]]`
+
+适合场景：
+
+- 当前机器上还没有这个任务仓库
+- 你希望安装时顺手把首个工作仓库接进来
+- 远程仓库会默认 clone 到 `/opt/src/3claw/owner/repo`
+- 若显式指定 `--task-repo-path`，也必须位于 `/opt/src/3claw/` 入口下
+
+### `local`
+
+含义：
+
+- 直接接管本机已有的业务仓库路径
+- 不重新 clone，只写入 `targets`
+
+适合场景：
+
+- 仓库已经在本机存在
+- 你有自定义 workspace / monorepo 布局
+- 你不希望安装脚本改动已有 clone 位置
+
+### 如何选择
+
+- **先把系统装好再说**：选 `none`
+- **首个业务仓库还没 clone 到本机**：选 `remote`
+- **业务仓库已经在本机**：选 `local`
+
+## 多任务仓库如何配置
+
+`ccclaw` 当前就是通过 `[[targets]]` 支持多个任务仓库的。
+
+### 路由规则
+
+运行时路由顺序是固定的：
+
+1. Issue body 中若显式写了 `target_repo: owner/repo`，优先使用它
+2. 否则，若配置了 `default_target`，就走默认 target
+3. 若既没有 `target_repo:`，也没有 `default_target`：
+   - 没有任何 enabled target：任务阻塞
+   - 有多个 enabled target 但没有默认值：任务同样阻塞，不会猜测
+
+这意味着多仓库场景下，最稳的做法是：
+
+- 明确设置一个 `default_target`
+- 对需要跨仓库执行的 Issue，在正文里显式写 `target_repo: owner/repo`
+
+### 用命令追加多个任务仓库
+
+安装完成后，可以继续添加多个 target：
+
+```bash
+ccclaw target add --repo owner/repo-a --path /work/repo-a --default
+ccclaw target add --repo owner/repo-b --path /work/repo-b
+ccclaw target add --repo owner/repo-c --path /work/repo-c --kb-path /work/shared-kb
+ccclaw target list
+```
+
+禁用某个 target：
+
+```bash
+ccclaw target disable --repo owner/repo-b
+```
+
+当前还没有 `target remove`，因此“停用但保留记录”是当前可用方式。
+
+### `config.toml` 示例
+
+```toml
+default_target = "owner/repo-a"
+
+[github]
+control_repo = "owner/ccclaw-control"
+
+[paths]
+app_dir = "~/.ccclaw"
+home_repo = "/opt/ccclaw"
+state_db = "~/.ccclaw/var/state.db"
+log_dir = "~/.ccclaw/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "~/.ccclaw/.env"
+
+[[targets]]
+repo = "owner/repo-a"
+local_path = "/opt/src/3claw/owner/repo-a"
+kb_path = "/opt/ccclaw/kb"
+
+[[targets]]
+repo = "owner/repo-b"
+local_path = "/opt/src/3claw/owner/repo-b"
+
+[[targets]]
+repo = "owner/repo-c"
+local_path = "/srv/work/repo-c"
+kb_path = "/srv/work/shared-kb"
+disabled = true
+```
+
+说明：
+
+- `default_target` 只能指向一个存在且未禁用的 target
+- `repo` 不能重复
+- `local_path` 必填
+- `kb_path` 为空时会继承全局 `paths.kb_dir`
+- `disabled = true` 的 target 不参与路由
+
+### Issue 中显式指定目标仓库
+
+在多任务仓库场景，建议在 Issue 正文中显式加上：
+
+```text
+target_repo: owner/repo-b
+```
+
+这样可以把任务准确路由到指定仓库，而不是依赖默认值。
+
 ## 为什么是 CCClaw
 
 同类 agent/automation 项目通常会优先强调多模型、前端面板、聊天协作或云端控制面；`ccclaw` 当前阶段反过来，先把开源协作里最难稳定的几个基线收口：
@@ -140,7 +407,7 @@ systemd --user timers
 ### 主机条件
 
 - Linux 主机
-- 建议存在 `systemd --user`
+- 建议存在 `systemd --user`；若不可用，安装器会自动降级并保留 `cron` 样板
 - 建议当前用户具备 `sudo` 能力，以便安装基础依赖与写入 `/opt/ccclaw`
 - 推荐预装或允许安装：`git`、`gh`、`curl`、`wget`、`rg`、`sqlite3`、`golang`
 
@@ -193,7 +460,8 @@ bash install.sh
 - 本体仓库模式：`init | remote | local`
 - 本体仓库目录，默认 `/opt/ccclaw`
 - 任务仓库模式：`none | remote | local`
-- `GH_TOKEN`
+- 调度器模式：`auto | systemd | cron | none`
+- `GH_TOKEN`，若本机已 `gh auth login`，会优先直接复用 `gh auth token`
 - 可选的 Claude 代理配置
 
 ### 4. 安装脚本会做什么
@@ -201,15 +469,16 @@ bash install.sh
 `install.sh` 当前会按真实实现执行以下动作：
 
 - 探查 `claude`、`gh`、`rg`、`sqlite3`、`rtk`、`git`、`node`、`npm`、`uv`
+- 安装前体检 `gh auth`、`systemd --user`、调度降级条件与 remote clone 入口
 - 探查 Claude 官方安装通道可达性
 - 在需要时安装基础系统依赖
 - 安装 `rtk`，并生成 `ccclaude` 包装器
 - 初始化或接管本体仓库
-- 生成固定 `.env`
-- 生成固定 `config.toml`
+- 优先复用已有 `.env`，并在缺失时回填 `gh auth token`
+- 生成带中文注释的 `config.toml`
 - 安装 `~/.ccclaw/bin/ccclaw`
 - 安装 `install.sh` 与 `upgrade.sh`
-- 安装 `systemd --user` unit 文件
+- 仅在可用时安装 `systemd --user` unit 文件；否则降级继续
 - 按需绑定任务仓库并写入 `[[targets]]`
 - 输出安装完成摘要、后续命令和日常工作流程
 
@@ -251,7 +520,7 @@ bash install.sh \
   --task-repo-mode remote \
   --task-repo-remote owner/work-repo \
   --task-repo owner/work-repo \
-  --task-repo-path ~/work-repo
+  --task-repo-path /opt/src/3claw/owner/work-repo
 ```
 
 ### 路径 E：非交互安装，并绑定本地任务仓库
@@ -275,7 +544,7 @@ bash install.sh \
 - 已完成对应登录
 - 安装脚本会探查当前本机 `claude` 状态
 
-如果本机未安装 `claude`，交互安装时会提示是否执行官方安装脚本；非交互模式下只有显式传入 `--install-claude` 才会自动安装。
+如果本机未安装 `claude`，交互安装时会提示是否执行官方安装脚本；非交互模式下只有显式传入 `--install-claude` 才会自动安装。若本机已完成 Claude 登录，安装器会直接复用当前 CLI 会话，不强制要求填写 `ANTHROPIC_API_KEY`。
 
 ### 方式 2：代理 API 模式
 
@@ -363,9 +632,11 @@ CLI 约定：
 这里会记录：
 
 - 控制仓库
+- 本体仓库
 - 路径拓扑
 - 执行器命令
 - 审批门禁
+- `default_target`
 - `targets`
 
 ## 日常使用流程
@@ -440,7 +711,7 @@ src/dist/
 ## 项目优势总结
 
 - 对开源维护者友好：直接接 GitHub Issue，而不是要求团队切换协作入口
-- 对 Linux 主机友好：默认 `systemd --user`，不强迫引入额外编排系统
+- 对 Linux 主机友好：优先 `systemd --user`，异常时可降级，不强迫引入额外编排系统
 - 对 token 预算友好：把确定性流程收敛到本地程序与固定目录
 - 对长期项目友好：记忆树、报告、计划、技能模板都有固定落点
 - 对升级友好：程序树和本体仓库分离，降低误覆盖风险

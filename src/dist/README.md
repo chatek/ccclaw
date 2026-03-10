@@ -24,9 +24,11 @@ bash install.sh
 - 本体仓库：`/opt/ccclaw`
 - 本体仓库模式：`init|remote|local`
 - 任务仓库模式：`none|remote|local`
+- remote 任务仓库固定 clone 入口：`/opt/src/3claw/owner/repo`
+- 调度模式：`auto|systemd|cron|none`
 
 安装完成后，默认建议：
 
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
 2. 检查本体仓库与任务仓库绑定结果
-3. 手工启用 `systemd --user` timer
+3. 若体检结果为 `systemd`，再手工启用 `systemd --user` timer；否则按摘要中的 `cron` 样板处理

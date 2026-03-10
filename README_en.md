@@ -24,7 +24,7 @@ Chinese is the default documentation. See [README.md](README.md) for the primary
 
 - **GitHub Issues** as the task source of truth
 - **Claude Code** as the execution engine
-- **systemd --user** as the background scheduler
+- **systemd --user** as the preferred background scheduler
 - A dedicated **home knowledge repository** as long-term memory
 
 The current repository state has reached the `phase0.4` milestone: the first installable release flow is already in place.
@@ -40,7 +40,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 
 ## Key Strengths
 
-- **Token-aware by design**: deterministic work stays in local CLI logic and `systemd`; Claude Code is used when real execution is needed.
+- **Token-aware by design**: deterministic work stays in local CLI logic and `systemd`/cron guidance; Claude Code is used when real execution is needed.
 - **Issue-driven workflow**: it fits the way open-source teams already work.
 - **Linux-first**: no Docker, Kubernetes, or hosted control plane required for the default setup.
 - **Program tree and memory tree are separated**: upgrades do not overwrite user memory under `/opt/ccclaw`.
@@ -64,7 +64,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 - Default home repo: `/opt/ccclaw`
 - Home repo modes: `init | remote | local`
 - Task repo modes: `none | remote | local`
-- Default scheduler: `systemd --user`
+- Default scheduler: `auto`, preferring `systemd --user`
 - Version format: `yy.mm.dd.HHMM`
 
 ## Topology
@@ -112,6 +112,273 @@ Default installed layout:
     └── rfcs/
 ```
 
+## Repository Roles
+
+`ccclaw` works with three different repository roles at runtime. They may be related, but they serve different purposes.
+
+### What is the control repository
+
+The control repository is `github.control_repo` in `config.toml`.
+
+Its main job is not to hold the working code. It acts as the control plane entry for `ccclaw`:
+
+- Issues are the task source of truth
+- comments carry approvals, follow-ups, extra context, and execution feedback
+- admin permission checks are evaluated against this repository
+- `/ccclaw approve` and similar gate commands happen here
+- execution results, blocked reasons, and audit traces flow back here
+
+You can think of the control repository as:
+
+- **task entrypoint**
+- **audit entrypoint**
+- **collaboration entrypoint**
+- **permission gate entrypoint**
+
+Best fit for a control repository:
+
+- clear admin boundary
+- long-lived and stable
+- suitable for centralized automation tracking
+- not necessarily the same repository that gets modified
+
+In a single-repo setup, the control repository can be the same as a task repository. In multi-project setups, it is usually cleaner to keep it separate.
+
+### What is the home repository
+
+The home repository is `paths.home_repo`, defaulting to `/opt/ccclaw`.
+
+It is neither the program install tree nor a business code repository. Its job is to keep long-term `ccclaw` memory and project artifacts:
+
+- long-term knowledge, designs, journals, and skills in `kb/`
+- plans, reports, and RFCs in `docs/`
+- machine-local evolving knowledge that upgrades must not overwrite
+
+This separation exists to solve two long-term problems:
+
+1. **program upgrades must not overwrite memory**
+2. **cross-task and cross-repo knowledge should not be scattered into every business repository**
+
+In short:
+
+- `~/.ccclaw` is the program tree
+- `/opt/ccclaw` is the memory tree
+
+That separation is a core boundary in the current design.
+
+### What is a task repository
+
+Task repositories are the `[[targets]]` entries in `config.toml`.
+
+These are the actual working repositories that `ccclaw` enters, inspects, modifies, and reports against. A target contains at least:
+
+- `repo`
+- `local_path`
+- optional `kb_path`
+- optional `disabled`
+
+Task repositories are responsible for:
+
+- holding the real code, docs, or config to be changed
+- serving as the runtime routing destination
+- allowing one control repository to orchestrate multiple projects
+
+A simple mental model:
+
+- the control repository **receives tasks**
+- the home repository **stores memory**
+- task repositories **do the work**
+
+## Home Repository Modes
+
+The installer supports `init | remote | local` for the home repository.
+
+### `init`
+
+Meaning:
+
+- initialize a new git repository at the target path
+- seed it with the built-in `dist/kb/` initial structure
+
+Use it when:
+
+- this is your first `ccclaw` install
+- you do not already have a memory repository
+- you want the fastest local-only bootstrap
+
+This is the default and safest starting point.
+
+### `remote`
+
+Meaning:
+
+- clone a remote repository into the local `home_repo`
+- then backfill required `kb/` and bootstrap content
+
+Use it when:
+
+- you already have a dedicated remote memory repository
+- you want to share the same long-term memory across machines
+- you want backup and sync through git from day one
+
+In practice, a private remote repository is usually the right choice here.
+
+### `local`
+
+Meaning:
+
+- attach to an already existing local git repository
+- do not clone again; just add the required `ccclaw` directories and contract files
+
+Use it when:
+
+- you already cloned the home repository manually
+- you have a custom directory layout
+- you are migrating from an older setup and want a controlled takeover
+
+### How to choose
+
+- **first install, lowest risk**: `init`
+- **already have a dedicated remote memory repo**: `remote`
+- **already have the repo locally and know exactly what you are doing**: `local`
+
+## Task Repository Modes
+
+The installer supports `none | remote | local` for task repositories.
+
+### `none`
+
+Meaning:
+
+- install the program tree and home repository now, but do not bind any work repository yet
+
+Use it when:
+
+- you want to bring up `ccclaw` first and add targets later
+- you have not decided which repositories to manage yet
+- you prefer installation and repo onboarding as separate steps
+
+### `remote`
+
+Meaning:
+
+- clone the remote repository into a local path
+- automatically write it into `[[targets]]`
+
+Use it when:
+
+- the task repository is not yet cloned on this machine
+- you want the installer to onboard the first work repository
+- the default clone path `/opt/src/3claw/owner/repo` works for you
+- if you pass `--task-repo-path`, it still needs to stay under `/opt/src/3claw/`
+
+### `local`
+
+Meaning:
+
+- attach to an already existing local work repository
+- do not clone again; only write the target config
+
+Use it when:
+
+- the repository already exists on this machine
+- you have a custom workspace or monorepo layout
+- you do not want the installer to move or recreate local clones
+
+### How to choose
+
+- **install first, bind later**: `none`
+- **first work repo is not on this machine yet**: `remote`
+- **the work repo already exists locally**: `local`
+
+## Multiple Task Repositories
+
+`ccclaw` supports multiple task repositories through `[[targets]]`.
+
+### Routing rules
+
+Runtime routing follows a fixed order:
+
+1. if the Issue body contains `target_repo: owner/repo`, that wins
+2. otherwise, if `default_target` is configured, it is used
+3. otherwise, if neither is present:
+   - no enabled targets: the task is blocked
+   - enabled targets exist but no default is set: the task is also blocked; `ccclaw` does not guess
+
+For multi-repo setups, the safe practice is:
+
+- set one explicit `default_target`
+- add `target_repo: owner/repo` in Issues that must run against a non-default repository
+
+### Add multiple targets by command
+
+After installation, keep adding targets as needed:
+
+```bash
+ccclaw target add --repo owner/repo-a --path /work/repo-a --default
+ccclaw target add --repo owner/repo-b --path /work/repo-b
+ccclaw target add --repo owner/repo-c --path /work/repo-c --kb-path /work/shared-kb
+ccclaw target list
+```
+
+Disable a target:
+
+```bash
+ccclaw target disable --repo owner/repo-b
+```
+
+There is no `target remove` yet, so "disable but keep the record" is the current workflow.
+
+### `config.toml` example
+
+```toml
+default_target = "owner/repo-a"
+
+[github]
+control_repo = "owner/ccclaw-control"
+
+[paths]
+app_dir = "~/.ccclaw"
+home_repo = "/opt/ccclaw"
+state_db = "~/.ccclaw/var/state.db"
+log_dir = "~/.ccclaw/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "~/.ccclaw/.env"
+
+[[targets]]
+repo = "owner/repo-a"
+local_path = "/opt/src/3claw/owner/repo-a"
+kb_path = "/opt/ccclaw/kb"
+
+[[targets]]
+repo = "owner/repo-b"
+local_path = "/opt/src/3claw/owner/repo-b"
+
+[[targets]]
+repo = "owner/repo-c"
+local_path = "/srv/work/repo-c"
+kb_path = "/srv/work/shared-kb"
+disabled = true
+```
+
+Notes:
+
+- `default_target` must point to an existing enabled target
+- `repo` values must be unique
+- `local_path` is required
+- if `kb_path` is empty, it inherits the global `paths.kb_dir`
+- `disabled = true` targets do not participate in routing
+
+### Explicit target selection in an Issue
+
+In multi-repo setups, put this in the Issue body when needed:
+
+```text
+target_repo: owner/repo-b
+```
+
+That routes the task to the intended repository instead of relying on the default.
+
 ## Why CCClaw
 
 Many agent projects lead with multi-model routing, dashboards, chat UX, or cloud infrastructure. `ccclaw` deliberately starts with the harder operational basics:
@@ -145,7 +412,7 @@ Prepare these before downloading a release.
 ### Host Requirements
 
 - Linux
-- `systemd --user` recommended
+- `systemd --user` recommended; if unavailable, the installer degrades and leaves cron guidance instead of hard failing
 - `sudo` recommended, because the installer may need to install packages and write into `/opt/ccclaw`
 - Recommended packages: `git`, `gh`, `curl`, `wget`, `rg`, `sqlite3`, `golang`
 
@@ -198,7 +465,8 @@ The interactive installer will ask for:
 - home repo mode: `init | remote | local`
 - home repo dir, default `/opt/ccclaw`
 - task repo mode: `none | remote | local`
-- `GH_TOKEN`
+- scheduler mode: `auto | systemd | cron | none`
+- `GH_TOKEN`; if `gh auth login` is already in place, the installer reuses `gh auth token` first
 - optional Claude proxy settings
 
 ### 4. What the installer does
@@ -206,15 +474,16 @@ The interactive installer will ask for:
 `install.sh` currently performs these real actions:
 
 - probes `claude`, `gh`, `rg`, `sqlite3`, `rtk`, `git`, `node`, `npm`, `uv`
+- runs a preflight for `gh auth`, `systemd --user`, scheduler downgrade conditions, and the remote clone root
 - checks whether the official Claude install channel is reachable
 - installs base system dependencies when needed
 - installs `rtk` and creates the `ccclaude` wrapper
 - initializes or attaches the home repository
-- creates the fixed `.env`
-- creates the fixed `config.toml`
+- reuses an existing `.env` when possible and backfills `GH_TOKEN` from `gh auth token` when missing
+- creates a Chinese-commented `config.toml`
 - installs `~/.ccclaw/bin/ccclaw`
 - installs `install.sh` and `upgrade.sh`
-- installs `systemd --user` unit files
+- installs `systemd --user` unit files only when user-level systemd is usable; otherwise it degrades and continues
 - binds task repositories and writes `[[targets]]`
 - prints a deployment summary and next-step commands
 
@@ -254,7 +523,7 @@ bash install.sh \
   --task-repo-mode remote \
   --task-repo-remote owner/work-repo \
   --task-repo owner/work-repo \
-  --task-repo-path ~/work-repo
+  --task-repo-path /opt/src/3claw/owner/work-repo
 ```
 
 ### Path E: non-interactive install with a local task repo
@@ -278,7 +547,7 @@ bash install.sh \
 - login/auth has already been completed
 - the installer will probe the current local `claude` state
 
-If `claude` is missing, the interactive installer can offer the official installer. In non-interactive mode, automatic Claude installation only happens when `--install-claude` is explicitly passed.
+If `claude` is missing, the interactive installer can offer the official installer. In non-interactive mode, automatic Claude installation only happens when `--install-claude` is explicitly passed. If Claude login is already present, the installer reuses the existing CLI session and does not require `ANTHROPIC_API_KEY`.
 
 ### Path 2: proxy API mode
 
@@ -366,9 +635,11 @@ Stored at:
 It contains:
 
 - control repo
+- home repo
 - path layout
 - executor command
 - approval gate
+- `default_target`
 - `targets`
 
 ## Daily Workflow
@@ -441,7 +712,7 @@ src/dist/
 ## Main Advantages
 
 - natural fit for open-source maintenance because it stays on GitHub Issues
-- natural fit for Linux hosts because it defaults to `systemd --user`
+- natural fit for Linux hosts because it prefers `systemd --user` but can degrade when user-level systemd is unavailable
 - lower token waste because deterministic orchestration is kept local
 - durable project memory through fixed knowledge and report locations
 - safer upgrades because the program tree and home repo are separated

@@ -1,10 +1,20 @@
+# default_target:
+# - 留空时，运行时必须依赖 Issue body 中的 target_repo: owner/repo
+# - 仅在存在多个 [[targets]] 时建议显式指定默认值
 default_target = ""
 
+# GitHub 控制面配置。
+# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。
 [github]
 control_repo = "41490/ccclaw"
 issue_label = "ccclaw"
 limit = 20
 
+# 固定路径边界：
+# - app_dir: 程序树
+# - home_repo: 本体记忆仓库
+# - kb_dir: 默认知识库目录
+# - env_file: 所有敏感信息唯一入口
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
@@ -13,11 +23,20 @@ log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
 
+# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。
 [executor]
 provider = "claude-code"
 command = ["~/.ccclaw/bin/ccclaude"]
 timeout = "30m"
 
+# 仅管理员 Issue 自动执行；非管理员需要管理员评论 /ccclaw approve。
 [approval]
 command = "/ccclaw approve"
 minimum_permission = "admin"
+
+# 任务仓库样例：
+# [[targets]]
+# repo = "owner/repo"
+# local_path = "/opt/src/3claw/owner/repo"
+# kb_path = "/opt/ccclaw/kb"
+# disabled = false

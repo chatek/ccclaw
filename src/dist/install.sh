@@ -5,12 +5,17 @@ YES=0
 SIMULATE=0
 SKIP_DEPS=0
 INSTALL_CLAUDE=0
+PREFLIGHT_ONLY=0
+REUSE_GH_AUTH=1
+REUSE_CLAUDE_AUTH=1
 
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
 CONTROL_REPO_DEFAULT="41490/ccclaw"
 BIN_LINK_DEFAULT="$HOME/.local/bin/ccclaw"
 SYSTEMD_USER_DIR_DEFAULT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+TASK_CLONE_ROOT_DEFAULT="/opt/src/3claw"
+SCHEDULER_DEFAULT="auto"
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
@@ -20,6 +25,8 @@ HOME_REPO_REMOTE="${HOME_REPO_REMOTE:-}"
 CONTROL_REPO="${CONTROL_REPO:-$CONTROL_REPO_DEFAULT}"
 BIN_LINK="${BIN_LINK:-$BIN_LINK_DEFAULT}"
 SYSTEMD_USER_DIR="$SYSTEMD_USER_DIR_DEFAULT"
+TASK_CLONE_ROOT="${TASK_CLONE_ROOT:-$TASK_CLONE_ROOT_DEFAULT}"
+SCHEDULER="${SCHEDULER:-$SCHEDULER_DEFAULT}"
 
 TASK_REPO_MODE="${TASK_REPO_MODE:-none}"
 TASK_REPO_REMOTE="${TASK_REPO_REMOTE:-}"
@@ -34,6 +41,19 @@ STATE_DB=""
 LOG_DIR=""
 KB_DIR=""
 CLAUDE_WRAPPER=""
+SCHEDULER_EFFECTIVE=""
+SCHEDULER_REASON="未判定"
+SYSTEMD_READY=0
+SYSTEMD_CHECK_STATUS="未探查"
+GH_AUTH_STATUS="未探查"
+GH_TOKEN_DETECTED=""
+CLAUDE_AUTH_READY=0
+CLAUDE_AUTH_METHOD="未探查"
+GH_TOKEN_SOURCE="未写入"
+ANTHROPIC_API_KEY_SOURCE="未写入"
+ANTHROPIC_BASE_URL_SOURCE="未写入"
+ANTHROPIC_AUTH_TOKEN_SOURCE="未写入"
+GREPTILE_API_KEY_SOURCE="未写入"
 
 expand_path() {
   local path="$1"
@@ -52,6 +72,7 @@ refresh_paths() {
   APP_DIR="$(expand_path "$APP_DIR")"
   HOME_REPO="$(expand_path "$HOME_REPO")"
   BIN_LINK="$(expand_path "$BIN_LINK")"
+  TASK_CLONE_ROOT="$(expand_path "$TASK_CLONE_ROOT")"
   TASK_REPO_LOCAL="$(expand_path "$TASK_REPO_LOCAL")"
   TASK_REPO_PATH="$(expand_path "$TASK_REPO_PATH")"
   TASK_KB_PATH="$(expand_path "$TASK_KB_PATH")"
@@ -74,8 +95,11 @@ usage() {
 选项:
   --yes                     非交互模式，尽量使用默认值
   --simulate                只打印安装流程与当前探查结果，不写入文件
+  --preflight-only          只执行安装前体检，不落盘
   --skip-deps               跳过系统依赖安装
   --install-claude          非交互模式下自动执行 Claude 官方安装
+  --scheduler MODE          调度器模式: auto|systemd|cron|none
+  --task-clone-root PATH    remote 任务仓库本地 clone 根目录，默认 /opt/src/3claw
   --app-dir PATH            程序目录，默认 ~/.ccclaw
   --home-repo PATH          本体仓库目录，默认 /opt/ccclaw
   --home-repo-mode MODE     本体仓库模式: init|remote|local
@@ -85,8 +109,10 @@ usage() {
   --task-repo-remote URL    任务远程仓库 URL 或 owner/repo；传入后自动切换 remote 模式
   --task-repo-local PATH    本地已有任务仓库路径；传入后自动切换 local 模式
   --task-repo REPO          任务仓库 owner/repo；未传时尽量自动推断
-  --task-repo-path PATH     任务仓库本地路径；remote 模式默认 ~/repo-name
+  --task-repo-path PATH     任务仓库本地路径；remote 模式默认 /opt/src/3claw/owner/repo
   --task-repo-kb-path PATH  任务仓库对应 kb 路径，默认继承全局 kb_dir
+  --reuse-gh-auth           优先复用 gh auth token 写入 GH_TOKEN
+  --reuse-claude-auth       优先复用本机 Claude 登录态，允许 API Key 留空
   -h, --help                显示帮助
 USAGE
 }
@@ -95,8 +121,11 @@ while (($#)); do
   case "$1" in
     --yes) YES=1 ;;
     --simulate) SIMULATE=1 ;;
+    --preflight-only) PREFLIGHT_ONLY=1 ;;
     --skip-deps) SKIP_DEPS=1 ;;
     --install-claude) INSTALL_CLAUDE=1 ;;
+    --scheduler) shift; SCHEDULER="$1" ;;
+    --task-clone-root) shift; TASK_CLONE_ROOT="$1" ;;
     --app-dir) shift; APP_DIR="$1" ;;
     --home-repo) shift; HOME_REPO="$1" ;;
     --home-repo-mode) shift; HOME_REPO_MODE="$1" ;;
@@ -108,6 +137,8 @@ while (($#)); do
     --task-repo) shift; TASK_REPO="$1" ;;
     --task-repo-path) shift; TASK_REPO_PATH="$1" ;;
     --task-repo-kb-path) shift; TASK_KB_PATH="$1" ;;
+    --reuse-gh-auth) REUSE_GH_AUTH=1 ;;
+    --reuse-claude-auth) REUSE_CLAUDE_AUTH=1 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -117,6 +148,10 @@ done
 refresh_paths
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+print_stage() {
+  printf '\n== %s ==\n' "$1"
+}
 
 prompt_default() {
   local var_name="$1" label="$2" default_value="$3" secret="${4:-0}" input
@@ -185,6 +220,34 @@ dir_has_entries() {
   local path="$1"
   [[ -d "$path" ]] || return 1
   find "$path" -mindepth 1 -maxdepth 1 | read -r _
+}
+
+first_existing_parent() {
+  local path="$1"
+  while [[ ! -e "$path" && "$path" != "/" ]]; do
+    path="$(dirname "$path")"
+  done
+  printf '%s\n' "$path"
+}
+
+path_writable_or_creatable() {
+  local path="$1" existing
+  if [[ -e "$path" ]]; then
+    [[ -w "$path" ]]
+    return $?
+  fi
+  existing="$(first_existing_parent "$path")"
+  [[ -w "$existing" ]]
+}
+
+path_is_within() {
+  local child="$1" parent="$2"
+  child="${child%/}"
+  parent="${parent%/}"
+  case "$child/" in
+    "$parent/"*) return 0 ;;
+  esac
+  return 1
 }
 
 append_line_if_missing() {
@@ -306,6 +369,16 @@ repo_name_from_slug() {
   printf '%s\n' "${slug##*/}"
 }
 
+repo_owner_from_slug() {
+  local slug="$1"
+  printf '%s\n' "${slug%%/*}"
+}
+
+task_clone_path_from_slug() {
+  local slug="$1"
+  printf '%s/%s/%s\n' "$TASK_CLONE_ROOT" "$(repo_owner_from_slug "$slug")" "$(repo_name_from_slug "$slug")"
+}
+
 repo_slug_from_local_repo() {
   local repo_path="$1" remote_url
   remote_url="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
@@ -327,6 +400,26 @@ config_has_targets() {
   grep -q '^\[\[targets\]\]' "$CONFIG_FILE" 2>/dev/null
 }
 
+read_env_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 1
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
+}
+
+escape_sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\/&]/\\&/g'
+}
+
+upsert_env_key() {
+  local file="$1" key="$2" value="$3" escaped
+  escaped="$(escape_sed_replacement "$value")"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i "s/^${key}=.*/${key}=${escaped}/" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
 probe_claude() {
   local claude_bin claude_ver plugins marketplaces skills_market auth_state install_channel
   claude_bin="$(command -v claude 2>/dev/null || true)"
@@ -335,6 +428,16 @@ probe_claude() {
   marketplaces="$(claude plugin marketplace list 2>/dev/null || true)"
   skills_market="$(printf '%s' "$marketplaces" | grep -F 'anthropic-agent-skills' || true)"
   auth_state="$(claude auth status --json 2>/dev/null || true)"
+  if [[ -n "$auth_state" || -f "$HOME/.claude/.credentials.json" ]]; then
+    CLAUDE_AUTH_READY=1
+    CLAUDE_AUTH_METHOD="cli-session"
+  elif [[ -n "${ANTHROPIC_BASE_URL:-}" && -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    CLAUDE_AUTH_READY=1
+    CLAUDE_AUTH_METHOD="proxy-env"
+  else
+    CLAUDE_AUTH_READY=0
+    CLAUDE_AUTH_METHOD="missing"
+  fi
   if claude_install_channel_reachable; then
     install_channel="reachable"
   else
@@ -348,6 +451,7 @@ probe_claude() {
 - credentials_file: $( [[ -f "$HOME/.claude/.credentials.json" ]] && echo present || echo missing )
 - settings_json: $( [[ -f "$HOME/.claude/settings.json" ]] && echo present || echo missing )
 - auth_status_json: $( [[ -n "$auth_state" ]] && echo present || echo missing )
+- auth_method: ${CLAUDE_AUTH_METHOD}
 - installed_plugins: $(printf '%s' "$plugins" | grep -c '@' || true)
 - official_marketplace: $(printf '%s' "$marketplaces" | grep -F 'claude-plugins-official' >/dev/null && echo present || echo missing)
 - skills_marketplace: $( [[ -n "$skills_market" ]] && echo present || echo missing )
@@ -357,20 +461,128 @@ probe_claude() {
 INFO
 }
 
+probe_gh_auth() {
+  GH_TOKEN_DETECTED=""
+  if ! have gh; then
+    GH_AUTH_STATUS="missing_cli"
+    return 0
+  fi
+  if gh auth status >/dev/null 2>&1; then
+    GH_AUTH_STATUS="logged_in"
+    if [[ "$REUSE_GH_AUTH" -eq 1 ]]; then
+      GH_TOKEN_DETECTED="$(gh auth token 2>/dev/null || true)"
+    fi
+    if [[ -z "$GH_TOKEN_DETECTED" ]]; then
+      GH_AUTH_STATUS="logged_in_without_token"
+    fi
+    return 0
+  fi
+  GH_AUTH_STATUS="not_logged_in"
+}
+
+probe_systemd_user() {
+  local dir_owner=""
+  SYSTEMD_READY=0
+  if [[ -d "$SYSTEMD_USER_DIR" ]]; then
+    dir_owner="$(stat -c '%U' "$SYSTEMD_USER_DIR" 2>/dev/null || true)"
+  fi
+  if [[ "$SCHEDULER" == "cron" || "$SCHEDULER" == "none" ]]; then
+    SYSTEMD_CHECK_STATUS="skip(${SCHEDULER})"
+    return 0
+  fi
+  if ! have systemctl; then
+    SYSTEMD_CHECK_STATUS="missing_systemctl"
+    return 0
+  fi
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    SYSTEMD_CHECK_STATUS="user_bus_unavailable"
+    return 0
+  fi
+  if [[ -d "$SYSTEMD_USER_DIR" && -n "$dir_owner" && "$dir_owner" != "$(id -un)" ]]; then
+    SYSTEMD_CHECK_STATUS="dir_owner=${dir_owner}"
+    return 0
+  fi
+  if ! path_writable_or_creatable "$SYSTEMD_USER_DIR"; then
+    SYSTEMD_CHECK_STATUS="dir_not_writable"
+    return 0
+  fi
+  SYSTEMD_READY=1
+  SYSTEMD_CHECK_STATUS="ready"
+}
+
+decide_scheduler() {
+  case "$SCHEDULER" in
+    systemd)
+      if [[ "$SYSTEMD_READY" -eq 1 ]]; then
+        SCHEDULER_EFFECTIVE="systemd"
+        SCHEDULER_REASON="user systemd 就绪"
+      else
+        fail "已显式指定 --scheduler systemd，但当前环境不可用: $SYSTEMD_CHECK_STATUS"
+      fi
+      ;;
+    auto)
+      if [[ "$SYSTEMD_READY" -eq 1 ]]; then
+        SCHEDULER_EFFECTIVE="systemd"
+        SCHEDULER_REASON="自动选择 user systemd"
+      else
+        SCHEDULER_EFFECTIVE="none"
+        SCHEDULER_REASON="user systemd 不可用，自动降级为 none ($SYSTEMD_CHECK_STATUS)"
+      fi
+      ;;
+    cron|none)
+      SCHEDULER_EFFECTIVE="$SCHEDULER"
+      SCHEDULER_REASON="按显式参数执行"
+      ;;
+  esac
+}
+
+print_preflight() {
+  local gh_line systemd_line clone_root_line
+  probe_gh_auth
+  probe_systemd_user
+  decide_scheduler
+  case "$GH_AUTH_STATUS" in
+    logged_in) gh_line="OK: 已登录 gh，支持复用 GH_TOKEN" ;;
+    logged_in_without_token) gh_line="WARN: gh 已登录，但未能直接提取 token；后续可能仍需手工补录 GH_TOKEN" ;;
+    not_logged_in) gh_line="WARN: 未检测到 gh 登录态；后续需要手工填写 GH_TOKEN" ;;
+    missing_cli) gh_line="WARN: 未找到 gh；后续需要手工填写 GH_TOKEN" ;;
+    *) gh_line="WARN: gh 状态未知" ;;
+  esac
+  case "$SYSTEMD_CHECK_STATUS" in
+    ready) systemd_line="OK: user systemd 可用" ;;
+    skip*) systemd_line="OK: 已跳过 user systemd 探查，当前调度模式 $SCHEDULER" ;;
+    *) systemd_line="WARN: user systemd 不可直接使用($SYSTEMD_CHECK_STATUS)，将按 $SCHEDULER_EFFECTIVE 继续" ;;
+  esac
+  if [[ "$TASK_REPO_MODE" == "remote" ]]; then
+    clone_root_line="OK: remote 任务仓库 clone 根目录固定为 $TASK_CLONE_ROOT"
+  else
+    clone_root_line="OK: 当前未启用 remote 任务仓库绑定"
+  fi
+  print_stage "安装前体检"
+  cat <<INFO
+- Claude: $( [[ "$CLAUDE_AUTH_READY" -eq 1 ]] && printf 'OK: 已检测到 %s' "$CLAUDE_AUTH_METHOD" || printf 'WARN: 未检测到可复用登录态，后续可能需要手工补录 API/代理配置' )
+- GitHub: $gh_line
+- Scheduler: $systemd_line
+- Remote Clone Root: $clone_root_line
+- 计划调度模式: 请求=$SCHEDULER, 生效=$SCHEDULER_EFFECTIVE
+INFO
+}
+
 print_flow() {
   cat <<FLOW
-== 模拟安装流程 ==
-1. 探查现有环境：claude / gh / rg / sqlite3 / rtk / git / node / npm / uv
+== 计划执行流程 ==
+1. 探查现有环境：claude / gh / rg / sqlite3 / rtk / git / node / npm / uv / systemd --user
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
    - 本体仓库模式: $HOME_REPO_MODE
+   - 调度模式: $SCHEDULER
 3. 生成固定隐私配置：
    - .env: $ENV_FILE
-   - 仅记录会造成经济损失的敏感信息
+   - 优先复用已有 .env 与 gh auth token
 4. 生成普通配置：
    - config.toml: $CONFIG_FILE
-   - 记录 repo/path/执行器/systemd 等非敏感配置
+   - 记录 repo/path/执行器/调度等非敏感配置
 5. 初始化或接管本体仓库：
    - init: 在目标目录 git init，并写入 dist/kb 初始记忆树
    - remote: clone 指定仓库到目标目录，再补齐 kb 初始树
@@ -379,7 +591,7 @@ print_flow() {
    - 先探查官方安装通道可达性
    - 交互模式可确认后执行官方安装脚本
    - 非交互模式仅在 --install-claude 时自动安装
-   - 授权态只识别 setup-token / proxy 两条路径
+   - 授权态优先复用 CLI session，其次代理环境变量或手工 API Key
 7. 安装程序文件：
    - $APP_DIR/bin/ccclaw
    - $APP_DIR/bin/ccclaude
@@ -395,11 +607,11 @@ print_flow() {
    - 若本机没有插件：安装指定官方 plugins + example-skills
    - 执行器默认走: $CLAUDE_WRAPPER
 10. 安装 user systemd 单元：
-   - $SYSTEMD_USER_DIR/ccclaw-ingest.service
-   - $SYSTEMD_USER_DIR/ccclaw-run.service
+   - 请求模式为 auto|systemd 时先体检
+   - 仅在 user systemd 可用时写入 $SYSTEMD_USER_DIR
 11. 任务仓库绑定：
    - none: 本轮不绑定
-   - remote: clone 到指定本地路径，并写入 config.toml
+   - remote: clone 到 $TASK_CLONE_ROOT 下约定入口，并写入 config.toml
    - local: 接管已有本地仓库，并写入 config.toml
 12. 升级策略：
    - upgrade.sh 只升级程序发布树与插件/marketplace
@@ -413,11 +625,13 @@ print_flow() {
 - 必填但可默认(config.toml): app_dir, home_repo, kb_dir, state_db, log_dir
 - 本体仓库模式: init|remote|local
 - 任务仓库模式: none|remote|local
+- 调度器模式: auto|systemd|cron|none
 - 可自动探查并默认继承: claude 路径、plugin marketplace、已装插件
 FLOW
 }
 
 collect_inputs() {
+  print_stage "阶段 1/4 安装拓扑"
   prompt_default APP_DIR "程序目录" "$APP_DIR"
   prompt_default CONTROL_REPO "控制仓库 owner/repo" "$CONTROL_REPO"
   prompt_mode HOME_REPO_MODE "本体仓库模式(init/remote/local)" "$HOME_REPO_MODE" "init remote local"
@@ -431,6 +645,7 @@ collect_inputs() {
       ;;
   esac
 
+  print_stage "阶段 2/4 任务仓库绑定"
   prompt_mode TASK_REPO_MODE "任务仓库模式(none/remote/local)" "$TASK_REPO_MODE" "none remote local"
   case "$TASK_REPO_MODE" in
     remote)
@@ -439,10 +654,10 @@ collect_inputs() {
         TASK_REPO="$(normalize_repo_slug "$TASK_REPO_REMOTE" 2>/dev/null || true)"
       fi
       if [[ -z "$TASK_REPO_PATH" && -n "$TASK_REPO" ]]; then
-        TASK_REPO_PATH="$HOME/$(repo_name_from_slug "$TASK_REPO")"
+        TASK_REPO_PATH="$(task_clone_path_from_slug "$TASK_REPO")"
       fi
       prompt_default TASK_REPO "任务仓库 owner/repo" "$TASK_REPO"
-      prompt_default TASK_REPO_PATH "任务仓库本地路径" "$TASK_REPO_PATH"
+      prompt_default TASK_REPO_PATH "任务仓库本地路径(固定入口位于 /opt/src/3claw)" "$TASK_REPO_PATH"
       prompt_default TASK_KB_PATH "任务仓库 kb 路径(可留空继承全局)" "$TASK_KB_PATH"
       ;;
     local)
@@ -450,16 +665,25 @@ collect_inputs() {
       if [[ -z "$TASK_REPO" && -d "$TASK_REPO_LOCAL/.git" ]]; then
         TASK_REPO="$(repo_slug_from_local_repo "$TASK_REPO_LOCAL" 2>/dev/null || true)"
       fi
-      prompt_default TASK_REPO "任务仓库 owner/repo" "$TASK_REPO"
+      if [[ -n "$TASK_REPO" ]]; then
+        log "已从本地仓库 origin 推断任务仓库: $TASK_REPO"
+      else
+        warn "未从 origin 推断出 owner/repo；运行时路由仍依赖该值，请手工输入。"
+        prompt_default TASK_REPO "任务仓库 owner/repo" "$TASK_REPO"
+      fi
       prompt_default TASK_KB_PATH "任务仓库 kb 路径(可留空继承全局)" "$TASK_KB_PATH"
       ;;
   esac
+
+  print_stage "阶段 3/4 调度器"
+  prompt_mode SCHEDULER "调度器模式(auto/systemd/cron/none)" "$SCHEDULER" "auto systemd cron none"
   refresh_paths
 }
 
 validate_inputs() {
   validate_mode "本体仓库模式" "$HOME_REPO_MODE" "init remote local"
   validate_mode "任务仓库模式" "$TASK_REPO_MODE" "none remote local"
+  validate_mode "调度器模式" "$SCHEDULER" "auto systemd cron none"
   case "$HOME_REPO_MODE" in
     remote)
       [[ -n "$HOME_REPO_REMOTE" ]] || fail "remote 模式下必须提供 --home-repo-remote"
@@ -475,11 +699,14 @@ validate_inputs() {
         fail "无法识别任务仓库 owner/repo: $TASK_REPO"
       fi
       [[ -n "$TASK_REPO_PATH" ]] || fail "remote 模式下必须提供任务仓库本地路径"
+      if ! path_is_within "$TASK_REPO_PATH" "$TASK_CLONE_ROOT"; then
+        fail "remote 模式下任务仓库本地路径必须位于固定 clone 入口 $TASK_CLONE_ROOT"
+      fi
       ;;
     local)
       [[ -n "$TASK_REPO_LOCAL" ]] || fail "local 模式下必须提供 --task-repo-local"
       if ! normalize_repo_slug "$TASK_REPO" >/dev/null 2>&1; then
-        fail "无法识别任务仓库 owner/repo: $TASK_REPO"
+        fail "local 模式下无法从仓库自动推断 owner/repo，且未提供有效 --task-repo"
       fi
       ;;
   esac
@@ -614,17 +841,56 @@ create_env_file() {
   local anthropic_auth_token="${ANTHROPIC_AUTH_TOKEN:-}"
   local greptile_key="${GREPTILE_API_KEY:-}"
   local previous_umask
+  if [[ -z "$gh_token" && -n "$GH_TOKEN_DETECTED" ]]; then
+    gh_token="$GH_TOKEN_DETECTED"
+    GH_TOKEN_SOURCE="gh auth token"
+  fi
   if [[ -f "$ENV_FILE" ]]; then
     log "复用已有隐私配置: $ENV_FILE"
+    ensure_env_key "GH_TOKEN"
+    ensure_env_key "ANTHROPIC_API_KEY"
     ensure_env_key "ANTHROPIC_BASE_URL"
     ensure_env_key "ANTHROPIC_AUTH_TOKEN"
+    ensure_env_key "GREPTILE_API_KEY"
+    if [[ -n "$gh_token" && -z "$(read_env_value "$ENV_FILE" "GH_TOKEN")" ]]; then
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] 回填 GH_TOKEN 到 $ENV_FILE"
+      else
+        upsert_env_key "$ENV_FILE" "GH_TOKEN" "$gh_token"
+      fi
+    fi
+    if [[ -n "$(read_env_value "$ENV_FILE" "GH_TOKEN")" ]]; then
+      GH_TOKEN_SOURCE="已有 .env"
+    elif [[ -n "$gh_token" ]]; then
+      GH_TOKEN_SOURCE="gh auth token"
+    else
+      GH_TOKEN_SOURCE="留空"
+    fi
+    [[ -n "$(read_env_value "$ENV_FILE" "ANTHROPIC_API_KEY")" ]] && ANTHROPIC_API_KEY_SOURCE="已有 .env" || ANTHROPIC_API_KEY_SOURCE="留空"
+    [[ -n "$(read_env_value "$ENV_FILE" "ANTHROPIC_BASE_URL")" ]] && ANTHROPIC_BASE_URL_SOURCE="已有 .env" || ANTHROPIC_BASE_URL_SOURCE="留空"
+    [[ -n "$(read_env_value "$ENV_FILE" "ANTHROPIC_AUTH_TOKEN")" ]] && ANTHROPIC_AUTH_TOKEN_SOURCE="已有 .env" || ANTHROPIC_AUTH_TOKEN_SOURCE="留空"
+    [[ -n "$(read_env_value "$ENV_FILE" "GREPTILE_API_KEY")" ]] && GREPTILE_API_KEY_SOURCE="已有 .env" || GREPTILE_API_KEY_SOURCE="留空"
     return 0
   fi
-  prompt_default gh_token "GitHub Token (issues read/write)" "$gh_token" 1
+  print_stage "阶段 4/4 凭据复用与补录"
+  if [[ -z "$gh_token" ]]; then
+    prompt_default gh_token "GitHub Token (issues read/write)" "$gh_token" 1
+    [[ -n "$gh_token" ]] && GH_TOKEN_SOURCE="本次输入" || GH_TOKEN_SOURCE="留空"
+  fi
+  if [[ "$GH_TOKEN_SOURCE" == "未写入" ]]; then
+    [[ -n "$gh_token" ]] && GH_TOKEN_SOURCE="gh auth token" || GH_TOKEN_SOURCE="留空"
+  fi
+  if [[ "$REUSE_CLAUDE_AUTH" -eq 1 && "$CLAUDE_AUTH_READY" -eq 1 ]]; then
+    log "已检测到 Claude 登录态($CLAUDE_AUTH_METHOD)，允许直接复用 CLI 会话；ANTHROPIC_API_KEY 可留空。"
+  fi
   prompt_default anthropic_key "Anthropic API Key(可留空，若本机 claude 凭据已可用)" "$anthropic_key" 1
   prompt_default anthropic_base_url "Anthropic Base URL(代理模式可填，默认留空)" "$anthropic_base_url" 1
   prompt_default anthropic_auth_token "Anthropic Auth Token(代理模式可填，默认留空)" "$anthropic_auth_token" 1
   prompt_default greptile_key "Greptile API Key(可留空)" "$greptile_key" 1
+  [[ -n "$anthropic_key" ]] && ANTHROPIC_API_KEY_SOURCE="本次输入" || ANTHROPIC_API_KEY_SOURCE="留空"
+  [[ -n "$anthropic_base_url" ]] && ANTHROPIC_BASE_URL_SOURCE="本次输入" || ANTHROPIC_BASE_URL_SOURCE="留空"
+  [[ -n "$anthropic_auth_token" ]] && ANTHROPIC_AUTH_TOKEN_SOURCE="本次输入" || ANTHROPIC_AUTH_TOKEN_SOURCE="留空"
+  [[ -n "$greptile_key" ]] && GREPTILE_API_KEY_SOURCE="本次输入" || GREPTILE_API_KEY_SOURCE="留空"
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] write $ENV_FILE"
     return 0
@@ -653,13 +919,23 @@ create_config_file() {
     return 0
   fi
   cat > "$CONFIG_FILE" <<CFG
+# default_target:
+# - 留空时，运行时必须依赖 Issue body 中的 target_repo: owner/repo
+# - 仅在存在多个 [[targets]] 时建议显式指定默认值
 default_target = ""
 
+# GitHub 控制面配置。
+# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。
 [github]
 control_repo = "$CONTROL_REPO"
 issue_label = "ccclaw"
 limit = 20
 
+# 固定路径边界：
+# - app_dir: 程序树
+# - home_repo: 本体记忆仓库
+# - kb_dir: 默认知识库目录
+# - env_file: 所有敏感信息唯一入口
 [paths]
 app_dir = "$APP_DIR"
 home_repo = "$HOME_REPO"
@@ -668,14 +944,23 @@ log_dir = "$LOG_DIR"
 kb_dir = "$KB_DIR"
 env_file = "$ENV_FILE"
 
+# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。
 [executor]
 provider = "claude-code"
 command = ["$CLAUDE_WRAPPER"]
 timeout = "30m"
 
+# 仅管理员 Issue 自动执行；非管理员需要管理员评论 /ccclaw approve。
 [approval]
 command = "/ccclaw approve"
 minimum_permission = "admin"
+
+# 任务仓库样例：
+# [[targets]]
+# repo = "owner/repo"
+# local_path = "/opt/src/3claw/owner/repo"
+# kb_path = "$KB_DIR"
+# disabled = false
 CFG
 }
 
@@ -684,6 +969,10 @@ create_user_systemd_units() {
   local ingest_timer="$SYSTEMD_USER_DIR/ccclaw-ingest.timer"
   local run_service="$SYSTEMD_USER_DIR/ccclaw-run.service"
   local run_timer="$SYSTEMD_USER_DIR/ccclaw-run.timer"
+  if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
+    log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
+    return 0
+  fi
   ensure_dir "$SYSTEMD_USER_DIR"
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] write user systemd units into $SYSTEMD_USER_DIR"
@@ -866,6 +1155,18 @@ init_or_attach_home_repo() {
   commit_home_repo_seed
 }
 
+prepare_task_clone_root() {
+  if [[ "$TASK_REPO_MODE" != "remote" ]]; then
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] ensure remote clone root $TASK_CLONE_ROOT"
+    return 0
+  fi
+  run_maybe_sudo_for_path "$TASK_CLONE_ROOT" mkdir -p "$TASK_CLONE_ROOT"
+  ensure_path_owner "$TASK_CLONE_ROOT"
+}
+
 bind_task_repo() {
   local target_args
   case "$TASK_REPO_MODE" in
@@ -873,14 +1174,16 @@ bind_task_repo() {
       return 0
       ;;
     remote)
+      prepare_task_clone_root
       if [[ "$SIMULATE" -eq 1 ]]; then
         log "[simulate] git clone $(clone_url_from_repo_input "$TASK_REPO_REMOTE") $TASK_REPO_PATH"
       else
         if [[ -e "$TASK_REPO_PATH" ]] && dir_has_entries "$TASK_REPO_PATH"; then
           fail "任务 remote 模式要求目标目录为空: $TASK_REPO_PATH"
         fi
-        mkdir -p "$(dirname "$TASK_REPO_PATH")"
-        git clone "$(clone_url_from_repo_input "$TASK_REPO_REMOTE")" "$TASK_REPO_PATH"
+        run_maybe_sudo_for_path "$TASK_REPO_PATH" mkdir -p "$(dirname "$TASK_REPO_PATH")"
+        run_maybe_sudo_for_path "$TASK_REPO_PATH" git clone "$(clone_url_from_repo_input "$TASK_REPO_REMOTE")" "$TASK_REPO_PATH"
+        ensure_path_owner "$TASK_REPO_PATH"
       fi
       ;;
     local)
@@ -968,8 +1271,23 @@ print_summary() {
   local installed_version="unknown"
   local task_summary="未绑定"
   local home_source_summary="$HOME_REPO_MODE"
+  local gh_token_summary="$GH_TOKEN_SOURCE"
+  local headline="安装完成。"
+  local result_title="当前主机部署成果"
+  local scheduler_step_6=""
+  local scheduler_step_7=""
   if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
     installed_version="$("$APP_DIR/bin/ccclaw" -V 2>/dev/null || echo unknown)"
+  fi
+  if [[ "$PREFLIGHT_ONLY" -eq 1 ]]; then
+    headline="体检完成，未写入文件。"
+    result_title="当前主机体检结果"
+  elif [[ "$SIMULATE" -eq 1 ]]; then
+    headline="模拟执行完成，未写入文件。"
+    result_title="当前主机模拟结果"
+  fi
+  if [[ "$gh_token_summary" == "未写入" && -n "$GH_TOKEN_DETECTED" ]]; then
+    gh_token_summary="待从 gh auth token 回填"
   fi
   case "$HOME_REPO_MODE" in
     remote) home_source_summary="remote -> $HOME_REPO_REMOTE" ;;
@@ -980,10 +1298,36 @@ print_summary() {
     remote) task_summary="$TASK_REPO @ $TASK_REPO_PATH (from $TASK_REPO_REMOTE)" ;;
     local) task_summary="$TASK_REPO @ $TASK_REPO_PATH (local)" ;;
   esac
+  case "$SCHEDULER_EFFECTIVE" in
+    systemd)
+      scheduler_step_6="6. 按需启用用户定时器:
+   systemctl --user daemon-reload
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+      scheduler_step_7="7. 若后续环境不适合 systemd --user，可改为手工写入 crontab 样板:
+   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
+   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      ;;
+    cron)
+      scheduler_step_6="6. 当前调度模式为 cron，请手工写入 crontab:
+   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
+   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
+   systemctl --user daemon-reload
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+      ;;
+    none|*)
+      scheduler_step_6="6. 当前调度模式为 none；如需后台调度，可手工写入 crontab:
+   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
+   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      scheduler_step_7="7. 若后续修复好 user systemd，再执行:
+   systemctl --user daemon-reload
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+      ;;
+  esac
   cat <<MSG
-安装完成。
+$headline
 
-当前主机部署成果
+$result_title
 - 版本: $installed_version
 - 程序目录: $APP_DIR
 - 本体仓库: $HOME_REPO
@@ -991,12 +1335,15 @@ print_summary() {
 - 可执行文件: $APP_DIR/bin/ccclaw
 - 执行器包装: $CLAUDE_WRAPPER
 - 隐私配置: $ENV_FILE
+- GH_TOKEN 来源: $gh_token_summary
+- Claude 凭据态: $CLAUDE_AUTH_METHOD
 - 普通配置: $CONFIG_FILE
 - 本地命令链接: $BIN_LINK
 - 任务仓库绑定: $task_summary
-- 默认触发方式: systemd --user
+- 调度器: 请求=$SCHEDULER, 生效=$SCHEDULER_EFFECTIVE
+- 调度器说明: $SCHEDULER_REASON
 - user systemd 单元目录: $SYSTEMD_USER_DIR
-- user systemd 单元:
+- user systemd 单元(仅 systemd 模式写入):
   - ccclaw-ingest.service
   - ccclaw-ingest.timer
   - ccclaw-run.service
@@ -1011,12 +1358,8 @@ print_summary() {
    $APP_DIR/bin/ccclaw doctor --config $CONFIG_FILE --env-file $ENV_FILE
 5. 若需要补绑任务仓库:
    $APP_DIR/bin/ccclaw target list --config $CONFIG_FILE
-6. 按需启用用户定时器:
-   systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
-7. 若当前环境不适合 systemd --user，可改为手工写入 crontab 样板:
-   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
-   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE
+$scheduler_step_6
+$scheduler_step_7
 8. 若本体仓库目前还没有 upstream，可按需执行:
    git -C $HOME_REPO remote add origin <repo-url>
    git -C $HOME_REPO branch -M main
@@ -1036,12 +1379,17 @@ MSG
 }
 
 main() {
-  print_flow
   probe_claude
   collect_inputs
   validate_inputs
   if [[ "$TASK_REPO_MODE" == "local" && -z "$TASK_REPO_PATH" ]]; then
     TASK_REPO_PATH="$TASK_REPO_LOCAL"
+  fi
+  print_flow
+  print_preflight
+  if [[ "$PREFLIGHT_ONLY" -eq 1 ]]; then
+    print_summary
+    exit 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
     print_summary
