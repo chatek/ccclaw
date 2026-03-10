@@ -66,7 +66,7 @@ func TestSummarizeSchedulerNoneModePasses(t *testing.T) {
 func TestSummarizeSchedulerAutoDegradeFails(t *testing.T) {
 	detail, err := summarizeScheduler(schedulerProbe{
 		Requested:     "auto",
-		SystemdReason: "user bus 不可用",
+		SystemdReason: "Failed to connect to bus: No medium found",
 		CronReason:    "未检测到受控 crontab 规则",
 	})
 	if err == nil {
@@ -74,6 +74,12 @@ func TestSummarizeSchedulerAutoDegradeFails(t *testing.T) {
 	}
 	if detail == "" {
 		t.Fatal("expected scheduler detail")
+	}
+	if want := "reason=当前会话无法连接 user systemd 总线"; !strings.Contains(detail, want) {
+		t.Fatalf("expected %q in %q", want, detail)
+	}
+	if want := "repair=请在用户登录会话中执行 systemctl --user daemon-reload"; !strings.Contains(detail, want) {
+		t.Fatalf("expected repair hint %q in %q", want, detail)
 	}
 }
 
@@ -87,8 +93,14 @@ func TestSummarizeSchedulerSystemdNeedsRepair(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected systemd mismatch error")
 	}
-	if want := "repair=systemctl --user daemon-reload"; !strings.Contains(detail, want) {
+	if want := "repair=请执行 systemctl --user daemon-reload"; !strings.Contains(detail, want) {
 		t.Fatalf("expected repair hint %q in %q", want, detail)
+	}
+	if want := "reason=已写入 user systemd 单元目录 /tmp/systemd-user，但 timer 尚未启用"; !strings.Contains(detail, want) {
+		t.Fatalf("expected systemd reason %q in %q", want, detail)
+	}
+	if want := "systemd=systemctl --user is-enabled"; !strings.Contains(detail, want) {
+		t.Fatalf("expected systemd context %q in %q", want, detail)
 	}
 }
 
@@ -107,7 +119,7 @@ func TestSummarizeSchedulerCronPasses(t *testing.T) {
 }
 
 func TestSummarizeSchedulerDoubleSchedulingFails(t *testing.T) {
-	_, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeScheduler(schedulerProbe{
 		Requested:     "auto",
 		SystemdActive: true,
 		SystemdReason: "systemd active",
@@ -116,5 +128,27 @@ func TestSummarizeSchedulerDoubleSchedulingFails(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected duplicate scheduling error")
+	}
+	if want := "systemd=systemd active"; !strings.Contains(detail, want) {
+		t.Fatalf("expected systemd context %q in %q", want, detail)
+	}
+	if want := "cron=cron active"; !strings.Contains(detail, want) {
+		t.Fatalf("expected cron context %q in %q", want, detail)
+	}
+}
+
+func TestSummarizeSchedulerCronMissingCommand(t *testing.T) {
+	detail, err := summarizeScheduler(schedulerProbe{
+		Requested:  "cron",
+		CronReason: "未找到 crontab: exec: \"crontab\": executable file not found in $PATH",
+	})
+	if err == nil {
+		t.Fatal("expected cron mismatch error")
+	}
+	if want := "reason=当前环境缺少 crontab，无法使用 cron 调度"; !strings.Contains(detail, want) {
+		t.Fatalf("expected cron reason %q in %q", want, detail)
+	}
+	if want := "repair=当前环境缺少 crontab；请安装 cron/cronie，或改用 systemd/none"; !strings.Contains(detail, want) {
+		t.Fatalf("expected cron repair %q in %q", want, detail)
 	}
 }
