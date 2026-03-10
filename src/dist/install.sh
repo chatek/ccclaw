@@ -950,6 +950,13 @@ provider = "claude-code"
 command = ["$CLAUDE_WRAPPER"]
 timeout = "30m"
 
+# 调度策略配置：
+# - mode: 安装时请求的调度模式
+# - systemd_user_dir: user systemd 单元写入目录
+[scheduler]
+mode = "$SCHEDULER"
+systemd_user_dir = "$SYSTEMD_USER_DIR"
+
 # 仅管理员 Issue 自动执行；非管理员需要管理员评论 /ccclaw approve。
 [approval]
 command = "/ccclaw approve"

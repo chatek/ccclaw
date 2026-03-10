@@ -15,12 +15,13 @@ import (
 )
 
 type Config struct {
-	DefaultTarget string         `mapstructure:"default_target" toml:"default_target"`
-	GitHub        GitHubConfig   `mapstructure:"github" toml:"github"`
-	Paths         PathsConfig    `mapstructure:"paths" toml:"paths"`
-	Executor      ExecutorConfig `mapstructure:"executor" toml:"executor"`
-	Approval      ApprovalConfig `mapstructure:"approval" toml:"approval"`
-	Targets       []TargetConfig `mapstructure:"targets" toml:"targets"`
+	DefaultTarget string          `mapstructure:"default_target" toml:"default_target"`
+	GitHub        GitHubConfig    `mapstructure:"github" toml:"github"`
+	Paths         PathsConfig     `mapstructure:"paths" toml:"paths"`
+	Executor      ExecutorConfig  `mapstructure:"executor" toml:"executor"`
+	Scheduler     SchedulerConfig `mapstructure:"scheduler" toml:"scheduler"`
+	Approval      ApprovalConfig  `mapstructure:"approval" toml:"approval"`
+	Targets       []TargetConfig  `mapstructure:"targets" toml:"targets"`
 }
 
 type GitHubConfig struct {
@@ -43,6 +44,11 @@ type ExecutorConfig struct {
 	Binary   string   `mapstructure:"binary" toml:"binary"`
 	Command  []string `mapstructure:"command" toml:"command"`
 	Timeout  string   `mapstructure:"timeout" toml:"timeout"`
+}
+
+type SchedulerConfig struct {
+	Mode           string `mapstructure:"mode" toml:"mode"`
+	SystemdUserDir string `mapstructure:"systemd_user_dir" toml:"systemd_user_dir"`
 }
 
 type ApprovalConfig struct {
@@ -71,6 +77,8 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.provider", "claude-code")
 	v.SetDefault("executor.command", []string{"claude"})
 	v.SetDefault("executor.timeout", "30m")
+	v.SetDefault("scheduler.mode", "none")
+	v.SetDefault("scheduler.systemd_user_dir", "~/.config/systemd/user")
 	v.SetDefault("approval.command", "/ccclaw approve")
 	v.SetDefault("approval.minimum_permission", "admin")
 	v.SetDefault("default_target", "")
@@ -98,6 +106,14 @@ func (cfg *Config) NormalizePaths() {
 	cfg.Paths.LogDir = ExpandPath(cfg.Paths.LogDir)
 	cfg.Paths.KBDir = ExpandPath(cfg.Paths.KBDir)
 	cfg.Paths.EnvFile = ExpandPath(cfg.Paths.EnvFile)
+	if cfg.Scheduler.Mode == "" {
+		cfg.Scheduler.Mode = "none"
+	}
+	if cfg.Scheduler.SystemdUserDir == "" {
+		cfg.Scheduler.SystemdUserDir = ExpandPath("~/.config/systemd/user")
+	} else {
+		cfg.Scheduler.SystemdUserDir = ExpandPath(cfg.Scheduler.SystemdUserDir)
+	}
 	for idx := range cfg.Targets {
 		cfg.Targets[idx].LocalPath = ExpandPath(cfg.Targets[idx].LocalPath)
 		cfg.Targets[idx].KBPath = ExpandPath(cfg.Targets[idx].KBPath)
@@ -132,6 +148,11 @@ func (cfg *Config) Validate() error {
 	}
 	if len(cfg.Executor.Command) == 0 && cfg.Executor.Binary == "" {
 		return errors.New("executor.command 或 executor.binary 至少需要一个")
+	}
+	switch cfg.Scheduler.Mode {
+	case "", "auto", "systemd", "cron", "none":
+	default:
+		return fmt.Errorf("scheduler.mode 取值无效: %s", cfg.Scheduler.Mode)
 	}
 	seenTargets := map[string]struct{}{}
 	for _, target := range cfg.Targets {

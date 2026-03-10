@@ -213,6 +213,7 @@ func (rt *Runtime) ShowConfig(out io.Writer) error {
 		"github":         rt.cfg.GitHub,
 		"paths":          rt.cfg.Paths,
 		"executor":       rt.cfg.Executor,
+		"scheduler":      rt.cfg.Scheduler,
 		"approval":       rt.cfg.Approval,
 		"targets":        targets,
 		"env_file":       rt.secrets.Path,
@@ -248,7 +249,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "gh CLI", run: func() (string, error) { return commandVersion("gh", "--version") }},
 		{name: "GitHub 网络", run: func() (string, error) { return "rate_limit", rt.gh.NetworkCheck(ctx) }},
 		{name: "SQLite 读写", run: func() (string, error) { return rt.cfg.Paths.StateDB, rt.store.Ping() }},
-		{name: "systemd timers", run: func() (string, error) { return "ccclaw-ingest.timer, ccclaw-run.timer", rt.checkSystemd() }},
+		{name: "调度器", run: rt.describeSchedulerStatus},
 		{name: "磁盘空间", run: func() (string, error) { return rt.cfg.Paths.LogDir, rt.checkDisk() }},
 	}
 	var failed []string
@@ -404,17 +405,164 @@ func (rt *Runtime) newExecutor() (*executor.Executor, error) {
 	return executor.New(rt.cfg.Executor.Command, rt.cfg.Executor.Binary, timeout, rt.cfg.Paths.LogDir, rt.secrets.Values)
 }
 
-func (rt *Runtime) checkSystemd() error {
-	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer"}
-	for _, unit := range units {
-		if err := systemctl("is-enabled", unit); err != nil {
-			return err
+type schedulerProbe struct {
+	Requested        string
+	SystemdUserDir   string
+	SystemdInstalled bool
+	SystemdActive    bool
+	SystemdReason    string
+	CronActive       bool
+	CronReason       string
+}
+
+func (rt *Runtime) describeSchedulerStatus() (string, error) {
+	probe := rt.inspectScheduler()
+	return summarizeScheduler(probe)
+}
+
+func (rt *Runtime) inspectScheduler() schedulerProbe {
+	probe := schedulerProbe{
+		Requested:      strings.TrimSpace(rt.cfg.Scheduler.Mode),
+		SystemdUserDir: rt.cfg.Scheduler.SystemdUserDir,
+	}
+	if probe.Requested == "" {
+		probe.Requested = "none"
+	}
+	probe.SystemdInstalled = rt.hasSystemdUnitFiles(probe.SystemdUserDir)
+	probe.SystemdActive, probe.SystemdReason = rt.detectSystemdTimers()
+	probe.CronActive, probe.CronReason = rt.detectCronEntries()
+	return probe
+}
+
+func summarizeScheduler(probe schedulerProbe) (string, error) {
+	requested := probe.Requested
+	if requested == "" {
+		requested = "none"
+	}
+	effective := "none"
+	reason := "未检测到生效中的 systemd timer 或受控 crontab"
+	repair := ""
+
+	switch {
+	case probe.SystemdActive && probe.CronActive:
+		effective = "systemd+cron"
+		reason = "同时检测到 systemd 与 cron 调度，存在重复执行风险"
+		repair = "请只保留一种调度方式；若保留 systemd，请删除 crontab 中的 ccclaw 规则"
+	case probe.SystemdActive:
+		effective = "systemd"
+		reason = probe.SystemdReason
+	case probe.CronActive:
+		effective = "cron"
+		reason = probe.CronReason
+	case probe.SystemdInstalled:
+		reason = fmt.Sprintf("已写入 user systemd 单元目录 %s，但未检测到启用中的 timer (%s)", probe.SystemdUserDir, probe.SystemdReason)
+		repair = "systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
+	default:
+		if probe.SystemdReason != "" {
+			reason = probe.SystemdReason
 		}
-		if err := systemctl("is-active", unit); err != nil {
-			return err
+		if probe.CronReason != "" {
+			reason = probe.CronReason
+		}
+		if requested == "cron" {
+			repair = "请补充受控 crontab 规则，确保 ingest/run 两条任务都已写入"
+		}
+		if requested == "systemd" || requested == "auto" {
+			repair = "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer"
 		}
 	}
-	return nil
+
+	detail := fmt.Sprintf("request=%s effective=%s reason=%s", requested, effective, reason)
+	if repair != "" {
+		detail += fmt.Sprintf(" repair=%s", repair)
+	}
+
+	switch requested {
+	case "none":
+		if effective != "none" {
+			return detail, fmt.Errorf("配置要求 none，但当前检测到 %s 调度仍在生效", effective)
+		}
+		return detail, nil
+	case "systemd":
+		if effective != "systemd" {
+			return detail, fmt.Errorf("配置要求 systemd，但当前检测到 %s", effective)
+		}
+		return detail, nil
+	case "cron":
+		if effective != "cron" {
+			return detail, fmt.Errorf("配置要求 cron，但当前检测到 %s", effective)
+		}
+		return detail, nil
+	case "auto":
+		if effective == "none" || effective == "systemd+cron" {
+			return detail, fmt.Errorf("自动调度未处于单一可用状态")
+		}
+		return detail, nil
+	default:
+		return detail, fmt.Errorf("未知调度模式: %s", requested)
+	}
+}
+
+func (rt *Runtime) hasSystemdUnitFiles(unitDir string) bool {
+	if unitDir == "" {
+		return false
+	}
+	required := []string{
+		"ccclaw-ingest.service",
+		"ccclaw-ingest.timer",
+		"ccclaw-run.service",
+		"ccclaw-run.timer",
+	}
+	for _, name := range required {
+		if _, err := os.Stat(filepath.Join(unitDir, name)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (rt *Runtime) detectSystemdTimers() (bool, string) {
+	if err := requireCommand("systemctl"); err != nil {
+		return false, err.Error()
+	}
+	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer"}
+	for _, unit := range units {
+		if _, err := systemctlUser("is-enabled", unit); err != nil {
+			return false, err.Error()
+		}
+		if _, err := systemctlUser("is-active", unit); err != nil {
+			return false, err.Error()
+		}
+	}
+	return true, "ccclaw-ingest.timer, ccclaw-run.timer 已启用且运行中"
+}
+
+func (rt *Runtime) detectCronEntries() (bool, string) {
+	if err := requireCommand("crontab"); err != nil {
+		return false, err.Error()
+	}
+	cmd := exec.Command("crontab", "-l")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if strings.Contains(text, "no crontab for") || strings.Contains(text, "没有 crontab") {
+			return false, "未配置 crontab"
+		}
+		if text == "" {
+			text = err.Error()
+		}
+		return false, text
+	}
+	content := string(output)
+	appBin := filepath.ToSlash(filepath.Join(rt.cfg.Paths.AppDir, "bin", "ccclaw"))
+	configPath := filepath.ToSlash(filepath.Join(rt.cfg.Paths.AppDir, "ops", "config", "config.toml"))
+	envFile := filepath.ToSlash(rt.cfg.Paths.EnvFile)
+	ingestLine := fmt.Sprintf("%s ingest --config %s --env-file %s", appBin, configPath, envFile)
+	runLine := fmt.Sprintf("%s run --config %s --env-file %s", appBin, configPath, envFile)
+	if strings.Contains(content, ingestLine) && strings.Contains(content, runLine) {
+		return true, "已检测到受控 crontab ingest/run 规则"
+	}
+	return false, "未检测到受控 crontab 规则"
 }
 
 func (rt *Runtime) checkDisk() error {
@@ -438,21 +586,20 @@ func (rt *Runtime) checkDisk() error {
 	return nil
 }
 
-func systemctl(action, unit string) error {
-	variants := [][]string{
-		{"systemctl", "--user", action, unit},
-		{"systemctl", action, unit},
-	}
-	var errors []string
-	for _, argv := range variants {
-		cmd := exec.Command(argv[0], argv[1:]...)
-		output, err := cmd.CombinedOutput()
-		if err == nil {
-			return nil
+func systemctlUser(action, unit string) (string, error) {
+	cmd := exec.Command("systemctl", "--user", action, unit)
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if err == nil {
+		if text == "" {
+			text = unit
 		}
-		errors = append(errors, fmt.Sprintf("%s", strings.TrimSpace(string(output))))
+		return text, nil
 	}
-	return fmt.Errorf("systemctl %s %s 失败: %s", action, unit, strings.Join(errors, " | "))
+	if text == "" {
+		text = err.Error()
+	}
+	return "", fmt.Errorf("systemctl --user %s %s 失败: %s", action, unit, text)
 }
 
 func requireCommand(name string) error {

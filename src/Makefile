@@ -2,6 +2,8 @@ VERSION ?= $(shell date '+%y.%m.%d.%H%M')
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
 GOOS ?= linux
 GOARCH ?= amd64
+GO ?= $(shell if [ -x /usr/local/go/bin/go ]; then printf '/usr/local/go/bin/go'; else command -v go; fi)
+GOFMT ?= $(shell if [ -x /usr/local/go/bin/gofmt ]; then printf '/usr/local/go/bin/gofmt'; else command -v gofmt; fi)
 APP_NAME := ccclaw
 DIST_DIR := dist
 OPS_DIR := ops
@@ -15,20 +17,23 @@ CHECKSUM_FILE := $(RELEASE_DIR)/SHA256SUMS
 BIN := $(DIST_DIR)/bin/$(APP_NAME)
 LDFLAGS := -X github.com/41490/ccclaw/internal/buildinfo.Version=$(VERSION) -X github.com/41490/ccclaw/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: fmt test tidy build dist-sync package checksum sign archive release clean
+.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release clean
 
 fmt:
-	gofmt -w ./cmd ./internal
+	$(GOFMT) -w ./cmd ./internal
 
 test:
-	go test ./...
+	$(GO) test ./...
+
+test-install: dist-sync
+	bash tests/install_regression.sh
 
 tidy:
-	go mod tidy
+	$(GO) mod tidy
 
 build:
 	@mkdir -p $(DIST_DIR)/bin
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/ccclaw
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/ccclaw
 
 dist-sync: build
 	@mkdir -p $(DIST_DIR)/ops
