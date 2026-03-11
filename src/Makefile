@@ -19,7 +19,7 @@ RELEASE_NOTES_FILE := $(RELEASE_DIR)/RELEASE_NOTES.md
 BIN := $(DIST_DIR)/bin/$(APP_NAME)
 LDFLAGS := -X github.com/41490/ccclaw/internal/buildinfo.Version=$(VERSION) -X github.com/41490/ccclaw/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release-notes release clean
+.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release-notes release-preflight release clean
 
 fmt:
 	$(GOFMT) -w ./cmd ./internal
@@ -67,9 +67,13 @@ release-notes: checksum
 		-e 's/{{CHECKSUM_FILE}}/$(notdir $(CHECKSUM_FILE))/g' \
 		$(RELEASE_NOTES_TEMPLATE) > $(RELEASE_NOTES_FILE)
 
-release: archive release-notes
+release-preflight:
 	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
 	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
+
+release: release-preflight
+	@$(MAKE) archive VERSION=$(VERSION) COMMIT=$(COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
+	@$(MAKE) release-notes VERSION=$(VERSION) COMMIT=$(COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
 	gh release create $(VERSION) \
 		$(PACKAGE_FILE) \
 		$(CHECKSUM_FILE) \

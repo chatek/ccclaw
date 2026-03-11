@@ -8,14 +8,14 @@ default_target = ""
 [github]
 control_repo = "41490/ccclaw"
 issue_label = "ccclaw"
-# ingest 每轮通过 GitHub API 拉取 open issues 的上限。
+# ingest 每轮会在 control_repo 与所有启用 target repo 中分别拉取 open issues。
 # - 只统计匹配 issue_label 的 Issue
 # - 不是并发数，也不是 run 阶段的执行上限
 limit = 20
 
 # 固定路径边界：
 # - app_dir: 程序树
-# - home_repo: 本体记忆仓库
+# - home_repo: 知识仓库
 # - kb_dir: 默认知识库目录
 # - env_file: 所有敏感信息唯一入口
 [paths]
@@ -60,6 +60,7 @@ level = "info"
 archive_dir = "~/.ccclaw/log/scheduler"
 
 # maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。
+# 若 issue_label 被移除，任务会转为 BLOCKED，待重新打标签后再恢复。
 [approval]
 minimum_permission = "maintain"
 words = ["approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"]
