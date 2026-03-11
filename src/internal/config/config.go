@@ -53,6 +53,7 @@ type SchedulerConfig struct {
 	SystemdUserDir   string                `mapstructure:"systemd_user_dir" toml:"systemd_user_dir"`
 	CalendarTimezone string                `mapstructure:"calendar_timezone" toml:"calendar_timezone"`
 	Timers           SchedulerTimersConfig `mapstructure:"timers" toml:"timers"`
+	Logs             SchedulerLogsConfig   `mapstructure:"logs" toml:"logs"`
 }
 
 type SchedulerTimersConfig struct {
@@ -60,6 +61,11 @@ type SchedulerTimersConfig struct {
 	Run     string `mapstructure:"run" toml:"run"`
 	Patrol  string `mapstructure:"patrol" toml:"patrol"`
 	Journal string `mapstructure:"journal" toml:"journal"`
+}
+
+type SchedulerLogsConfig struct {
+	Level      string `mapstructure:"level" toml:"level"`
+	ArchiveDir string `mapstructure:"archive_dir" toml:"archive_dir"`
 }
 
 type ApprovalConfig struct {
@@ -105,6 +111,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("scheduler.timers.run", defaultSchedulerTimers().Run)
 	v.SetDefault("scheduler.timers.patrol", defaultSchedulerTimers().Patrol)
 	v.SetDefault("scheduler.timers.journal", defaultSchedulerTimers().Journal)
+	v.SetDefault("scheduler.logs.level", "info")
 	v.SetDefault("approval.words", defaultApprovalWords())
 	v.SetDefault("approval.reject_words", defaultRejectWords())
 	v.SetDefault("approval.minimum_permission", "maintain")
@@ -146,6 +153,7 @@ func (cfg *Config) NormalizePaths() {
 		cfg.Scheduler.CalendarTimezone = "Asia/Shanghai"
 	}
 	normalizeSchedulerTimers(&cfg.Scheduler.Timers)
+	normalizeSchedulerLogs(&cfg.Scheduler.Logs, cfg.Paths.LogDir)
 	for idx := range cfg.Targets {
 		cfg.Targets[idx].LocalPath = ExpandPath(cfg.Targets[idx].LocalPath)
 		cfg.Targets[idx].KBPath = ExpandPath(cfg.Targets[idx].KBPath)
@@ -200,6 +208,12 @@ func (cfg *Config) Validate() error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("scheduler.timers.%s 不能为空", key)
 		}
+	}
+	if !isSupportedSchedulerLogLevel(cfg.Scheduler.Logs.Level) {
+		return fmt.Errorf("scheduler.logs.level 取值无效: %s", cfg.Scheduler.Logs.Level)
+	}
+	if strings.TrimSpace(cfg.Scheduler.Logs.ArchiveDir) == "" {
+		return errors.New("scheduler.logs.archive_dir 不能为空")
 	}
 	if len(normalizeApprovalWords(cfg.Approval.Words)) == 0 {
 		return errors.New("approval.words 至少需要一个批准词")
@@ -522,6 +536,33 @@ func normalizeSchedulerTimers(timers *SchedulerTimersConfig) {
 	}
 }
 
+func normalizeSchedulerLogs(logs *SchedulerLogsConfig, defaultArchiveRoot string) {
+	if logs == nil {
+		return
+	}
+	logs.Level = strings.ToLower(strings.TrimSpace(logs.Level))
+	if logs.Level == "" {
+		logs.Level = "info"
+	}
+	logs.ArchiveDir = ExpandPath(strings.TrimSpace(logs.ArchiveDir))
+	if logs.ArchiveDir == "" {
+		base := ExpandPath(strings.TrimSpace(defaultArchiveRoot))
+		if base == "" {
+			base = ExpandPath("~/.ccclaw/log")
+		}
+		logs.ArchiveDir = filepath.Join(base, "scheduler")
+	}
+}
+
+func isSupportedSchedulerLogLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeSchedulerConfig(scheduler *SchedulerConfig) {
 	if scheduler == nil {
 		return
@@ -539,6 +580,7 @@ func normalizeSchedulerConfig(scheduler *SchedulerConfig) {
 		scheduler.CalendarTimezone = "Asia/Shanghai"
 	}
 	normalizeSchedulerTimers(&scheduler.Timers)
+	normalizeSchedulerLogs(&scheduler.Logs, "")
 }
 
 func validateSchedulerConfig(scheduler SchedulerConfig) error {
@@ -561,6 +603,12 @@ func validateSchedulerConfig(scheduler SchedulerConfig) error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("scheduler.timers.%s 不能为空", key)
 		}
+	}
+	if !isSupportedSchedulerLogLevel(scheduler.Logs.Level) {
+		return fmt.Errorf("scheduler.logs.level 取值无效: %s", scheduler.Logs.Level)
+	}
+	if strings.TrimSpace(scheduler.Logs.ArchiveDir) == "" {
+		return errors.New("scheduler.logs.archive_dir 不能为空")
 	}
 	return nil
 }
@@ -686,7 +734,9 @@ func isSchedulerHeader(line string) bool {
 
 func isSchedulerScopedHeader(line string) bool {
 	trimmed := strings.TrimSpace(line)
-	return strings.EqualFold(trimmed, "[scheduler]") || strings.EqualFold(trimmed, "[scheduler.timers]")
+	return strings.EqualFold(trimmed, "[scheduler]") ||
+		strings.EqualFold(trimmed, "[scheduler.timers]") ||
+		strings.EqualFold(trimmed, "[scheduler.logs]")
 }
 
 func sectionHasLegacyCommand(lines []string) bool {
@@ -722,6 +772,7 @@ func tomlArrayLiteral(values []string) string {
 }
 
 func renderSchedulerSection(scheduler SchedulerConfig) []string {
+	normalizeSchedulerConfig(&scheduler)
 	return []string{
 		"# 调度策略配置：",
 		"# - mode: 安装时请求的调度模式 auto|systemd|cron|none",
@@ -741,6 +792,14 @@ func renderSchedulerSection(scheduler SchedulerConfig) []string {
 		fmt.Sprintf("run = %q", scheduler.Timers.Run),
 		fmt.Sprintf("patrol = %q", scheduler.Timers.Patrol),
 		fmt.Sprintf("journal = %q", scheduler.Timers.Journal),
+		"",
+		"# 调度日志视图：",
+		"# - level: `ccclaw scheduler logs` 默认 journal 优先级过滤",
+		"# - 允许值: emerg|alert|crit|err|warning|notice|info|debug",
+		"# - archive_dir: `ccclaw scheduler logs --archive` 默认归档目录",
+		"[scheduler.logs]",
+		fmt.Sprintf("level = %q", scheduler.Logs.Level),
+		fmt.Sprintf("archive_dir = %q", scheduler.Logs.ArchiveDir),
 		"",
 	}
 }

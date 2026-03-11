@@ -35,6 +35,8 @@ func newRootCmd() *cobra.Command {
 	var schedulerLogsFollow bool
 	var schedulerLogsSince string
 	var schedulerLogsLines int
+	var schedulerLogsLevel string
+	var schedulerLogsArchive bool
 
 	rootCmd := &cobra.Command{
 		Use:           "ccclaw",
@@ -260,6 +262,17 @@ func newRootCmd() *cobra.Command {
 		},
 	})
 	schedulerCmd.AddCommand(&cobra.Command{
+		Use:   "doctor",
+		Short: "单独检查调度后端、timer 与日志运维能力",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			return scheduler.Doctor(cmd.Context(), cfg, cmd.OutOrStdout())
+		},
+	})
+	schedulerCmd.AddCommand(&cobra.Command{
 		Use:   "timers",
 		Short: "查看 ccclaw user systemd timers 状态与下一次触发时间",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -275,15 +288,24 @@ func newRootCmd() *cobra.Command {
 			if location == "" {
 				location = "Local"
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "主机时区: %s\n", time.Now().Location().String())
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "配置时区: %s\n\n", location)
+			hostTimezone := time.Now().Location().String()
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "主机时区: %s\n", hostTimezone)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "配置时区: %s\n", location)
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "说明: CAL_RAW 为配置原文，CAL_CFG 为追加配置时区后的生效表达式")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout())
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "TIMER\tACTIVE\tENABLED\tCALENDAR\tNEXT_LOCAL\tNEXT_CFG\tLAST_LOCAL\tLAST_CFG")
+			_, _ = fmt.Fprintf(w, "TIMER\tACTIVE\tENABLED\tCAL_RAW\tCAL_CFG\tNEXT[%s]\tNEXT[%s]\tLAST[%s]\tLAST[%s]\n",
+				hostTimezone,
+				location,
+				hostTimezone,
+				location,
+			)
 			for _, item := range items {
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 					item.TimerUnit,
 					item.ActiveState,
 					item.UnitFileState,
+					item.Calendar,
 					item.CalendarWithTZ,
 					item.NextLocal,
 					item.NextConfigTZ,
@@ -299,21 +321,43 @@ func newRootCmd() *cobra.Command {
 		Short: "查看或追随 ccclaw user systemd 服务日志",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
 			scope := "all"
 			if len(args) == 1 {
 				scope = args[0]
 			}
-			return scheduler.StreamLogs(cmd.Context(), scheduler.LogsOptions{
-				Scope:  scope,
-				Follow: schedulerLogsFollow,
-				Since:  schedulerLogsSince,
-				Lines:  schedulerLogsLines,
-			}, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			level := schedulerLogsLevel
+			if level == "" {
+				level = cfg.Scheduler.Logs.Level
+			}
+			archivePath := ""
+			if schedulerLogsArchive {
+				archivePath = scheduler.BuildLogArchivePath(cfg.Scheduler.Logs.ArchiveDir, scope, time.Now())
+			}
+			if err := scheduler.StreamLogs(cmd.Context(), scheduler.LogsOptions{
+				Scope:       scope,
+				Follow:      schedulerLogsFollow,
+				Since:       schedulerLogsSince,
+				Lines:       schedulerLogsLines,
+				Level:       level,
+				ArchivePath: archivePath,
+			}, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
+				return err
+			}
+			if archivePath != "" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "日志已归档: %s\n", archivePath)
+			}
+			return nil
 		},
 	}
 	schedulerLogsCmd.Flags().BoolVarP(&schedulerLogsFollow, "follow", "f", false, "持续追随日志输出")
 	schedulerLogsCmd.Flags().StringVar(&schedulerLogsSince, "since", "", "仅显示指定时间之后的日志，如 '1 hour ago'")
 	schedulerLogsCmd.Flags().IntVar(&schedulerLogsLines, "lines", 50, "默认显示最近多少行日志")
+	schedulerLogsCmd.Flags().StringVar(&schedulerLogsLevel, "level", "", "journal 优先级过滤: emerg|alert|crit|err|warning|notice|info|debug")
+	schedulerLogsCmd.Flags().BoolVar(&schedulerLogsArchive, "archive", false, "将本次日志输出同步归档到 scheduler.logs.archive_dir")
 	schedulerCmd.AddCommand(schedulerLogsCmd)
 	schedulerCmd.AddCommand(&cobra.Command{
 		Use:   "enable-cron",

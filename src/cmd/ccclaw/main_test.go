@@ -215,7 +215,10 @@ func TestSchedulerTimersCommand(t *testing.T) {
 		t.Fatalf("执行 scheduler timers 失败: %v", err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "配置时区: Asia/Shanghai") || !strings.Contains(text, "ccclaw-ingest.timer") {
+	if !strings.Contains(text, "配置时区: Asia/Shanghai") ||
+		!strings.Contains(text, "CAL_RAW") ||
+		!strings.Contains(text, "*:0/5") ||
+		!strings.Contains(text, "ccclaw-ingest.timer") {
 		t.Fatalf("unexpected output: %q", text)
 	}
 }
@@ -243,7 +246,7 @@ func TestSchedulerLogsCommand(t *testing.T) {
 	out := new(bytes.Buffer)
 	cmd.SetOut(out)
 	cmd.SetErr(out)
-	cmd.SetArgs([]string{"--config", configPath, "scheduler", "logs", "run", "--lines", "12"})
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "logs", "run", "--lines", "12", "--level", "warning", "--archive"})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("执行 scheduler logs 失败: %v", err)
@@ -252,8 +255,64 @@ func TestSchedulerLogsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(payload), "--user --no-pager -n 12 -u ccclaw-run.service") {
+	if !strings.Contains(string(payload), "--user --no-pager -n 12 -p warning -u ccclaw-run.service") {
 		t.Fatalf("unexpected journalctl args: %q", string(payload))
+	}
+	archiveDir := filepath.Join(dir, "app", "log", "scheduler")
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil {
+		t.Fatalf("读取归档目录失败: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 archive file, got %d", len(entries))
+	}
+	archivePayload, err := os.ReadFile(filepath.Join(archiveDir, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(archivePayload), "# ccclaw scheduler logs archive") || !strings.Contains(string(archivePayload), "ok") {
+		t.Fatalf("unexpected archive payload: %q", string(archivePayload))
+	}
+	if !strings.Contains(out.String(), "日志已归档:") {
+		t.Fatalf("expected archive notice: %q", out.String())
+	}
+}
+
+func TestSchedulerDoctorCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctlDoctor(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	writeFakeJournalctl(t, filepath.Join(fakeBin, "journalctl"), filepath.Join(dir, "journalctl.log"))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", filepath.Join(dir, "journalctl.log"))
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "doctor"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler doctor 失败: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "[ OK ] 调度配置:") ||
+		!strings.Contains(text, "[ OK ] user bus:") ||
+		!strings.Contains(text, "[ OK ] 托管 timers:") {
+		t.Fatalf("unexpected output: %q", text)
 	}
 }
 
@@ -480,6 +539,10 @@ func (f *schedulerConfigFixture) toConfig() *config.Config {
 		Scheduler: config.SchedulerConfig{
 			Mode:           f.Mode,
 			SystemdUserDir: f.SystemdDir,
+			Logs: config.SchedulerLogsConfig{
+				Level:      "info",
+				ArchiveDir: filepath.Join(f.AppDir, "log", "scheduler"),
+			},
 		},
 		Approval: config.ApprovalConfig{
 			Words:             []string{"approve"},
@@ -557,6 +620,48 @@ func writeFakeSystemctlTimers(t *testing.T, scriptPath, logPath string) {
 set -euo pipefail
 log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
 printf '%s\n' "$*" >> "$log_file"
+if [[ "${1:-}" == "--user" && "${2:-}" == "show" ]]; then
+  unit="${3:-}"
+  cat <<EOF
+Id=${unit}
+ActiveState=active
+UnitFileState=enabled
+NextElapseUSecRealtime=Wed 2026-03-11 06:15:00 EDT
+LastTriggerUSec=Wed 2026-03-11 06:10:15 EDT
+Result=success
+Triggers=${unit%.timer}.service
+EOF
+  exit 0
+fi
+printf 'unsupported systemctl args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeSystemctlDoctor(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'XDG_RUNTIME_DIR=/run/user/1000\n'
+  exit 0
+fi
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-enabled" ]]; then
+  printf 'enabled\n'
+  exit 0
+fi
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-active" ]]; then
+  printf 'active\n'
+  exit 0
+fi
 if [[ "${1:-}" == "--user" && "${2:-}" == "show" ]]; then
   unit="${3:-}"
   cat <<EOF

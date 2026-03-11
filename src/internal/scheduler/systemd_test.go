@@ -31,6 +31,10 @@ func testSystemdConfig() *config.Config {
 				Patrol:  "*:0/2",
 				Journal: "*-*-* 01:01:42",
 			},
+			Logs: config.SchedulerLogsConfig{
+				Level:      "info",
+				ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+			},
 		},
 	}
 }
@@ -70,6 +74,7 @@ printf 'ok\n'
 		Follow: true,
 		Since:  "1 hour ago",
 		Lines:  20,
+		Level:  "warning",
 	}, &out, &out)
 	if err != nil {
 		t.Fatalf("stream logs failed: %v", err)
@@ -80,10 +85,48 @@ printf 'ok\n'
 	}
 	text := string(payload)
 	for _, want := range []string{
-		"--user --no-pager -n 20 --since 1 hour ago -f -u ccclaw-ingest.service",
+		"--user --no-pager -n 20 -p warning --since 1 hour ago -f -u ccclaw-ingest.service",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
+	}
+}
+
+func TestStreamLogsArchivesToFile(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	logFile := filepath.Join(dir, "journalctl.log")
+	archivePath := filepath.Join(dir, "archives", "run.log")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+printf 'line-1\nline-2\n'
+`
+	scriptPath := filepath.Join(fakeBin, "journalctl")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", logFile)
+
+	var out bytes.Buffer
+	err := StreamLogs(context.Background(), LogsOptions{
+		Scope:       "run",
+		Lines:       10,
+		ArchivePath: archivePath,
+	}, &out, &out)
+	if err != nil {
+		t.Fatalf("stream logs failed: %v", err)
+	}
+	archivePayload, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(archivePayload)
+	if !strings.Contains(text, "# ccclaw scheduler logs archive") || !strings.Contains(text, "line-1") {
+		t.Fatalf("unexpected archive payload: %q", text)
 	}
 }

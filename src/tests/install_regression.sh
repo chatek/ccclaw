@@ -421,8 +421,10 @@ test_systemd_install_auto_enable_and_restart() {
 
   assert_file_exists "$readme_file"
   assert_contains "$readme_file" 'scheduler logs -f'
+  assert_contains "$readme_file" 'scheduler doctor'
   assert_contains "$config_file" 'calendar_timezone = "Asia/Shanghai"'
   assert_contains "$config_file" '[scheduler.timers]'
+  assert_contains "$config_file" '[scheduler.logs]'
   assert_contains "$systemctl_log" '--user daemon-reload'
   assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
 

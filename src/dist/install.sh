@@ -1316,6 +1316,14 @@ run = "$RUN_CALENDAR"
 patrol = "$PATROL_CALENDAR"
 journal = "$JOURNAL_CALENDAR"
 
+# 调度日志视图：
+# - level: `ccclaw scheduler logs` 默认 journal 优先级过滤
+# - 允许值: emerg|alert|crit|err|warning|notice|info|debug
+# - archive_dir: `ccclaw scheduler logs --archive` 默认归档目录
+[scheduler.logs]
+level = "info"
+archive_dir = "$LOG_DIR/scheduler"
+
 # maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。
 [approval]
 minimum_permission = "maintain"

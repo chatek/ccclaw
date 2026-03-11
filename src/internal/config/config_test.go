@@ -122,6 +122,43 @@ minimum_permission = "maintain"
 	}
 }
 
+func TestLoadConfigDefaultsSchedulerLogArchiveDirFromLogDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.Scheduler.Logs.Level, "info"; got != want {
+		t.Fatalf("unexpected scheduler log level: got=%q want=%q", got, want)
+	}
+	if got, want := cfg.Scheduler.Logs.ArchiveDir, "/tmp/ccclaw-app/log/scheduler"; got != want {
+		t.Fatalf("unexpected scheduler archive dir: got=%q want=%q", got, want)
+	}
+}
+
 func TestLoadConfigRejectsLegacyApprovalCommandField(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -245,6 +282,10 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 				Patrol:  "*:0/2",
 				Journal: "*-*-* 23:50:00",
 			},
+			Logs: SchedulerLogsConfig{
+				Level:      "info",
+				ArchiveDir: "/tmp/app/log/scheduler",
+			},
 		},
 		Approval: ApprovalConfig{
 			Words:             []string{"approve", "go"},
@@ -299,6 +340,10 @@ reject_words = ["reject"]
 			Patrol:  "*:0/2",
 			Journal: "*-*-* 01:01:42",
 		},
+		Logs: SchedulerLogsConfig{
+			Level:      "warning",
+			ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+		},
 	})
 	if err != nil {
 		t.Fatalf("update scheduler failed: %v", err)
@@ -315,6 +360,9 @@ reject_words = ["reject"]
 		`calendar_timezone = "Asia/Shanghai"`,
 		`journal = "*-*-* 01:01:42"`,
 		`# - 若要配置凌晨 01:01:42，可写为 ` + "`*-*-* 01:01:42`",
+		`[scheduler.logs]`,
+		`level = "warning"`,
+		`archive_dir = "/tmp/ccclaw-app/log/scheduler"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
