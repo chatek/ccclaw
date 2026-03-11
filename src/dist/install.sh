@@ -175,21 +175,21 @@ print_stage() {
 }
 
 prompt_default() {
-  local var_name="$1" label="$2" default_value="$3" secret="${4:-0}" input
+  local var_name="$1" label="$2" default_value="$3" secret="${4:-0}" response
   if [[ "$YES" -eq 1 ]]; then
     printf -v "$var_name" '%s' "$default_value"
     return 0
   fi
   if [[ "$secret" -eq 1 ]]; then
-    read -r -s -p "$label [$default_value]: " input
+    read -r -s -p "$label [$default_value]: " response
     printf '\n' >&2
   else
-    read -r -p "$label [$default_value]: " input
+    read -r -p "$label [$default_value]: " response
   fi
-  if [[ -z "$input" ]]; then
-    input="$default_value"
+  if [[ -z "$response" ]]; then
+    response="$default_value"
   fi
-  printf -v "$var_name" '%s' "$input"
+  printf -v "$var_name" '%s' "$response"
 }
 
 prompt_mode() {
@@ -199,7 +199,7 @@ prompt_mode() {
   while true; do
     prompt_default input "$label" "$default_short"
     local normalized
-    normalized="$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')"
+    normalized="$(printf '%s' "$input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
     # 完整单词精确匹配
     case " $allowed " in
       *" $normalized "*) printf -v "$var_name" '%s' "$normalized"; return 0 ;;
@@ -801,7 +801,8 @@ print_flow() {
    - 先探查官方安装通道可达性
    - 交互模式可确认后执行官方安装脚本
    - 非交互模式仅在 --install-claude 时自动安装
-   - 授权态优先复用 CLI session，其次代理环境变量或手工 API Key
+   - 若本机已有 claude，只读探查并复用现有登录态/代理配置
+   - 不自动修改 marketplace / plugins / rtk 全局状态
 7. 安装程序文件：
    - $APP_DIR/bin/ccclaw
    - $APP_DIR/bin/ccclaude
@@ -813,9 +814,10 @@ print_flow() {
    - 必装: git gh rg sqlite3 tmux curl wget golang
    - 能力工具: node npm uv
    - token 优化: rtk
-9. 若 Claude 已可用：
-   - 若本机已有插件/marketplace：直接继承
-   - 若本机没有插件：安装指定官方 plugins + example-skills
+9. Claude 生态处理：
+   - 只读探查当前 CLI / 登录态 / marketplace / plugins
+   - 不默认追加 marketplace、plugins、example-skills
+   - 不默认执行 rtk init --global
    - 执行器默认走: $CLAUDE_WRAPPER
 10. 安装调度后端：
    - 请求模式为 auto|systemd 时先体检 user systemd
@@ -827,7 +829,7 @@ print_flow() {
    - remote: clone 到 $TASK_CLONE_ROOT 下约定入口，并写入 config.toml
    - local: 接管已有本地仓库，并写入 config.toml
 12. 升级策略：
-   - upgrade.sh 只升级程序发布树与插件/marketplace
+   - upgrade.sh 只升级程序发布树
    - kb/**/CLAUDE.md 采用受管区块刷新，保留用户自定义区块
    - 不自动覆盖本体仓库记忆内容
 
@@ -839,7 +841,7 @@ print_flow() {
 - 本体仓库模式: init|remote|local
 - 任务仓库模式: none|remote|local
 - 调度器模式: auto|systemd|cron|none
-- 可自动探查并默认继承: claude 路径、plugin marketplace、已装插件
+- 可自动探查并默认继承: claude 路径、登录态、plugin marketplace、已装插件
 FLOW
 }
 
@@ -1579,67 +1581,6 @@ bind_task_repo() {
   "$APP_DIR/bin/ccclaw" "${target_args[@]}"
 }
 
-ensure_marketplace() {
-  local repo="$1"
-  local name="$2"
-  if ! have claude; then
-    warn "未安装 claude，无法配置 marketplace: $repo"
-    return 0
-  fi
-  if claude plugin marketplace list 2>/dev/null | grep -F "$name" >/dev/null 2>&1; then
-    log "已存在 marketplace: $name"
-    return 0
-  fi
-  if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] claude plugin marketplace add $repo"
-    return 0
-  fi
-  claude plugin marketplace add "$repo"
-}
-
-configure_claude_assets() {
-  if ! have claude; then
-    warn "未找到 claude；跳过插件/skills 配置，请先完成 Claude 安装与 setup-token/proxy 初始化"
-    return 0
-  fi
-  ensure_marketplace anthropics/skills anthropic-agent-skills
-  ensure_marketplace anthropics/claude-plugins-official claude-plugins-official
-  local installed_count
-  installed_count="$(claude plugin list 2>/dev/null | grep -c '@' || true)"
-  if [[ "$installed_count" -gt 0 ]]; then
-    log "检测到本机已安装 Claude plugins，按决策直接继承，不追加默认集合"
-  else
-    local plugins=(
-      "example-skills@anthropic-agent-skills"
-      "github@claude-plugins-official"
-      "greptile@claude-plugins-official"
-      "claude-code-setup@claude-plugins-official"
-      "claude-md-management@claude-plugins-official"
-      "code-review@claude-plugins-official"
-      "code-simplifier@claude-plugins-official"
-      "commit-commands@claude-plugins-official"
-      "gopls-lsp@claude-plugins-official"
-      "hookify@claude-plugins-official"
-      "plugin-dev@claude-plugins-official"
-      "pyright-lsp@claude-plugins-official"
-      "skill-creator@claude-plugins-official"
-      "typescript-lsp@claude-plugins-official"
-    )
-    for plugin in "${plugins[@]}"; do
-      if [[ "$SIMULATE" -eq 1 ]]; then
-        log "[simulate] claude plugin install $plugin"
-      else
-        claude plugin install "$plugin" || warn "插件安装失败，可后续手工补装: $plugin"
-      fi
-    done
-  fi
-  if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] rtk init --global"
-  elif have rtk; then
-    rtk init --global || warn "rtk init --global 执行失败，请后续手工检查"
-  fi
-}
-
 print_summary() {
   local installed_version="unknown"
   local task_summary="未绑定"
@@ -1714,6 +1655,7 @@ $result_title
 - 隐私配置: $ENV_FILE
 - GH_TOKEN 来源: $gh_token_summary
 - Claude 凭据态: $CLAUDE_AUTH_METHOD
+- Claude 生态处理: 默认只读探查，未自动修改 marketplace/plugins/rtk 全局配置
 - 普通配置: $CONFIG_FILE
 - 本地命令链接: $BIN_LINK
 - shell 集成: $SHELL_INTEGRATION_STATUS
@@ -1795,7 +1737,6 @@ main() {
   apply_shell_integration "$SHELL_INTEGRATION"
   init_or_attach_home_repo
   bind_task_repo
-  configure_claude_assets
   print_summary
 }
 

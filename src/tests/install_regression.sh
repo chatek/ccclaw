@@ -29,13 +29,13 @@ assert_file_exists() {
 assert_contains() {
   local file="$1"
   local pattern="$2"
-  grep -Fq "$pattern" "$file" || fail "未匹配到内容: $pattern ($file)"
+  grep -Fq -- "$pattern" "$file" || fail "未匹配到内容: $pattern ($file)"
 }
 
 assert_matches() {
   local file="$1"
   local pattern="$2"
-  grep -Eq "$pattern" "$file" || fail "未匹配到正则: $pattern ($file)"
+  grep -Eq -- "$pattern" "$file" || fail "未匹配到正则: $pattern ($file)"
 }
 
 assert_file_missing() {
@@ -46,7 +46,7 @@ assert_file_missing() {
 assert_not_contains() {
   local file="$1"
   local pattern="$2"
-  if grep -Fq "$pattern" "$file"; then
+  if grep -Fq -- "$pattern" "$file"; then
     fail "出现了不期望的内容: $pattern ($file)"
   fi
 }
@@ -64,6 +64,16 @@ run_case() {
   (
     set -euo pipefail
     "$@"
+  ) >"$logfile" 2>&1
+}
+
+run_case_with_input() {
+  local logfile="$1"
+  local input="$2"
+  shift 2
+  (
+    set -euo pipefail
+    printf '%s\n' "$input" | "$@"
   ) >"$logfile" 2>&1
 }
 
@@ -91,6 +101,43 @@ create_git_repo() {
   printf 'fixture\n' > "$path/README.md"
   git -C "$path" add README.md
   git -C "$path" commit -q -m "init fixture"
+}
+
+create_fake_claude() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/claude" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+logfile="${CCCLAW_FAKE_CLAUDE_LOG:-}"
+if [[ -n "$logfile" ]]; then
+  printf '%s\n' "$*" >> "$logfile"
+fi
+case "${1:-}" in
+  --version)
+    printf '2.1.72 (Claude Code)\n'
+    ;;
+  auth)
+    if [[ "${2:-}" == "status" && "${3:-}" == "--json" ]]; then
+      printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}\n'
+      exit 0
+    fi
+    ;;
+  plugin)
+    if [[ "${2:-}" == "list" ]]; then
+      printf 'superpowers@claude-plugins-official\n'
+      exit 0
+    fi
+    if [[ "${2:-}" == "marketplace" && "${3:-}" == "list" ]]; then
+      printf 'claude-plugins-official\n'
+      exit 0
+    fi
+    ;;
+esac
+printf 'unexpected fake claude args: %s\n' "$*" >&2
+exit 99
+SCRIPT
+  chmod 755 "$dir/claude"
 }
 
 prepare_dist() {
@@ -323,6 +370,69 @@ test_systemd_preflight_accepts_busless_deploy() {
   assert_contains "$log" '手工启用 timer'
 }
 
+test_interactive_mode_accepts_short_words() {
+  local sandbox task_repo log input
+  sandbox="$(setup_sandbox interactive-short)"
+  task_repo="$sandbox/task-local"
+  log="$sandbox/interactive.log"
+
+  create_git_repo "$task_repo"
+  git -C "$task_repo" remote add origin https://github.com/41490/task-local.git
+  input="$(cat <<EOF
+
+
+i
+$sandbox/home-repo
+l
+$task_repo
+
+n
+EOF
+)"
+
+  run_case_with_input "$log" "$input" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --simulate \
+      --skip-deps
+
+  assert_contains "$log" '阶段 1/4 安装拓扑'
+  assert_contains "$log" '本体仓库来源: init -> '
+  assert_contains "$log" '任务仓库绑定: 41490/task-local @ '
+  assert_contains "$log" '调度器: 请求=none, 生效=none'
+}
+
+test_interactive_mode_accepts_full_words() {
+  local sandbox log input
+  sandbox="$(setup_sandbox interactive-full)"
+  log="$sandbox/interactive.log"
+  input="$(cat <<EOF
+
+
+init
+$sandbox/home-repo
+none
+none
+EOF
+)"
+
+  run_case_with_input "$log" "$input" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --simulate \
+      --skip-deps
+
+  assert_contains "$log" '本体仓库来源: init -> '
+  assert_contains "$log" '调度器: 请求=none, 生效=none'
+  assert_contains "$log" '计划调度模式: 请求=none, 生效=none'
+}
+
 test_local_repo_without_origin_requires_repo() {
   local sandbox task_repo log
   sandbox="$(setup_sandbox local-no-origin)"
@@ -548,6 +658,48 @@ test_cron_install_update_and_remove() {
   assert_not_contains "$crontab_file" "$app_dir/bin/ccclaw ingest --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
 }
 
+test_install_keeps_claude_read_only() {
+  local sandbox fakebin claude_log app_dir home_repo task_repo log
+  sandbox="$(setup_sandbox claude-readonly)"
+  fakebin="$sandbox/fakebin"
+  claude_log="$sandbox/claude.log"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  task_repo="$sandbox/task-local"
+  log="$sandbox/install.log"
+
+  create_git_repo "$task_repo"
+  create_fake_claude "$fakebin"
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CLAUDE_LOG="$claude_log" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler none
+
+  assert_file_exists "$claude_log"
+  assert_contains "$claude_log" '--version'
+  assert_contains "$claude_log" 'auth status --json'
+  assert_contains "$claude_log" 'plugin list'
+  assert_contains "$claude_log" 'plugin marketplace list'
+  assert_not_contains "$claude_log" 'plugin marketplace add'
+  assert_not_contains "$claude_log" 'plugin install'
+  assert_not_contains "$claude_log" 'auth login'
+  assert_contains "$log" 'Claude 生态处理: 默认只读探查，未自动修改 marketplace/plugins/rtk 全局配置'
+}
+
 main() {
   prepare_dist
   log "开始执行 install.sh 回归测试"
@@ -559,6 +711,10 @@ main() {
   log "已通过: auto 可降级到受控 cron"
   test_systemd_preflight_accepts_busless_deploy
   log "已通过: systemd 无 user bus 仍允许部署"
+  test_interactive_mode_accepts_short_words
+  log "已通过: 交互模式接受单字母输入"
+  test_interactive_mode_accepts_full_words
+  log "已通过: 交互模式接受完整单词输入"
   test_local_repo_without_origin_requires_repo
   log "已通过: local 无 origin 失败路径"
   test_remote_repo_path_must_stay_within_clone_root
@@ -567,6 +723,8 @@ main() {
   log "已通过: shell 集成写入与回滚"
   test_cron_install_update_and_remove
   log "已通过: cron 受控写入、更新与清理"
+  test_install_keeps_claude_read_only
+  log "已通过: Claude 默认只读探查"
   log "全部 install.sh 回归测试通过"
 }
 

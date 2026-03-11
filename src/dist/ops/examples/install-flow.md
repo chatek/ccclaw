@@ -38,11 +38,14 @@
 - `gh auth status` / `gh auth token`
 - `systemctl --user` 与 `~/.config/systemd/user` 可用性
 
+以上探查默认只读，不自动改写现有 `~/.claude` 配置。
+
 ## 默认策略
 
-- 若本机已有 Claude plugins：继承，不强行覆盖
-- 若本机无 Claude plugins：补装指定官方 plugins + `example-skills`
+- 若本机已有 Claude 配置：仅只读探查并直接继承
+- 不默认补装 plugins / marketplace / `example-skills`
 - 若缺少 `rtk`：优先按官方 quick install 安装
+- 不默认执行 `rtk init --global`
 - 若缺少 `sqlite3`：优先通过系统包管理器安装
 - 本体仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
 - 任务仓库默认不绑定；若指定远程仓库，则 clone 到 `/opt/src/3claw/owner/repo`

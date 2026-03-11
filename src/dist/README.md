@@ -31,6 +31,7 @@ bash install.sh
 - 任务仓库模式：`none|remote|local`
 - remote 任务仓库固定 clone 入口：`/opt/src/3claw/owner/repo`
 - 调度模式：`auto|systemd|cron|none`
+- Claude 探查：默认只读，不自动改写现有 marketplace / plugins / `rtk` 全局配置
 
 ## 调度行为
 

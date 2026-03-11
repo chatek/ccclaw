@@ -507,6 +507,7 @@ bash install.sh
 - 安装 `install.sh` 与 `upgrade.sh`
 - 仅在可用时安装 `systemd --user` unit 文件；若不可用则按决策自动写入或更新受控 `cron`
 - 按需绑定任务仓库并写入 `[[targets]]`
+- 对现有 Claude 登录态 / marketplace / plugins 仅做只读探查与继承，不默认改写
 - 输出安装完成摘要、后续命令和日常工作流程
 
 ## 推荐安装路径
@@ -569,9 +570,9 @@ bash install.sh \
 
 - 已安装 Claude Code CLI
 - 已完成对应登录
-- 安装脚本会探查当前本机 `claude` 状态
+- 安装脚本会只读探查当前本机 `claude` 状态
 
-如果本机未安装 `claude`，交互安装时会提示是否执行官方安装脚本；非交互模式下只有显式传入 `--install-claude` 才会自动安装。若本机已完成 Claude 登录，安装器会直接复用当前 CLI 会话，不强制要求填写 `ANTHROPIC_API_KEY`。
+如果本机未安装 `claude`，交互安装时会提示是否执行官方安装脚本；非交互模式下只有显式传入 `--install-claude` 才会自动安装。若本机已完成 Claude 登录，安装器会直接复用当前 CLI 会话，不强制要求填写 `ANTHROPIC_API_KEY`，也不会默认追加 marketplace、plugins 或执行 `rtk init --global`。
 
 ### 方式 2：代理 API 模式
 
