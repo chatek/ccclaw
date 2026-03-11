@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/41490/ccclaw/internal/config"
+	"github.com/41490/ccclaw/internal/scheduler"
 )
 
 func TestRootCmdVersionFlag(t *testing.T) {
@@ -144,6 +147,191 @@ minimum_permission = "maintain"
 	}
 }
 
+func TestSchedulerStatusCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	crontabStore := filepath.Join(dir, "crontab.txt")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeCrontab(t, filepath.Join(fakeBin, "crontab"), crontabStore)
+	writeFakeSystemctlProbe(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_CRONTAB_FILE", crontabStore)
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "scheduler", "status"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler status 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "request=none effective=none") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
+func TestSchedulerUseCronCommand(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(dir, "app")
+	systemdDir := filepath.Join(dir, "systemd-user")
+	if err := os.MkdirAll(filepath.Join(appDir, "ops", "systemd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(testConfigTomlWithSystemdDir(appDir, envPath, systemdDir, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(dir, "bin")
+	crontabStore := filepath.Join(dir, "crontab.txt")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeCrontab(t, filepath.Join(fakeBin, "crontab"), crontabStore)
+	writeFakeSystemctl(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_CRONTAB_FILE", crontabStore)
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "use", "cron"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler use cron 失败: %v", err)
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "mode = 'cron'") {
+		t.Fatalf("expected mode=cron: %q", string(payload))
+	}
+	cronPayload, err := os.ReadFile(crontabStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cronPayload), scheduler.ManagedCronBegin) {
+		t.Fatalf("expected managed cron block: %q", string(cronPayload))
+	}
+	logPayload, err := os.ReadFile(systemctlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logPayload), "disable --now ccclaw-ingest.timer") {
+		t.Fatalf("expected systemctl disable call: %q", string(logPayload))
+	}
+	if !strings.Contains(out.String(), "已切换调度后端: mode=cron") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
+func TestSchedulerUseSystemdCommand(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	appDir := filepath.Join(dir, "app")
+	systemdDir := filepath.Join(dir, "systemd-user")
+	sourceDir := filepath.Join(appDir, "ops", "systemd")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"ccclaw-ingest.service",
+		"ccclaw-ingest.timer",
+		"ccclaw-run.service",
+		"ccclaw-run.timer",
+		"ccclaw-patrol.service",
+		"ccclaw-patrol.timer",
+		"ccclaw-journal.service",
+		"ccclaw-journal.timer",
+	} {
+		if err := os.WriteFile(filepath.Join(sourceDir, name), []byte("[Unit]\nDescription=test\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(testConfigTomlWithSystemdDir(appDir, envPath, systemdDir, "cron")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := filepath.Join(dir, "bin")
+	crontabStore := filepath.Join(dir, "crontab.txt")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeCrontab(t, filepath.Join(fakeBin, "crontab"), crontabStore)
+	if err := os.WriteFile(crontabStore, []byte(scheduler.ManagedCronBlock(testSchedulerConfig(appDir, envPath, systemdDir, "cron").toConfig())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctl(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_CRONTAB_FILE", crontabStore)
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "use", "systemd"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler use systemd 失败: %v", err)
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "mode = 'systemd'") {
+		t.Fatalf("expected mode=systemd: %q", string(payload))
+	}
+	cronPayload, err := os.ReadFile(crontabStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cronPayload), scheduler.ManagedCronBegin) {
+		t.Fatalf("managed cron should be removed: %q", string(cronPayload))
+	}
+	if _, err := os.Stat(filepath.Join(systemdDir, "ccclaw-ingest.service")); err != nil {
+		t.Fatalf("expected unit file copied: %v", err)
+	}
+	logPayload, err := os.ReadFile(systemctlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logPayload), "enable --now ccclaw-ingest.timer") {
+		t.Fatalf("expected systemctl enable call: %q", string(logPayload))
+	}
+	if !strings.Contains(out.String(), "已切换调度后端: mode=systemd") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
 func TestParseStatsOptions(t *testing.T) {
 	options, err := parseStatsOptions("2026-03-09", "2026-03-10", true, true, 7)
 	if err != nil {
@@ -160,6 +348,132 @@ func TestParseStatsOptions(t *testing.T) {
 	}
 	if options.End.Format("2006-01-02") != "2026-03-11" {
 		t.Fatalf("unexpected end: %#v", options.End)
+	}
+}
+
+func testConfigToml(root, envPath, mode string) string {
+	return testConfigTomlWithSystemdDir(filepath.Join(root, "app"), envPath, filepath.Join(root, "systemd-user"), mode)
+}
+
+func testConfigTomlWithSystemdDir(appDir, envPath, systemdDir, mode string) string {
+	return "default_target = ''\n\n" +
+		"[github]\ncontrol_repo = '41490/ccclaw'\n\n" +
+		"[paths]\n" +
+		"app_dir = '" + appDir + "'\n" +
+		"home_repo = '/opt/ccclaw'\n" +
+		"state_db = '" + filepath.Join(appDir, "var", "state.db") + "'\n" +
+		"log_dir = '" + filepath.Join(appDir, "log") + "'\n" +
+		"kb_dir = '/opt/ccclaw/kb'\n" +
+		"env_file = '" + envPath + "'\n\n" +
+		"[executor]\ncommand = ['claude']\n\n" +
+		"[scheduler]\n" +
+		"mode = '" + mode + "'\n" +
+		"systemd_user_dir = '" + systemdDir + "'\n\n" +
+		"[approval]\n" +
+		"words = ['approve']\n" +
+		"reject_words = ['reject']\n" +
+		"minimum_permission = 'maintain'\n"
+}
+
+func testSchedulerConfig(appDir, envPath, systemdDir, mode string) *schedulerConfigFixture {
+	return &schedulerConfigFixture{
+		AppDir:     appDir,
+		EnvPath:    envPath,
+		SystemdDir: systemdDir,
+		Mode:       mode,
+	}
+}
+
+type schedulerConfigFixture struct {
+	AppDir     string
+	EnvPath    string
+	SystemdDir string
+	Mode       string
+}
+
+func (f *schedulerConfigFixture) toConfig() *config.Config {
+	return &config.Config{
+		GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+		Paths: config.PathsConfig{
+			AppDir:   f.AppDir,
+			HomeRepo: "/opt/ccclaw",
+			StateDB:  filepath.Join(f.AppDir, "var", "state.db"),
+			LogDir:   filepath.Join(f.AppDir, "log"),
+			KBDir:    "/opt/ccclaw/kb",
+			EnvFile:  f.EnvPath,
+		},
+		Executor: config.ExecutorConfig{Command: []string{"claude"}},
+		Scheduler: config.SchedulerConfig{
+			Mode:           f.Mode,
+			SystemdUserDir: f.SystemdDir,
+		},
+		Approval: config.ApprovalConfig{
+			Words:             []string{"approve"},
+			RejectWords:       []string{"reject"},
+			MinimumPermission: "maintain",
+		},
+	}
+}
+
+func writeFakeCrontab(t *testing.T, scriptPath, store string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+store="${CCCLAW_FAKE_CRONTAB_FILE:?}"
+case "${1:-}" in
+  -l)
+    if [[ -f "$store" && -s "$store" ]]; then
+      cat "$store"
+      exit 0
+    fi
+    printf 'no crontab for tester\n' >&2
+    exit 1
+    ;;
+  -)
+    cat > "$store"
+    exit 0
+    ;;
+  *)
+    printf 'unsupported crontab args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeSystemctl(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+exit 0
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeSystemctlProbe(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+printf 'disabled\n' >&2
+exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

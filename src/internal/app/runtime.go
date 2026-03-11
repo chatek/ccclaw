@@ -1188,8 +1188,11 @@ type schedulerDiagnosis struct {
 }
 
 func (rt *Runtime) describeSchedulerStatus() (string, error) {
-	probe := rt.inspectScheduler()
-	return summarizeScheduler(probe)
+	return scheduler.DescribeStatus(rt.cfg)
+}
+
+func (rt *Runtime) SchedulerStatus() (string, error) {
+	return rt.describeSchedulerStatus()
 }
 
 func (rt *Runtime) inspectScheduler() schedulerProbe {

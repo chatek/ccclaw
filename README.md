@@ -598,6 +598,18 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
   --env-file ~/.ccclaw/.env
 ```
 
+如果需要单独查看或切换调度后端：
+
+```bash
+~/.ccclaw/bin/ccclaw scheduler status \
+  --config ~/.ccclaw/ops/config/config.toml \
+  --env-file ~/.ccclaw/.env
+
+~/.ccclaw/bin/ccclaw scheduler use cron --config ~/.ccclaw/ops/config/config.toml
+~/.ccclaw/bin/ccclaw scheduler use systemd --config ~/.ccclaw/ops/config/config.toml
+~/.ccclaw/bin/ccclaw scheduler use none --config ~/.ccclaw/ops/config/config.toml
+```
+
 如果需要检查任务仓库绑定结果：
 
 ```bash
@@ -615,8 +627,12 @@ ccclaw config
 ccclaw ingest
 ccclaw run
 ccclaw status
+ccclaw scheduler status
 ccclaw scheduler enable-cron
 ccclaw scheduler disable-cron
+ccclaw scheduler use cron
+ccclaw scheduler use systemd
+ccclaw scheduler use none
 ccclaw target list
 ccclaw target add --repo owner/repo --path /abs/path/to/repo
 ccclaw target disable --repo owner/repo

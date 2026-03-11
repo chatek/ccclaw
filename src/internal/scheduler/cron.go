@@ -105,6 +105,9 @@ func EnableCron(ctx context.Context, cfg *config.Config) (string, error) {
 func DisableCron(ctx context.Context) (string, error) {
 	current, hadCrontab, err := readCurrentCrontab(ctx)
 	if err != nil {
+		if strings.Contains(err.Error(), "未找到 crontab") {
+			return "当前环境缺少 crontab，无需清理 ccclaw 受控规则", nil
+		}
 		return "", err
 	}
 	if !hadCrontab {

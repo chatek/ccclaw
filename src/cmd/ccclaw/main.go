@@ -217,6 +217,21 @@ func newRootCmd() *cobra.Command {
 		Short: "管理调度器后端",
 	}
 	schedulerCmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "单独查看当前调度器状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rt, err := app.NewRuntime(configPath, envFile)
+			if err != nil {
+				return err
+			}
+			detail, err := rt.SchedulerStatus()
+			if detail != "" {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), detail)
+			}
+			return err
+		},
+	})
+	schedulerCmd.AddCommand(&cobra.Command{
 		Use:   "enable-cron",
 		Short: "写入或更新当前用户的受控 crontab 规则",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -244,6 +259,30 @@ func newRootCmd() *cobra.Command {
 			return nil
 		},
 	})
+	useSchedulerCmd := &cobra.Command{
+		Use:   "use MODE",
+		Short: "统一切换调度后端并同步配置",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			result, err := scheduler.Use(cmd.Context(), cfg, args[0])
+			if err != nil {
+				return err
+			}
+			if err := config.Save(configPath, cfg); err != nil {
+				return err
+			}
+			for _, step := range result.Steps {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), step)
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已切换调度后端: mode=%s\n", result.Mode)
+			return nil
+		},
+	}
+	schedulerCmd.AddCommand(useSchedulerCmd)
 	rootCmd.AddCommand(schedulerCmd)
 
 	targetCmd := &cobra.Command{

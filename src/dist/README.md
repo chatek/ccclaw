@@ -38,6 +38,7 @@ bash install.sh
 - 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
 - 受控 `cron` 会写入 `ingest/run/patrol/journal` 四类周期任务
 - `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
+- 推荐优先通过 `ccclaw scheduler use systemd|cron|none` 切换后端，而不是手工混改配置和调度器
 - 如需清理受控块，可执行：
 
 ```bash
@@ -52,6 +53,14 @@ bash install.sh --remove-cron
 2. 检查控制仓库 / 本体仓库 / 任务仓库 配置是否符合预期
 3. 若体检结果为 `systemd`，手工启用 `systemd --user` timer
 4. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
+5. 如需单独查看或切换调度后端：
+
+```bash
+~/.ccclaw/bin/ccclaw scheduler status
+~/.ccclaw/bin/ccclaw scheduler use cron
+~/.ccclaw/bin/ccclaw scheduler use systemd
+~/.ccclaw/bin/ccclaw scheduler use none
+```
 
 ## Shell 集成
 
