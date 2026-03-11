@@ -37,7 +37,7 @@ O     O     O     |  oo o   o   o
 - **省 token**：把轮询、门禁、调度、目录治理、日志归档交给本地程序和 `systemd`，把高价值 token 留给真正需要 Claude Code 动手的阶段。
 - **Issue 驱动**：直接复用开源项目最自然的协作入口，不额外引入新的任务系统。
 - **Linux 原生**：优先使用 `systemd --user`，异常时可自动降级到受控 `cron` 或 `none`，不强绑 Docker、K8s、外部 SaaS 控制面。
-- **记忆与程序分离**：程序树固定在 `~/.ccclaw`，本体记忆仓库固定在 `/opt/ccclaw`，升级不覆盖用户记忆。
+- **记忆与程序分离**：程序树固定在 `~/.ccclaw`，知识仓库固定在 `/opt/ccclaw`，升级不覆盖用户记忆。
 - **安装边界清晰**：敏感信息只进 `.env`，普通配置只进 `.toml`，运行时不依赖调用者预先 `export` 环境变量。
 - **开源协作可控**：`maintain` 及以上成员的 Issue 自动执行；其他 Issue 需要受信任成员评论 `/ccclaw <批准词>`，最新评论也可用否决词撤回。
 - **可发布可升级**：release 从 `src/dist/` 出包，产物至少包含安装包与 `SHA256SUMS`，并提供 `upgrade.sh` 升级程序树。
@@ -55,8 +55,8 @@ O     O     O     |  oo o   o   o
 - 当前阶段：`phase0.5`
 - 默认平台：`linux/amd64`
 - 默认程序目录：`~/.ccclaw`
-- 默认本体仓库：`/opt/ccclaw`
-- 本体仓库模式：`init | remote | local`
+- 默认知识仓库：`/opt/ccclaw`
+- 知识仓库模式：`init | remote | local`
 - 任务仓库模式：`none | remote | local`
 - 默认调度方式：`auto`，优先 `systemd --user`，降级到受控 `cron`
 - 版本命名：`yy.mm.dd.HHMM`
@@ -124,13 +124,13 @@ systemd --user timers
 
 控制仓库对应 `config.toml` 中的 `github.control_repo`。
 
-它的主要作用不是承载业务代码，而是作为 `ccclaw` 的控制平面入口：
+它的主要作用不是承载业务代码，而是作为 `ccclaw` 的默认控制平面与自维护入口：
 
-- Issue 是任务事实源
+- 控制仓库中的 Issue 天然可以作为任务事实源
 - Comment 是审批、追问、补充上下文和回执的载体
-- maintain/admin 权限检查基于这个仓库的 GitHub 权限
-- `/ccclaw approve`、`/ccclaw go`、`/ccclaw reject` 等门禁命令也发生在这里
-- 执行结果、阻塞原因、审计痕迹最终都会回到这里
+- 当 Issue 位于控制仓库时，权限检查与 `/ccclaw ...` 门禁命令就在这里完成
+- 当 Issue 位于某个已绑定任务仓库时，权限检查、标签判定与回帖都在该任务仓库内完成
+- 执行结果、阻塞原因、审计痕迹会回写到对应的 Issue 所在仓库
 
 可以把控制仓库理解为：
 
@@ -146,11 +146,11 @@ systemd --user timers
 - 适合集中追踪自动化任务
 - 不一定等于实际被修改的代码仓库
 
-单仓库场景下，控制仓库也可以与任务仓库是同一个仓库；但在多项目协作中，通常更推荐把它单独作为控制面仓库。
+单仓库场景下，控制仓库也可以与任务仓库是同一个仓库；多项目协作时，控制仓库与某个任务仓库也允许重叠，但是否执行仍以 `ccclaw` 标签和审批门禁为准。
 
-### 本体仓库是什么
+### 知识仓库是什么
 
-本体仓库对应 `paths.home_repo`，默认是 `/opt/ccclaw`。
+知识仓库对应 `paths.home_repo`，默认是 `/opt/ccclaw`。
 
 它不是程序安装目录，也不是业务代码仓库。它的职责是保存 `ccclaw` 的长期记忆和工程沉淀：
 
@@ -158,7 +158,7 @@ systemd --user timers
 - `docs/` 中的计划、报告、RFC
 - 随机器持续演化、但不应被程序升级覆盖的内容
 
-之所以把本体仓库单独拆出来，是为了解决两个长期问题：
+之所以把知识仓库单独拆出来，是为了解决两个长期问题：
 
 1. **程序升级不应覆盖记忆**
 2. **跨任务、跨仓库的知识不应散落在每个业务仓库里**
@@ -166,7 +166,7 @@ systemd --user timers
 也就是说：
 
 - `~/.ccclaw` 是程序树
-- `/opt/ccclaw` 是记忆树
+- `/opt/ccclaw` 是知识树
 
 这两个目录故意分离，是 `ccclaw` 当前设计的关键边界。
 
@@ -189,13 +189,13 @@ systemd --user timers
 
 简化理解：
 
-- 控制仓库负责“接任务”
-- 本体仓库负责“存记忆”
+- 控制仓库负责“默认接任务与自维护”
+- 知识仓库负责“存记忆”
 - 任务仓库负责“干活”
 
-## 本体仓库模式说明
+## 知识仓库模式说明
 
-安装阶段本体仓库支持 `init | remote | local` 三种模式。
+安装阶段知识仓库支持 `init | remote | local` 三种模式。
 
 ### `init`
 
@@ -207,7 +207,7 @@ systemd --user timers
 适合场景：
 
 - 第一次安装 `ccclaw`
-- 还没有现成的本体记忆仓库
+- 还没有现成的知识仓库
 - 希望先在当前机器快速落一个本地封闭仓库
 
 这是默认、也是最稳妥的起步方式。
@@ -223,7 +223,7 @@ systemd --user timers
 
 - 你已经有一个专门保存 `ccclaw` 记忆的私有仓库
 - 需要在多台机器之间共享同一套本体记忆
-- 希望本体仓库天然具备异地备份和远程同步能力
+- 希望知识仓库天然具备异地备份和远程同步能力
 
 通常更推荐远程仓库使用私有仓库，而不是公开暴露长期记忆与内部报告。
 
@@ -236,7 +236,7 @@ systemd --user timers
 
 适合场景：
 
-- 你已经手工 clone 了本体仓库
+- 你已经手工 clone 了知识仓库
 - 你有自定义目录布局，不想让安装脚本重新决定路径
 - 你正在迁移旧环境，希望平滑接入现有仓库
 
@@ -254,7 +254,7 @@ systemd --user timers
 
 含义：
 
-- 本轮安装只完成程序树和本体仓库，不立即绑定任何工作仓库
+- 本轮安装只完成程序树和知识仓库，不立即绑定任何工作仓库
 
 适合场景：
 
@@ -304,8 +304,9 @@ systemd --user timers
 运行时路由顺序是固定的：
 
 1. Issue body 中若显式写了 `target_repo: owner/repo`，优先使用它
-2. 否则，若配置了 `default_target`，就走默认 target
-3. 若既没有 `target_repo:`，也没有 `default_target`：
+2. 否则，若该 Issue 所在仓库本身就是一个已启用 target，就直接路由到该仓库
+3. 否则，若配置了 `default_target`，就走默认 target
+4. 若既没有 `target_repo:`，Issue 所在仓库也不是 target，且没有 `default_target`：
    - 没有任何 enabled target：任务阻塞
    - 有多个 enabled target 但没有默认值：任务同样阻塞，不会猜测
 
@@ -484,8 +485,8 @@ bash install.sh
 
 - 程序目录，默认 `~/.ccclaw`
 - 控制仓库，默认 `41490/ccclaw`
-- 本体仓库模式：`init | remote | local`
-- 本体仓库目录，默认 `/opt/ccclaw`
+- 知识仓库模式：`init | remote | local`
+- 知识仓库目录，默认 `/opt/ccclaw`
 - 任务仓库模式：`none | remote | local`
 - 调度器模式：`auto | systemd | cron | none`
 - `GH_TOKEN`，若本机已 `gh auth login`，会优先直接复用 `gh auth token`
@@ -500,7 +501,7 @@ bash install.sh
 - 探查 Claude 官方安装通道可达性
 - 在需要时安装基础系统依赖
 - 安装 `rtk`，并生成 `ccclaude` 包装器
-- 初始化或接管本体仓库
+- 初始化或接管知识仓库
 - 优先复用已有 `.env`，并在缺失时回填 `gh auth token`
 - 生成带中文注释的 `config.toml`
 - 安装 `~/.ccclaw/bin/ccclaw`
@@ -520,7 +521,7 @@ bash install.sh
 bash install.sh
 ```
 
-### 路径 B：非交互安装，初始化本体仓库
+### 路径 B：非交互安装，初始化知识仓库
 
 ```bash
 bash install.sh \
@@ -529,7 +530,7 @@ bash install.sh \
   --task-repo-mode none
 ```
 
-### 路径 C：非交互安装，并接管远程本体仓库
+### 路径 C：非交互安装，并接管远程知识仓库
 
 ```bash
 bash install.sh \
@@ -710,7 +711,7 @@ CLI 约定：
 这里会记录：
 
 - 控制仓库
-- 本体仓库
+- 知识仓库
 - 路径拓扑
 - 执行器命令
 - 审批门禁
@@ -720,15 +721,16 @@ CLI 约定：
 ## 日常使用流程
 
 1. 绑定工作任务仓库
-2. 在控制仓库创建或维护 Issue
+2. 在控制仓库或任一已绑定任务仓库创建/维护带 `ccclaw` 标签的 Issue
 3. 由 `ccclaw` 巡检并在满足门禁后执行
 4. 检验工作成果，并继续在 Issue 中回复交流
 
 开源协作门禁流程：
 
-1. `maintain` 及以上成员创建的 Issue 自动进入执行判定
-2. 外部成员 Issue 默认只巡查与讨论
+1. 控制仓库与所有已绑定任务仓库中，只有带 `ccclaw` 标签的 open Issue 才进入执行判定
+2. `maintain` 及以上成员创建的 Issue 自动进入执行判定；外部成员 Issue 默认只巡查与讨论
 3. 受信任成员评论 `/ccclaw <批准词>` 后，Issue 才进入执行；最新评论也可用 `/ccclaw <否决词>` 撤回
+4. 若 `ccclaw` 标签被移除，任务转为 `BLOCKED`，重新加标签后再恢复判定
 
 ## 升级与发布
 
@@ -762,7 +764,7 @@ release 约束：
 - 从 `src/dist/` 打包
 - 至少包含安装包与 `SHA256SUMS`
 - 本机归档目录固定为 `/ops/logs/ccclaw/`
-- `make release` 会按模板生成 release notes，并显式写入控制仓库 / 本体仓库 / 任务仓库术语
+- `make release` 会按模板生成 release notes，并显式写入控制仓库 / 知识仓库 / 任务仓库术语
 - `make release` 仅允许在干净工作树上执行
 
 ## 从源码构建
@@ -793,7 +795,7 @@ src/dist/
 - 对 Linux 主机友好：优先 `systemd --user`，异常时可降级，不强迫引入额外编排系统
 - 对 token 预算友好：把确定性流程收敛到本地程序与固定目录
 - 对长期项目友好：记忆树、报告、计划、技能模板都有固定落点
-- 对升级友好：程序树和本体仓库分离，降低误覆盖风险
+- 对升级友好：程序树和知识仓库分离，降低误覆盖风险
 
 ## 已知边界
 

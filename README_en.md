@@ -43,7 +43,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 - **Token-aware by design**: deterministic work stays in local CLI logic and `systemd`/cron guidance; Claude Code is used when real execution is needed.
 - **Issue-driven workflow**: it fits the way open-source teams already work.
 - **Linux-first**: no Docker, Kubernetes, or hosted control plane required for the default setup.
-- **Program tree and memory tree are separated**: upgrades do not overwrite user memory under `/opt/ccclaw`.
+- **Program tree and knowledge tree are separated**: upgrades do not overwrite user memory under `/opt/ccclaw`.
 - **Strict config boundaries**: secrets live in `.env`, normal config lives in `.toml`, and runtime does not depend on pre-exported shell variables.
 - **Open-source safe gate**: issues from `maintain` or above can execute automatically; other issues require a trusted `/ccclaw <approval-word>` comment, and the latest trusted reject comment can revoke execution.
 - **Release-ready packaging**: releases are built from `src/dist/` and include at least the install package plus `SHA256SUMS`.
@@ -61,8 +61,8 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 - Release status: first installable release flow is available
 - Default platform: `linux/amd64`
 - Default app dir: `~/.ccclaw`
-- Default home repo: `/opt/ccclaw`
-- Home repo modes: `init | remote | local`
+- Default knowledge repo: `/opt/ccclaw`
+- Knowledge repo modes: `init | remote | local`
 - Task repo modes: `none | remote | local`
 - Default scheduler: `auto`, preferring `systemd --user`
 - Version format: `yy.mm.dd.HHMM`
@@ -120,13 +120,13 @@ Default installed layout:
 
 The control repository is `github.control_repo` in `config.toml`.
 
-Its main job is not to hold the working code. It acts as the control plane entry for `ccclaw`:
+Its main job is not to hold the working code. It acts as the default control plane and self-maintenance entry for `ccclaw`:
 
-- Issues are the task source of truth
+- Issues in the control repository can serve directly as task sources of truth
 - comments carry approvals, follow-ups, extra context, and execution feedback
-- maintain/admin permission checks are evaluated against this repository
-- `/ccclaw approve`, `/ccclaw go`, `/ccclaw reject`, and similar gate commands happen here
-- execution results, blocked reasons, and audit traces flow back here
+- when an Issue lives in the control repository, permission checks and `/ccclaw ...` gate commands are evaluated there
+- when an Issue lives in a bound task repository, permission checks, label checks, and report comments happen in that task repository
+- execution results, blocked reasons, and audit traces flow back to the repository that hosts the Issue
 
 You can think of the control repository as:
 
@@ -142,11 +142,11 @@ Best fit for a control repository:
 - suitable for centralized automation tracking
 - not necessarily the same repository that gets modified
 
-In a single-repo setup, the control repository can be the same as a task repository. In multi-project setups, it is usually cleaner to keep it separate.
+In a single-repo setup, the control repository can be the same as a task repository. In multi-project setups, the control repository may still overlap with one task repository, but execution still depends on the `ccclaw` label plus the approval gate.
 
-### What is the home repository
+### What is the knowledge repository
 
-The home repository is `paths.home_repo`, defaulting to `/opt/ccclaw`.
+The knowledge repository is `paths.home_repo`, defaulting to `/opt/ccclaw`.
 
 It is neither the program install tree nor a business code repository. Its job is to keep long-term `ccclaw` memory and project artifacts:
 
@@ -162,7 +162,7 @@ This separation exists to solve two long-term problems:
 In short:
 
 - `~/.ccclaw` is the program tree
-- `/opt/ccclaw` is the memory tree
+- `/opt/ccclaw` is the knowledge tree
 
 That separation is a core boundary in the current design.
 
@@ -185,13 +185,13 @@ Task repositories are responsible for:
 
 A simple mental model:
 
-- the control repository **receives tasks**
-- the home repository **stores memory**
+- the control repository **handles default ingress and self-maintenance**
+- the knowledge repository **stores memory**
 - task repositories **do the work**
 
-## Home Repository Modes
+## Knowledge Repository Modes
 
-The installer supports `init | remote | local` for the home repository.
+The installer supports `init | remote | local` for the knowledge repository.
 
 ### `init`
 
@@ -203,7 +203,7 @@ Meaning:
 Use it when:
 
 - this is your first `ccclaw` install
-- you do not already have a memory repository
+- you do not already have a knowledge repository
 - you want the fastest local-only bootstrap
 
 This is the default and safest starting point.
@@ -217,7 +217,7 @@ Meaning:
 
 Use it when:
 
-- you already have a dedicated remote memory repository
+- you already have a dedicated remote knowledge repository
 - you want to share the same long-term memory across machines
 - you want backup and sync through git from day one
 
@@ -232,14 +232,14 @@ Meaning:
 
 Use it when:
 
-- you already cloned the home repository manually
+- you already cloned the knowledge repository manually
 - you have a custom directory layout
 - you are migrating from an older setup and want a controlled takeover
 
 ### How to choose
 
 - **first install, lowest risk**: `init`
-- **already have a dedicated remote memory repo**: `remote`
+- **already have a dedicated remote knowledge repo**: `remote`
 - **already have the repo locally and know exactly what you are doing**: `local`
 
 ## Task Repository Modes
@@ -250,7 +250,7 @@ The installer supports `none | remote | local` for task repositories.
 
 Meaning:
 
-- install the program tree and home repository now, but do not bind any work repository yet
+- install the program tree and knowledge repository now, but do not bind any work repository yet
 
 Use it when:
 
@@ -300,8 +300,9 @@ Use it when:
 Runtime routing follows a fixed order:
 
 1. if the Issue body contains `target_repo: owner/repo`, that wins
-2. otherwise, if `default_target` is configured, it is used
-3. otherwise, if neither is present:
+2. otherwise, if the Issue repository itself is an enabled target, route to that repository
+3. otherwise, if `default_target` is configured, it is used
+4. otherwise, if none of the above is present:
    - no enabled targets: the task is blocked
    - enabled targets exist but no default is set: the task is also blocked; `ccclaw` does not guess
 
@@ -480,8 +481,8 @@ The interactive installer will ask for:
 
 - app dir, default `~/.ccclaw`
 - control repo, default `41490/ccclaw`
-- home repo mode: `init | remote | local`
-- home repo dir, default `/opt/ccclaw`
+- knowledge repo mode: `init | remote | local`
+- knowledge repo dir, default `/opt/ccclaw`
 - task repo mode: `none | remote | local`
 - scheduler mode: `auto | systemd | cron | none`
 - `GH_TOKEN`; if `gh auth login` is already in place, the installer reuses `gh auth token` first
@@ -496,7 +497,7 @@ The interactive installer will ask for:
 - checks whether the official Claude install channel is reachable
 - installs base system dependencies when needed
 - installs `rtk` and creates the `ccclaude` wrapper
-- initializes or attaches the home repository
+- initializes or attaches the knowledge repository
 - reuses an existing `.env` when possible and backfills `GH_TOKEN` from `gh auth token` when missing
 - creates a Chinese-commented `config.toml`
 - installs `~/.ccclaw/bin/ccclaw`
@@ -513,7 +514,7 @@ The interactive installer will ask for:
 bash install.sh
 ```
 
-### Path B: non-interactive install with a fresh home repo
+### Path B: non-interactive install with a fresh knowledge repo
 
 ```bash
 bash install.sh \
@@ -522,7 +523,7 @@ bash install.sh \
   --task-repo-mode none
 ```
 
-### Path C: non-interactive install with a remote home repo
+### Path C: non-interactive install with a remote knowledge repo
 
 ```bash
 bash install.sh \
@@ -653,7 +654,7 @@ Stored at:
 It contains:
 
 - control repo
-- home repo
+- knowledge repo
 - path layout
 - executor command
 - approval gate
@@ -663,15 +664,16 @@ It contains:
 ## Daily Workflow
 
 1. bind a work repository
-2. create or update an Issue in the control repository
+2. create or update a labeled `ccclaw` Issue in the control repository or any bound task repository
 3. let `ccclaw` inspect and execute when the gate allows it
 4. review results and continue discussion in the Issue
 
 Open-source gate flow:
 
-1. Issues created by members with `maintain` or above are eligible for automatic execution
-2. external Issues are inspected and discussed by default
-3. a trusted `/ccclaw <approval-word>` comment moves the Issue into execution, and a later trusted reject word can pull it back
+1. Only open Issues with the `ccclaw` label in the control repository or any bound task repository enter execution evaluation
+2. Issues created by members with `maintain` or above are eligible for automatic execution; external Issues are inspected and discussed by default
+3. A trusted `/ccclaw <approval-word>` comment moves the Issue into execution, and a later trusted reject word can pull it back
+4. If the `ccclaw` label is removed, the task becomes `BLOCKED` until the label is added back
 
 ## Upgrade and Release
 
@@ -733,7 +735,7 @@ src/dist/
 - natural fit for Linux hosts because it prefers `systemd --user` but can degrade when user-level systemd is unavailable
 - lower token waste because deterministic orchestration is kept local
 - durable project memory through fixed knowledge and report locations
-- safer upgrades because the program tree and home repo are separated
+- safer upgrades because the program tree and knowledge repo are separated
 
 ## Current Boundaries
 

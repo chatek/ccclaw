@@ -3,7 +3,7 @@
 ## 安装拓扑
 
 - 程序目录：`~/.ccclaw`
-- 本体仓库：`/opt/ccclaw`，支持 `init|remote|local`
+- 知识仓库：`/opt/ccclaw`，支持 `init|remote|local`
 - 首个任务仓库：由安装交互确认，支持 `remote|local`
 - remote 任务仓库固定 clone 入口：`/opt/src/3claw/owner/repo`
 - 调度模式：`auto|systemd|cron|none`
@@ -47,8 +47,8 @@
 - 若缺少 `rtk`：优先按官方 quick install 安装
 - 不默认执行 `rtk init --global`
 - 若缺少 `sqlite3`：优先通过系统包管理器安装
-- 本体仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
+- 知识仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
 - 任务仓库默认不绑定；若指定远程仓库，则 clone 到 `/opt/src/3claw/owner/repo`
 - 若 `gh` 已登录，则优先复用 `gh auth token` 写入 `.env`
 - 若 `systemd --user` 不可用，默认降级继续安装，并输出 `cron` 样板
-- 升级只覆盖程序树，不覆盖本体仓库
+- 升级只覆盖程序树，不覆盖知识仓库

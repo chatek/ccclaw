@@ -36,7 +36,33 @@ func TestResolveTargetRepoFallsBackToDefaultTarget(t *testing.T) {
 			}},
 		},
 	}
-	repo, reasons := rt.resolveTargetRepo("无显式 target")
+	repo, reasons := rt.resolveTargetRepo("41490/other", "无显式 target")
+	if repo != "41490/ccclaw" {
+		t.Fatalf("unexpected repo: %q", repo)
+	}
+	if len(reasons) != 0 {
+		t.Fatalf("expected no reasons, got %#v", reasons)
+	}
+}
+
+func TestResolveTargetRepoUsesIssueRepoWhenItIsEnabledTarget(t *testing.T) {
+	rt := &Runtime{
+		cfg: &config.Config{
+			DefaultTarget: "41490/other",
+			Paths:         config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Targets: []config.TargetConfig{
+				{
+					Repo:      "41490/ccclaw",
+					LocalPath: "/opt/src/ccclaw",
+				},
+				{
+					Repo:      "41490/other",
+					LocalPath: "/opt/src/other",
+				},
+			},
+		},
+	}
+	repo, reasons := rt.resolveTargetRepo("41490/ccclaw", "无显式 target")
 	if repo != "41490/ccclaw" {
 		t.Fatalf("unexpected repo: %q", repo)
 	}
@@ -52,12 +78,102 @@ func TestResolveTargetRepoBlocksWhenNoTargetConfigured(t *testing.T) {
 			Targets: nil,
 		},
 	}
-	repo, reasons := rt.resolveTargetRepo("无显式 target")
+	repo, reasons := rt.resolveTargetRepo("41490/other", "无显式 target")
 	if repo != "" {
 		t.Fatalf("expected empty repo, got %q", repo)
 	}
 	if len(reasons) != 1 {
 		t.Fatalf("expected 1 reason, got %#v", reasons)
+	}
+}
+
+func TestSyncIssueBlocksWhenLabelMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/work/collaborators/outsider/permission")
+    printf '{"permission":"read"}\n'
+    ;;
+  "repos/41490/work/issues/27/comments?per_page=100")
+    printf '[]\n'
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+
+	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{
+				ControlRepo: "41490/ccclaw",
+				IssueLabel:  "ccclaw",
+			},
+			Paths: config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Approval: config.ApprovalConfig{
+				Words:             []string{"approve"},
+				RejectWords:       []string{"reject"},
+				MinimumPermission: "maintain",
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/work",
+				LocalPath: "/opt/src/work",
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store:   store,
+		ghCache: map[string]*github.Client{},
+	}
+
+	issue := github.Issue{
+		Repo:      "41490/work",
+		Number:    27,
+		Title:     "缺少标签",
+		Body:      "请处理",
+		State:     "open",
+		User:      github.User{Login: "outsider"},
+		CreatedAt: time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC),
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("syncIssue failed: %v", err)
+	}
+
+	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Repo, issue.Number))
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected task to be created")
+	}
+	if task.State != core.StateBlocked {
+		t.Fatalf("unexpected task state: %#v", task)
+	}
+	if task.TargetRepo != "41490/work" {
+		t.Fatalf("expected issue repo to become target repo: %#v", task)
 	}
 }
 
@@ -123,11 +239,12 @@ esac
 				KBPath:    "/opt/ccclaw/kb",
 			}},
 		},
-		store: store,
-		gh:    github.NewClient("41490/ccclaw", map[string]string{}),
+		store:   store,
+		ghCache: map[string]*github.Client{},
 	}
 
 	issue := github.Issue{
+		Repo:      "41490/ccclaw",
 		Number:    15,
 		Title:     "审批否决覆盖可信发起者",
 		Body:      "请先暂停\n\ntarget_repo: 41490/ccclaw\n",
@@ -138,7 +255,7 @@ esac
 		t.Fatalf("syncIssue failed: %v", err)
 	}
 
-	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Number))
+	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Repo, issue.Number))
 	if err != nil {
 		t.Fatalf("读取任务失败: %v", err)
 	}
@@ -156,6 +273,9 @@ esac
 	}
 	if task.ApprovalCommand != "/ccclaw reject" {
 		t.Fatalf("unexpected approval command: %#v", task)
+	}
+	if task.IssueRepo != "41490/ccclaw" {
+		t.Fatalf("unexpected issue repo: %#v", task)
 	}
 }
 

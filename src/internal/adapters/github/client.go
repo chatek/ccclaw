@@ -23,6 +23,7 @@ type User struct {
 }
 
 type Issue struct {
+	Repo      string    `json:"-"`
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
@@ -82,6 +83,7 @@ func (c *Client) ListOpenIssues(label string, limit int) ([]Issue, error) {
 		if issue.PullReq != nil {
 			continue
 		}
+		issue.Repo = c.repo
 		filtered = append(filtered, issue)
 	}
 	return filtered, nil
@@ -96,6 +98,7 @@ func (c *Client) GetIssue(number int) (*Issue, error) {
 	if err := json.Unmarshal(out, &issue); err != nil {
 		return nil, fmt.Errorf("解析 issue 失败: %w", err)
 	}
+	issue.Repo = c.repo
 	return &issue, nil
 }
 
@@ -274,6 +277,19 @@ func LabelNames(labels []Label) []string {
 		names = append(names, label.Name)
 	}
 	return names
+}
+
+func HasLabel(labels []Label, want string) bool {
+	want = strings.TrimSpace(want)
+	if want == "" {
+		return true
+	}
+	for _, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label.Name), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func IssueURL(repo string, number int) string {

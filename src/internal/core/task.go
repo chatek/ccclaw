@@ -53,6 +53,7 @@ type Task struct {
 	TaskID                string
 	IdempotencyKey        string
 	ControlRepo           string
+	IssueRepo             string
 	TargetRepo            string
 	LastSessionID         string
 	IssueNumber           int
@@ -82,12 +83,12 @@ type TokenUsage struct {
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
-func IdempotencyKey(issueNumber int) string {
-	return fmt.Sprintf("%d#body", issueNumber)
+func IdempotencyKey(issueRepo string, issueNumber int) string {
+	return fmt.Sprintf("%s#%d#body", strings.TrimSpace(issueRepo), issueNumber)
 }
 
-func TaskID(issueNumber int) string {
-	return IdempotencyKey(issueNumber)
+func TaskID(issueRepo string, issueNumber int) string {
+	return IdempotencyKey(issueRepo, issueNumber)
 }
 
 func InferIntent(labels []string) Intent {

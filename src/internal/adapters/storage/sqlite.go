@@ -41,6 +41,7 @@ type TokenStatsSummary struct {
 }
 
 type TaskTokenStat struct {
+	IssueRepo      string
 	TaskID         string
 	IssueNumber    int
 	IssueTitle     string
@@ -101,6 +102,7 @@ type JournalDaySummary struct {
 
 type JournalTaskSummary struct {
 	TaskID       string
+	IssueRepo    string
 	IssueNumber  int
 	IssueTitle   string
 	State        core.State
@@ -146,7 +148,7 @@ func (s *Store) Ping() error {
 
 func (s *Store) GetByIdempotency(idempotencyKey string) (*core.Task, error) {
 	row := s.db.QueryRow(`
-		SELECT task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
+		SELECT task_id, idempotency_key, control_repo, issue_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
 		issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 		approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
 		FROM tasks WHERE idempotency_key = ?
@@ -166,11 +168,12 @@ func (s *Store) UpsertTask(task *core.Task) error {
 	task.UpdatedAt = now
 	_, err = s.db.Exec(`
 		INSERT INTO tasks (
-			task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
+			task_id, idempotency_key, control_repo, issue_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
 			issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 			approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_id) DO UPDATE SET
+			issue_repo = excluded.issue_repo,
 			target_repo = excluded.target_repo,
 			last_session_id = excluded.last_session_id,
 			issue_title = excluded.issue_title,
@@ -190,7 +193,7 @@ func (s *Store) UpsertTask(task *core.Task) error {
 			report_path = excluded.report_path,
 			updated_at = excluded.updated_at
 	`,
-		task.TaskID, task.IdempotencyKey, task.ControlRepo, task.TargetRepo, task.LastSessionID, task.IssueNumber, task.IssueTitle, task.IssueBody,
+		task.TaskID, task.IdempotencyKey, task.ControlRepo, task.IssueRepo, task.TargetRepo, task.LastSessionID, task.IssueNumber, task.IssueTitle, task.IssueBody,
 		task.IssueAuthor, task.IssueAuthorPermission, string(labels), string(task.Intent), string(task.RiskLevel), boolToInt(task.Approved), task.ApprovalCommand,
 		task.ApprovalActor, task.ApprovalCommentID, string(task.State), task.RetryCount, task.ErrorMsg, task.ReportPath, task.CreatedAt, task.UpdatedAt,
 	)
@@ -356,6 +359,7 @@ func (s *Store) TaskTokenStatsBetween(start, end time.Time, limit int) ([]TaskTo
 	rows, err := s.db.Query(`
 		SELECT
 			t.task_id,
+			t.issue_repo,
 			t.issue_number,
 			t.issue_title,
 			t.last_session_id,
@@ -369,7 +373,7 @@ func (s *Store) TaskTokenStatsBetween(start, end time.Time, limit int) ([]TaskTo
 		FROM token_usage u
 		JOIN tasks t ON t.task_id = u.task_id
 	`+where+`
-		GROUP BY t.task_id, t.issue_number, t.issue_title, t.last_session_id
+		GROUP BY t.task_id, t.issue_repo, t.issue_number, t.issue_title, t.last_session_id
 		ORDER BY MAX(u.created_at) DESC, t.issue_number DESC
 		LIMIT ?
 	`, args...)
@@ -386,6 +390,7 @@ func (s *Store) TaskTokenStatsBetween(start, end time.Time, limit int) ([]TaskTo
 		)
 		if err := rows.Scan(
 			&item.TaskID,
+			&item.IssueRepo,
 			&item.IssueNumber,
 			&item.IssueTitle,
 			&item.LastSessionID,
@@ -584,7 +589,7 @@ func (s *Store) DailyRTKComparisonBetween(start, end time.Time) ([]DailyRTKCompa
 
 func (s *Store) ListTasks() ([]*core.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
+		SELECT task_id, idempotency_key, control_repo, issue_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
 		issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 		approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
 		FROM tasks ORDER BY updated_at DESC, issue_number DESC
@@ -610,7 +615,7 @@ func (s *Store) ListTasks() ([]*core.Task, error) {
 
 func (s *Store) ListRunnable(limit int) ([]*core.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
+		SELECT task_id, idempotency_key, control_repo, issue_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
 		issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 		approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
 		FROM tasks
@@ -639,7 +644,7 @@ func (s *Store) ListRunnable(limit int) ([]*core.Task, error) {
 
 func (s *Store) ListRunning() ([]*core.Task, error) {
 	rows, err := s.db.Query(`
-		SELECT task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
+		SELECT task_id, idempotency_key, control_repo, issue_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
 		issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 		approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
 		FROM tasks
@@ -706,6 +711,7 @@ func (s *Store) JournalTaskSummaries(day time.Time) ([]JournalTaskSummary, error
 	rows, err := s.db.Query(`
 		SELECT
 			t.task_id,
+			t.issue_repo,
 			t.issue_number,
 			t.issue_title,
 			t.state,
@@ -727,7 +733,7 @@ func (s *Store) JournalTaskSummaries(day time.Time) ([]JournalTaskSummary, error
 			UNION
 			SELECT task_id FROM tasks WHERE updated_at >= ? AND updated_at < ?
 		)
-		GROUP BY t.task_id, t.issue_number, t.issue_title, t.state
+		GROUP BY t.task_id, t.issue_repo, t.issue_number, t.issue_title, t.state
 		ORDER BY MAX(t.updated_at) DESC, t.issue_number DESC
 	`, start, end, start, end, start, end, start, end)
 	if err != nil {
@@ -744,6 +750,7 @@ func (s *Store) JournalTaskSummaries(day time.Time) ([]JournalTaskSummary, error
 		)
 		if err := rows.Scan(
 			&item.TaskID,
+			&item.IssueRepo,
 			&item.IssueNumber,
 			&item.IssueTitle,
 			&state,
@@ -858,6 +865,7 @@ func (s *Store) init() error {
 			task_id TEXT PRIMARY KEY,
 			idempotency_key TEXT UNIQUE NOT NULL,
 			control_repo TEXT NOT NULL,
+			issue_repo TEXT NOT NULL DEFAULT '',
 			target_repo TEXT NOT NULL,
 			last_session_id TEXT NOT NULL DEFAULT '',
 			issue_number INTEGER NOT NULL,
@@ -913,6 +921,12 @@ func (s *Store) init() error {
 	if err := s.ensureTaskColumn("last_session_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureTaskColumn("issue_repo", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE tasks SET issue_repo = control_repo WHERE issue_repo = ''`); err != nil {
+		return fmt.Errorf("回填 issue_repo 失败: %w", err)
+	}
 	if err := s.ensureTokenUsageColumn("prompt_file", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -933,7 +947,7 @@ func scanTask(row scanner) (*core.Task, error) {
 		approved   int
 	)
 	if err := row.Scan(
-		&task.TaskID, &task.IdempotencyKey, &task.ControlRepo, &task.TargetRepo, &task.LastSessionID, &task.IssueNumber, &task.IssueTitle, &task.IssueBody,
+		&task.TaskID, &task.IdempotencyKey, &task.ControlRepo, &task.IssueRepo, &task.TargetRepo, &task.LastSessionID, &task.IssueNumber, &task.IssueTitle, &task.IssueBody,
 		&task.IssueAuthor, &task.IssueAuthorPermission, &labelsJSON, &intent, &risk, &approved, &task.ApprovalCommand,
 		&task.ApprovalActor, &task.ApprovalCommentID, &state, &task.RetryCount, &task.ErrorMsg, &task.ReportPath, &task.CreatedAt, &task.UpdatedAt,
 	); err != nil {
@@ -949,6 +963,9 @@ func scanTask(row scanner) (*core.Task, error) {
 	task.RiskLevel = core.RiskLevel(risk)
 	task.State = core.State(state)
 	task.Approved = approved == 1
+	if strings.TrimSpace(task.IssueRepo) == "" {
+		task.IssueRepo = task.ControlRepo
+	}
 	return &task, nil
 }
 

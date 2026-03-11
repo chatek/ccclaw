@@ -32,11 +32,11 @@ type Runtime struct {
 	cfg      *config.Config
 	secrets  *config.Secrets
 	store    *storage.Store
-	gh       *github.Client
 	rep      *reporter.Reporter
 	mem      *memory.Index
 	memRoot  string
 	memCache map[string]*memory.Index
+	ghCache  map[string]*github.Client
 }
 
 const (
@@ -88,27 +88,96 @@ func NewRuntime(configPath, envFile string) (*Runtime, error) {
 		_ = store.Close()
 		return nil, fmt.Errorf("构建 kb 索引失败: %w", err)
 	}
-	ghClient := github.NewClient(cfg.GitHub.ControlRepo, secrets.Values)
-	return &Runtime{
+	rt := &Runtime{
 		cfg:      cfg,
 		secrets:  secrets,
 		store:    store,
-		gh:       ghClient,
-		rep:      reporter.New(ghClient),
 		mem:      mem,
 		memRoot:  cfg.Paths.KBDir,
 		memCache: map[string]*memory.Index{cfg.Paths.KBDir: mem},
-	}, nil
+		ghCache:  map[string]*github.Client{},
+	}
+	rt.rep = reporter.New(rt.clientForRepo)
+	return rt, nil
+}
+
+func (rt *Runtime) clientForRepo(repo string) *github.Client {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		repo = rt.cfg.GitHub.ControlRepo
+	}
+	if client, ok := rt.ghCache[repo]; ok {
+		return client
+	}
+	values := map[string]string{}
+	if rt.secrets != nil {
+		values = rt.secrets.Values
+	}
+	client := github.NewClient(repo, values)
+	rt.ghCache[repo] = client
+	return client
+}
+
+func (rt *Runtime) issueSourceRepos() []string {
+	repos := make([]string, 0, len(rt.cfg.Targets)+1)
+	seen := map[string]struct{}{}
+	appendRepo := func(repo string) {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			return
+		}
+		if _, ok := seen[repo]; ok {
+			return
+		}
+		seen[repo] = struct{}{}
+		repos = append(repos, repo)
+	}
+	appendRepo(rt.cfg.GitHub.ControlRepo)
+	for _, target := range rt.cfg.EnabledTargets() {
+		appendRepo(target.Repo)
+	}
+	return repos
 }
 
 func (rt *Runtime) Ingest(ctx context.Context) error {
 	defer rt.store.Close()
-	issues, err := rt.gh.ListOpenIssues(rt.cfg.GitHub.IssueLabel, rt.cfg.GitHub.Limit)
+	seen := make(map[string]struct{})
+	for _, repo := range rt.issueSourceRepos() {
+		issues, err := rt.clientForRepo(repo).ListOpenIssues(rt.cfg.GitHub.IssueLabel, rt.cfg.GitHub.Limit)
+		if err != nil {
+			return err
+		}
+		for _, issue := range issues {
+			if err := rt.syncIssue(ctx, issue, false); err != nil {
+				return err
+			}
+			seen[core.TaskID(issue.Repo, issue.Number)] = struct{}{}
+		}
+	}
+
+	tasks, err := rt.store.ListTasks()
 	if err != nil {
 		return err
 	}
-	for _, issue := range issues {
-		if err := rt.syncIssue(ctx, issue, false); err != nil {
+	observedRepos := make(map[string]struct{}, len(rt.issueSourceRepos()))
+	for _, repo := range rt.issueSourceRepos() {
+		observedRepos[repo] = struct{}{}
+	}
+	for _, task := range tasks {
+		if task == nil || task.State == core.StateDone || task.State == core.StateDead {
+			continue
+		}
+		if _, ok := observedRepos[strings.TrimSpace(task.IssueRepo)]; !ok {
+			continue
+		}
+		if _, ok := seen[task.TaskID]; ok {
+			continue
+		}
+		issue, err := rt.clientForRepo(task.IssueRepo).GetIssue(task.IssueNumber)
+		if err != nil {
+			return err
+		}
+		if err := rt.syncIssue(ctx, *issue, false); err != nil {
 			return err
 		}
 	}
@@ -130,7 +199,7 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 		return err
 	}
 	for _, task := range tasks {
-		issue, err := rt.gh.GetIssue(task.IssueNumber)
+		issue, err := rt.clientForRepo(task.IssueRepo).GetIssue(task.IssueNumber)
 		if err != nil {
 			return err
 		}
@@ -373,7 +442,8 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 			}
 			_, _ = fmt.Fprintf(
 				w,
-				"#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
+				"%s#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
+				item.IssueRepo,
 				item.IssueNumber,
 				item.Runs,
 				item.InputTokens,
@@ -514,7 +584,7 @@ func (rt *Runtime) Status(out io.Writer) error {
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "ISSUE\tSESSION\tAGE\tHEALTH\tTITLE")
 			for _, item := range sessionSnapshot.Items {
-				_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%s\n", item.IssueNumber, item.SessionName, item.Age, item.Health, item.Title)
+				_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%s\n", item.IssueRepo, item.IssueNumber, item.SessionName, item.Age, item.Health, item.Title)
 			}
 			if err := w.Flush(); err != nil {
 				return err
@@ -543,7 +613,7 @@ func (rt *Runtime) Status(out io.Writer) error {
 			if targetRepo == "" {
 				targetRepo = "-"
 			}
-			_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
+			_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueRepo, task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
 		}
 		if err := w.Flush(); err != nil {
 			return err
@@ -584,6 +654,7 @@ func (rt *Runtime) Status(out io.Writer) error {
 }
 
 type statusSessionItem struct {
+	IssueRepo   string
 	IssueNumber int
 	SessionName string
 	Age         string
@@ -646,6 +717,7 @@ func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapsh
 		sessionName := executor.SessionName(task.TaskID)
 		taskSessions[sessionName] = struct{}{}
 		item := statusSessionItem{
+			IssueRepo:   task.IssueRepo,
 			IssueNumber: task.IssueNumber,
 			SessionName: sessionName,
 			Age:         "-",
@@ -687,7 +759,7 @@ func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapsh
 func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*core.Task) []statusAlert {
 	taskRefs := make(map[string]string, len(tasks))
 	for _, task := range tasks {
-		taskRefs[task.TaskID] = fmt.Sprintf("#%d", task.IssueNumber)
+		taskRefs[task.TaskID] = fmt.Sprintf("%s#%d", task.IssueRepo, task.IssueNumber)
 	}
 	cutoff := time.Now().Add(-7 * 24 * time.Hour)
 	alerts := make([]statusAlert, 0, 5)
@@ -782,7 +854,9 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "sqlite3 CLI", run: func() (string, error) { return commandVersion("sqlite3", "--version") }},
 		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
 		{name: "gh CLI", run: func() (string, error) { return commandVersion("gh", "--version") }},
-		{name: "GitHub 网络", run: func() (string, error) { return "rate_limit", rt.gh.NetworkCheck(ctx) }},
+		{name: "GitHub 网络", run: func() (string, error) {
+			return "rate_limit", rt.clientForRepo(rt.cfg.GitHub.ControlRepo).NetworkCheck(ctx)
+		}},
 		{name: "SQLite 读写", run: func() (string, error) { return rt.cfg.Paths.StateDB, rt.store.Ping() }},
 		{name: "调度器", run: rt.describeSchedulerStatus},
 		{name: "磁盘空间", run: func() (string, error) { return rt.cfg.Paths.LogDir, rt.checkDisk() }},
@@ -813,15 +887,21 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 
 func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bool) error {
 	_ = ctx
-	existing, err := rt.store.GetByIdempotency(core.IdempotencyKey(issue.Number))
+	issueRepo := strings.TrimSpace(issue.Repo)
+	if issueRepo == "" {
+		issueRepo = rt.cfg.GitHub.ControlRepo
+		issue.Repo = issueRepo
+	}
+	existing, err := rt.store.GetByIdempotency(core.IdempotencyKey(issueRepo, issue.Number))
 	if err != nil {
 		return err
 	}
-	trusted, permission, err := rt.gh.IsTrustedActor(issue.User.Login, rt.cfg.Approval.MinimumPermission)
+	client := rt.clientForRepo(issueRepo)
+	trusted, permission, err := client.IsTrustedActor(issue.User.Login, rt.cfg.Approval.MinimumPermission)
 	if err != nil {
 		return err
 	}
-	approval, err := rt.gh.FindApproval(
+	approval, err := client.FindApproval(
 		issue.Number,
 		rt.cfg.Approval.Words,
 		rt.cfg.Approval.RejectWords,
@@ -837,8 +917,14 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	case approval.Approved:
 		approved = true
 	}
-	targetRepo, routeReasons := rt.resolveTargetRepo(issue.Body)
+	targetRepo, routeReasons := rt.resolveTargetRepo(issueRepo, issue.Body)
 	blockReasons := make([]string, 0, 2)
+	if !strings.EqualFold(strings.TrimSpace(issue.State), "open") {
+		blockReasons = append(blockReasons, fmt.Sprintf("Issue 当前状态为 `%s`，等待人工重新打开", issue.State))
+	}
+	if !github.HasLabel(issue.Labels, rt.cfg.GitHub.IssueLabel) {
+		blockReasons = append(blockReasons, fmt.Sprintf("Issue 缺少触发标签 `%s`，等待重新打标签后再恢复", rt.cfg.GitHub.IssueLabel))
+	}
 	if approval.Rejected {
 		blockReasons = append(blockReasons, fmt.Sprintf("最近审批被 `%s` 使用 `%s` 否决", approval.Actor, approval.Command))
 	} else if !approved {
@@ -854,15 +940,17 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	labels := github.LabelNames(issue.Labels)
 	if existing == nil {
 		existing = &core.Task{
-			TaskID:         core.TaskID(issue.Number),
-			IdempotencyKey: core.IdempotencyKey(issue.Number),
+			TaskID:         core.TaskID(issueRepo, issue.Number),
+			IdempotencyKey: core.IdempotencyKey(issueRepo, issue.Number),
 			ControlRepo:    rt.cfg.GitHub.ControlRepo,
+			IssueRepo:      issueRepo,
 			TargetRepo:     targetRepo,
 			CreatedAt:      issue.CreatedAt,
 		}
 	}
 	previousState := existing.State
 	existing.IssueNumber = issue.Number
+	existing.IssueRepo = issueRepo
 	existing.IssueTitle = issue.Title
 	existing.IssueBody = issue.Body
 	existing.IssueAuthor = issue.User.Login
@@ -928,8 +1016,9 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 	var sb strings.Builder
 	sb.WriteString("你是 ccclaw 执行器，请在目标仓库中完成以下 Issue 任务。\n\n")
 	sb.WriteString(fmt.Sprintf("## 控制仓库\n- %s\n\n", task.ControlRepo))
+	sb.WriteString(fmt.Sprintf("## Issue 来源仓库\n- %s\n\n", task.IssueRepo))
 	sb.WriteString(fmt.Sprintf("## 目标仓库\n- repo: %s\n- local_path: %s\n- kb_path: %s\n\n", target.Repo, target.LocalPath, target.KBPath))
-	sb.WriteString(fmt.Sprintf("## Issue #%d: %s\n\n%s\n\n", task.IssueNumber, task.IssueTitle, task.IssueBody))
+	sb.WriteString(fmt.Sprintf("## Issue %s#%d: %s\n\n%s\n\n", task.IssueRepo, task.IssueNumber, task.IssueTitle, task.IssueBody))
 	sb.WriteString("## 元数据\n")
 	sb.WriteString(fmt.Sprintf("- 发起者: %s\n- 发起者权限: %s\n- 风险等级: %s\n- 意图: %s\n- 标签: %s\n", task.IssueAuthor, task.IssueAuthorPermission, task.RiskLevel, task.Intent, strings.Join(task.Labels, ", ")))
 	if task.ApprovalActor != "" {
@@ -1532,13 +1621,18 @@ func commandExists(command []string, binary string) error {
 	return requireCommand(binary)
 }
 
-func (rt *Runtime) resolveTargetRepo(body string) (string, []string) {
+func (rt *Runtime) resolveTargetRepo(issueRepo, body string) (string, []string) {
 	explicitTarget := parseTargetRepo(body)
 	if explicitTarget != "" {
 		if _, err := rt.cfg.EnabledTargetByRepo(explicitTarget); err != nil {
 			return "", []string{fmt.Sprintf("Issue 指定的 `target_repo: %s` 不可用: %v", explicitTarget, err)}
 		}
 		return explicitTarget, nil
+	}
+	if issueRepo != "" {
+		if _, err := rt.cfg.EnabledTargetByRepo(issueRepo); err == nil {
+			return issueRepo, nil
+		}
 	}
 	if rt.cfg.DefaultTarget != "" {
 		if _, err := rt.cfg.EnabledTargetByRepo(rt.cfg.DefaultTarget); err != nil {
@@ -2004,7 +2098,8 @@ func (rt *Runtime) renderJournal(day time.Time, summary *storage.JournalDaySumma
 		sb.WriteString("- 当日无任务变更\n")
 	} else {
 		for _, item := range tasks {
-			sb.WriteString(fmt.Sprintf("- #%d `%s` 状态=`%s` runs=%d cost=%.4f tokens=%d/%d cache=%d/%d updated_at=%s\n",
+			sb.WriteString(fmt.Sprintf("- %s#%d `%s` 状态=`%s` runs=%d cost=%.4f tokens=%d/%d cache=%d/%d updated_at=%s\n",
+				item.IssueRepo,
 				item.IssueNumber,
 				item.IssueTitle,
 				item.State,
