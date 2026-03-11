@@ -632,6 +632,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 ccclaw                          # 无参数显示帮助
 ccclaw -h                       # 显示帮助
 ccclaw -V                       # 显示版本
+ccclaw version                  # 显示版本（子命令形式）
 
 # 环境诊断
 ccclaw doctor                   # 执行环境与部署健康检查
@@ -639,6 +640,7 @@ ccclaw doctor                   # 执行环境与部署健康检查
 # 配置
 ccclaw config                   # 校验并展示当前配置
 ccclaw config migrate-approval  # 旧审批配置一键迁移
+ccclaw config set-scheduler --mode auto|systemd|cron|none  # 更新调度器配置
 
 # 任务流
 ccclaw ingest                   # 拉取并入队 Issue 任务
