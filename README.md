@@ -52,15 +52,24 @@ O     O     O     |  oo o   o   o
 
 ## 当前状态
 
-- 当前阶段：`phase0.4`
-- 当前能力：已具备首个可正确下载安装的 release 流
+- 当前阶段：`phase0.5`
 - 默认平台：`linux/amd64`
 - 默认程序目录：`~/.ccclaw`
 - 默认本体仓库：`/opt/ccclaw`
 - 本体仓库模式：`init | remote | local`
 - 任务仓库模式：`none | remote | local`
-- 默认调度方式：`auto`，优先 `systemd --user`
+- 默认调度方式：`auto`，优先 `systemd --user`，降级到受控 `cron`
 - 版本命名：`yy.mm.dd.HHMM`
+
+当前已落地的关键能力：
+
+- **完整调度后端**：`systemd --user` / 受控 `cron` / `none` 三级调度，统一切换命令 `scheduler use`，统一状态查询 `scheduler status`
+- **审批门禁增强**：支持多批准词和多否决词（中英文），旧配置一键迁移 `config migrate-approval`
+- **运行态观测**：`status` 快照、`patrol` tmux 会话巡查、`stats` token 统计（日期范围、日聚合、rtk 对比）
+- **日报归档**：`journal` 命令生成指定日期日报
+- **渐进式 kb 索引**：`kb/` 目录可增量索引，支持长期知识检索
+- **安装回归测试**：完整的安装流程回归测试套件
+- **环境诊断增强**：`doctor` 细化调度器降级路径诊断
 
 ## 工作拓扑
 
@@ -619,21 +628,43 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 ## 常用命令
 
 ```bash
-ccclaw
-ccclaw -h
-ccclaw -V
-ccclaw doctor
-ccclaw config
-ccclaw ingest
-ccclaw run
-ccclaw status
-ccclaw scheduler status
-ccclaw scheduler enable-cron
-ccclaw scheduler disable-cron
-ccclaw scheduler use cron
-ccclaw scheduler use systemd
-ccclaw scheduler use none
-ccclaw target list
+# 基础
+ccclaw                          # 无参数显示帮助
+ccclaw -h                       # 显示帮助
+ccclaw -V                       # 显示版本
+
+# 环境诊断
+ccclaw doctor                   # 执行环境与部署健康检查
+
+# 配置
+ccclaw config                   # 校验并展示当前配置
+ccclaw config migrate-approval  # 旧审批配置一键迁移
+
+# 任务流
+ccclaw ingest                   # 拉取并入队 Issue 任务
+ccclaw run                      # 执行待处理任务
+
+# 运行态观测
+ccclaw status                   # 查看当前运行态快照
+ccclaw patrol                   # 巡查 tmux 会话与运行中任务
+ccclaw stats                    # 查看 token 使用统计
+ccclaw stats --daily --from 2026-03-01 --to 2026-03-10
+ccclaw stats --rtk-comparison   # rtk 与非 rtk 对比统计
+
+# 日报归档
+ccclaw journal                  # 生成当日 journal
+ccclaw journal --date 2026-03-10
+
+# 调度器
+ccclaw scheduler status         # 查看调度后端状态
+ccclaw scheduler enable-cron    # 启用受控 cron
+ccclaw scheduler disable-cron   # 禁用受控 cron
+ccclaw scheduler use cron       # 切换到 cron 调度
+ccclaw scheduler use systemd    # 切换到 systemd 调度
+ccclaw scheduler use none       # 停用调度
+
+# 任务仓库
+ccclaw target list              # 列出所有绑定的任务仓库
 ccclaw target add --repo owner/repo --path /abs/path/to/repo
 ccclaw target disable --repo owner/repo
 ```
