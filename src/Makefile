@@ -71,8 +71,8 @@ release-notes: checksum
 release-preflight:
 	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
 	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
-	@upstream="$$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || { echo "当前分支未配置上游，禁止创建 release"; exit 1; }
-	@local_sha="$$(git rev-parse HEAD)"; \
+	@upstream="$$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || { echo "当前分支未配置上游，禁止创建 release"; exit 1; }; \
+	local_sha="$$(git rev-parse HEAD)"; \
 	upstream_sha="$$(git rev-parse "$$upstream")"; \
 	[ "$$local_sha" = "$$upstream_sha" ] || { echo "当前分支 HEAD 尚未推送到 $$upstream，禁止创建 release"; exit 1; }
 
