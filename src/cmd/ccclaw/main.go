@@ -156,7 +156,7 @@ func newRootCmd() *cobra.Command {
 		},
 	})
 
-	rootCmd.AddCommand(&cobra.Command{
+	configCmd := &cobra.Command{
 		Use:   "config",
 		Short: "校验并展示当前配置",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -164,9 +164,26 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return rt.ShowConfig(os.Stdout)
+			return rt.ShowConfig(cmd.OutOrStdout())
+		},
+	}
+	configCmd.AddCommand(&cobra.Command{
+		Use:   "migrate-approval",
+		Short: "将旧 approval.command 配置迁移为 words/reject_words",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			changed, err := config.MigrateLegacyApproval(configPath)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "当前配置无需迁移 approval 门禁")
+				return nil
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已迁移审批配置: %s\n", configPath)
+			return nil
 		},
 	})
+	rootCmd.AddCommand(configCmd)
 
 	targetCmd := &cobra.Command{
 		Use:   "target",

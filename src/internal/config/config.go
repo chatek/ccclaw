@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+const legacyApprovalMigrationHint = "检测到废弃配置 approval.command；请执行 `ccclaw config migrate-approval`，或手工改为 approval.words / approval.reject_words"
+
 type Config struct {
 	DefaultTarget string          `mapstructure:"default_target" toml:"default_target"`
 	GitHub        GitHubConfig    `mapstructure:"github" toml:"github"`
@@ -70,6 +72,15 @@ type Secrets struct {
 }
 
 func Load(path string) (*Config, error) {
+	path = ExpandPath(path)
+	legacyApproval, err := DetectLegacyApprovalCommand(path)
+	if err != nil {
+		return nil, err
+	}
+	if legacyApproval {
+		return nil, fmt.Errorf("%s: %s", legacyApprovalMigrationHint, path)
+	}
+
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetConfigType("toml")
@@ -384,6 +395,40 @@ func ExpandPath(path string) string {
 	return path
 }
 
+func DetectLegacyApprovalCommand(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	payload, err := os.ReadFile(ExpandPath(path))
+	if err != nil {
+		return false, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	return approvalSectionContainsLegacyCommand(string(payload)), nil
+}
+
+func MigrateLegacyApproval(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, errors.New("配置文件路径不能为空")
+	}
+	path = ExpandPath(path)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+
+	updated, changed, err := rewriteApprovalSection(string(payload))
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return false, fmt.Errorf("写入迁移后的配置文件失败: %w", err)
+	}
+	return true, nil
+}
+
 func defaultApprovalWords() []string {
 	return []string{"approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"}
 }
@@ -407,4 +452,93 @@ func normalizeApprovalWords(words []string) []string {
 		normalized = append(normalized, candidate)
 	}
 	return normalized
+}
+
+func approvalSectionContainsLegacyCommand(content string) bool {
+	_, changed, err := rewriteApprovalSection(content)
+	return err == nil && changed
+}
+
+func rewriteApprovalSection(content string) (string, bool, error) {
+	lines := strings.Split(content, "\n")
+	start := -1
+	end := len(lines)
+	for idx, line := range lines {
+		if isApprovalHeader(line) {
+			start = idx
+			break
+		}
+	}
+	if start < 0 {
+		return "", false, errors.New("未找到 [approval] 配置段")
+	}
+	for idx := start + 1; idx < len(lines); idx++ {
+		if isSectionHeader(lines[idx]) {
+			end = idx
+			break
+		}
+	}
+
+	section := lines[start:end]
+	if !sectionHasLegacyCommand(section) {
+		return content, false, nil
+	}
+	minimumPermission := sectionMinimumPermission(section)
+	if minimumPermission == "" {
+		minimumPermission = "maintain"
+	}
+
+	replacement := []string{
+		"[approval]",
+		fmt.Sprintf("minimum_permission = %q", minimumPermission),
+		fmt.Sprintf("words = %s", tomlArrayLiteral(defaultApprovalWords())),
+		fmt.Sprintf("reject_words = %s", tomlArrayLiteral(defaultRejectWords())),
+	}
+
+	updatedLines := make([]string, 0, len(lines)-len(section)+len(replacement))
+	updatedLines = append(updatedLines, lines[:start]...)
+	updatedLines = append(updatedLines, replacement...)
+	updatedLines = append(updatedLines, lines[end:]...)
+	return strings.Join(updatedLines, "\n"), true, nil
+}
+
+func isApprovalHeader(line string) bool {
+	return strings.EqualFold(strings.TrimSpace(line), "[approval]")
+}
+
+func isSectionHeader(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")
+}
+
+func sectionHasLegacyCommand(lines []string) bool {
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "command") {
+			return true
+		}
+	}
+	return false
+}
+
+func sectionMinimumPermission(lines []string) string {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(trimmed), "minimum_permission") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+	}
+	return ""
+}
+
+func tomlArrayLiteral(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, fmt.Sprintf("%q", value))
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }

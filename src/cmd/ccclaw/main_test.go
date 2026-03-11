@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +36,53 @@ func TestRootCmdHelpByDefault(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage:") {
 		t.Fatalf("预期输出帮助信息，实际为: %q", out.String())
+	}
+}
+
+func TestConfigMigrateApprovalCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "~/.ccclaw"
+home_repo = "/opt/ccclaw"
+state_db = "~/.ccclaw/var/state.db"
+log_dir = "~/.ccclaw/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "~/.ccclaw/.env"
+
+[executor]
+command = ["claude"]
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "config", "migrate-approval"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 config migrate-approval 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "已迁移审批配置") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), `command = "/ccclaw approve"`) {
+		t.Fatalf("legacy command should be removed: %q", string(payload))
 	}
 }
 

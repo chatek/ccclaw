@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -149,6 +150,75 @@ minimum_permission = "maintain"
 	}
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected legacy approval.command to be rejected")
+	} else if got := err.Error(); !strings.Contains(got, "migrate-approval") {
+		t.Fatalf("expected migration hint, got %q", got)
+	}
+}
+
+func TestMigrateLegacyApprovalRewritesSection(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `default_target = ""
+
+[github]
+control_repo = "41490/ccclaw"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+
+[[targets]]
+repo = "41490/ccclaw"
+local_path = "/opt/src/ccclaw"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := MigrateLegacyApproval(configPath)
+	if err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected file to change")
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, want := range []string{
+		`minimum_permission = "admin"`,
+		`words = ["approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"]`,
+		`reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+	if strings.Contains(text, `command = "/ccclaw approve"`) {
+		t.Fatalf("legacy command should be removed: %q", text)
+	}
+}
+
+func TestMigrateLegacyApprovalNoopForMigratedConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[approval]
+minimum_permission = "maintain"
+words = ["approve"]
+reject_words = ["reject"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := MigrateLegacyApproval(configPath)
+	if err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	if changed {
+		t.Fatal("expected no change for migrated config")
 	}
 }
 

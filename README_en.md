@@ -369,6 +369,24 @@ Notes:
 - if `kb_path` is empty, it inherits the global `paths.kb_dir`
 - `disabled = true` targets do not participate in routing
 
+### Migrating Legacy Approval Config
+
+If your older `config.toml` still contains:
+
+```toml
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+```
+
+new builds will reject it explicitly. Run:
+
+```bash
+ccclaw --config ~/.ccclaw/ops/config/config.toml config migrate-approval
+```
+
+The migration rewrites the section to `approval.words` / `approval.reject_words` and keeps your existing `minimum_permission`.
+
 ### Explicit target selection in an Issue
 
 In multi-repo setups, put this in the Issue body when needed:

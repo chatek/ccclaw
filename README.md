@@ -364,6 +364,24 @@ disabled = true
 - `kb_path` 为空时会继承全局 `paths.kb_dir`
 - `disabled = true` 的 target 不参与路由
 
+### 旧审批配置迁移
+
+如果你本机的旧 `config.toml` 仍然保留：
+
+```toml
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+```
+
+升级后会被显式拒绝加载。可直接执行：
+
+```bash
+ccclaw --config ~/.ccclaw/ops/config/config.toml config migrate-approval
+```
+
+迁移命令会把旧字段改写为 `approval.words` / `approval.reject_words`，并保留你原有的 `minimum_permission`。
+
 ### Issue 中显式指定目标仓库
 
 在多任务仓库场景，建议在 Issue 正文中显式加上：
