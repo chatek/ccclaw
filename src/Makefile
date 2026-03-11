@@ -1,5 +1,6 @@
 VERSION ?= $(shell date '+%y.%m.%d.%H%M')
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
+FULL_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf 'unknown')
 GOOS ?= linux
 GOARCH ?= amd64
 GO ?= $(shell if [ -x /usr/local/go/bin/go ]; then printf '/usr/local/go/bin/go'; else command -v go; fi)
@@ -70,13 +71,18 @@ release-notes: checksum
 release-preflight:
 	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
 	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
+	@upstream="$$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)" || { echo "当前分支未配置上游，禁止创建 release"; exit 1; }
+	@local_sha="$$(git rev-parse HEAD)"; \
+	upstream_sha="$$(git rev-parse "$$upstream")"; \
+	[ "$$local_sha" = "$$upstream_sha" ] || { echo "当前分支 HEAD 尚未推送到 $$upstream，禁止创建 release"; exit 1; }
 
 release: release-preflight
-	@$(MAKE) archive VERSION=$(VERSION) COMMIT=$(COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
-	@$(MAKE) release-notes VERSION=$(VERSION) COMMIT=$(COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
+	@$(MAKE) archive VERSION=$(VERSION) COMMIT=$(COMMIT) FULL_COMMIT=$(FULL_COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
+	@$(MAKE) release-notes VERSION=$(VERSION) COMMIT=$(COMMIT) FULL_COMMIT=$(FULL_COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
 	gh release create $(VERSION) \
 		$(PACKAGE_FILE) \
 		$(CHECKSUM_FILE) \
+		--target $(FULL_COMMIT) \
 		--title "$(VERSION)" \
 		--notes-file $(RELEASE_NOTES_FILE)
 
