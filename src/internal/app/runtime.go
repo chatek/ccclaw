@@ -47,6 +47,13 @@ const (
 	manualSudoGuide           = "sudo 无口令未开启，请按文档手工执行 `sudo visudo` 并为当前用户配置 `NOPASSWD` 规则"
 )
 
+type StatsOptions struct {
+	Start             time.Time
+	End               time.Time
+	Daily             bool
+	ShowRTKComparison bool
+}
+
 func NewRuntime(configPath, envFile string) (*Runtime, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -245,18 +252,32 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 }
 
 func (rt *Runtime) Stats(out io.Writer) error {
-	return rt.StatsWithOptions(out, false)
+	return rt.StatsWithOptions(out, StatsOptions{})
 }
 
-func (rt *Runtime) StatsWithOptions(out io.Writer, showRTKComparison bool) error {
+func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 	defer rt.store.Close()
-	summary, err := rt.store.TokenStats()
+	summary, err := rt.store.TokenStatsBetween(options.Start, options.End)
 	if err != nil {
 		return err
 	}
 	if summary.Runs == 0 {
-		_, _ = fmt.Fprintln(out, "暂无 token 使用记录")
+		if hasStatsRange(options.Start, options.End) {
+			_, _ = fmt.Fprintln(out, "所选范围内暂无 token 使用记录")
+		} else {
+			_, _ = fmt.Fprintln(out, "暂无 token 使用记录")
+		}
 		return nil
+	}
+	if hasStatsRange(options.Start, options.End) {
+		_, _ = fmt.Fprintln(out, "统计范围:")
+		if !options.Start.IsZero() {
+			_, _ = fmt.Fprintf(out, "  起始日期: %s\n", options.Start.Format("2006-01-02"))
+		}
+		if !options.End.IsZero() {
+			_, _ = fmt.Fprintf(out, "  截止日期: %s (含当日)\n", options.End.Add(-24*time.Hour).Format("2006-01-02"))
+		}
+		_, _ = fmt.Fprintln(out)
 	}
 	_, _ = fmt.Fprintf(out, "执行次数: %d\n", summary.Runs)
 	_, _ = fmt.Fprintf(out, "会话数: %d\n", summary.Sessions)
@@ -271,7 +292,34 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, showRTKComparison bool) error
 	if !summary.LastUsedAt.IsZero() {
 		_, _ = fmt.Fprintf(out, "最近记录: %s\n", summary.LastUsedAt.Format(time.RFC3339))
 	}
-	stats, err := rt.store.TaskTokenStats(20)
+	if options.Daily {
+		daily, err := rt.store.DailyTokenStatsBetween(options.Start, options.End)
+		if err != nil {
+			return err
+		}
+		if len(daily) > 0 {
+			_, _ = fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out, "按天聚合:")
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "DAY\tRUNS\tSESSIONS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD")
+			for _, item := range daily {
+				_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.4f\n",
+					item.Day.Format("2006-01-02"),
+					item.Runs,
+					item.Sessions,
+					item.InputTokens,
+					item.OutputTokens,
+					item.CacheCreate,
+					item.CacheRead,
+					item.CostUSD,
+				)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+		}
+	}
+	stats, err := rt.store.TaskTokenStatsBetween(options.Start, options.End, 20)
 	if err != nil {
 		return err
 	}
@@ -307,10 +355,10 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, showRTKComparison bool) error
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	if !showRTKComparison {
+	if !options.ShowRTKComparison {
 		return nil
 	}
-	comparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
+	comparison, err := rt.store.RTKComparisonBetween(options.Start, options.End)
 	if err != nil {
 		return err
 	}
@@ -324,6 +372,10 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, showRTKComparison bool) error
 	_, _ = fmt.Fprintf(out, "  Plain avg tokens: %.1f\n", comparison.PlainAvgTokens)
 	_, _ = fmt.Fprintf(out, "  Estimated savings: %.2f%%\n", comparison.SavingsPercent)
 	return nil
+}
+
+func hasStatsRange(start, end time.Time) bool {
+	return !start.IsZero() || !end.IsZero()
 }
 
 func (rt *Runtime) Status(out io.Writer) error {

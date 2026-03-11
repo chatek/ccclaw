@@ -201,7 +201,7 @@ func TestStatsRendersSummaryAndTaskTable(t *testing.T) {
 
 	rt := &Runtime{store: store}
 	var out bytes.Buffer
-	if err := rt.StatsWithOptions(&out, false); err != nil {
+	if err := rt.StatsWithOptions(&out, StatsOptions{}); err != nil {
 		t.Fatalf("执行 stats 失败: %v", err)
 	}
 	text := out.String()
@@ -303,7 +303,7 @@ func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
 
 	rt := &Runtime{store: store}
 	var out bytes.Buffer
-	if err := rt.StatsWithOptions(&out, true); err != nil {
+	if err := rt.StatsWithOptions(&out, StatsOptions{ShowRTKComparison: true}); err != nil {
 		t.Fatalf("执行 stats --rtk-comparison 失败: %v", err)
 	}
 	text := out.String()
@@ -311,6 +311,115 @@ func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
+	}
+}
+
+func TestStatsWithDateRangeAndDailyRendersSections(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	for _, task := range []*core.Task{
+		{
+			TaskID:         "20#body",
+			IdempotencyKey: "20#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    20,
+			IssueTitle:     "range one",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateDone,
+		},
+		{
+			TaskID:         "21#body",
+			IdempotencyKey: "21#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    21,
+			IssueTitle:     "range two",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateDone,
+		},
+	} {
+		if err := store.UpsertTask(task); err != nil {
+			t.Fatalf("写入任务失败: %v", err)
+		}
+	}
+	for _, record := range []storage.TokenUsageRecord{
+		{
+			TaskID:     "20#body",
+			SessionID:  "sess-20",
+			PromptFile: "/tmp/20.md",
+			Usage:      core.TokenUsage{InputTokens: 10, OutputTokens: 5},
+			CostUSD:    0.05,
+			RecordedAt: time.Date(2026, 3, 8, 10, 0, 0, 0, time.UTC),
+		},
+		{
+			TaskID:     "20#body",
+			SessionID:  "sess-20b",
+			PromptFile: "/tmp/20b.md",
+			Usage:      core.TokenUsage{InputTokens: 12, OutputTokens: 6},
+			CostUSD:    0.06,
+			RTKEnabled: true,
+			RecordedAt: time.Date(2026, 3, 9, 11, 0, 0, 0, time.UTC),
+		},
+		{
+			TaskID:     "21#body",
+			SessionID:  "sess-21",
+			PromptFile: "/tmp/21.md",
+			Usage:      core.TokenUsage{InputTokens: 20, OutputTokens: 8},
+			CostUSD:    0.08,
+			RTKEnabled: false,
+			RecordedAt: time.Date(2026, 3, 9, 13, 0, 0, 0, time.UTC),
+		},
+		{
+			TaskID:     "21#body",
+			SessionID:  "sess-21b",
+			PromptFile: "/tmp/21b.md",
+			Usage:      core.TokenUsage{InputTokens: 30, OutputTokens: 10},
+			CostUSD:    0.10,
+			RecordedAt: time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC),
+		},
+	} {
+		if err := store.RecordTokenUsage(record); err != nil {
+			t.Fatalf("写入 token 记录失败: %v", err)
+		}
+	}
+
+	rt := &Runtime{store: store}
+	var out bytes.Buffer
+	if err := rt.StatsWithOptions(&out, StatsOptions{
+		Start:             time.Date(2026, 3, 9, 0, 0, 0, 0, time.UTC),
+		End:               time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC),
+		Daily:             true,
+		ShowRTKComparison: true,
+	}); err != nil {
+		t.Fatalf("执行 stats 范围/按天失败: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"统计范围:",
+		"起始日期: 2026-03-09",
+		"截止日期: 2026-03-10 (含当日)",
+		"执行次数: 3",
+		"按天聚合:",
+		"2026-03-09",
+		"2026-03-10",
+		"#21",
+		"RTK 对比:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+	if strings.Contains(text, "2026-03-08") {
+		t.Fatalf("unexpected out-of-range day in %q", text)
 	}
 }
 

@@ -64,6 +64,17 @@ type RTKComparison struct {
 	SavingsPercent  float64
 }
 
+type DailyTokenStat struct {
+	Day          time.Time
+	Runs         int
+	Sessions     int
+	InputTokens  int
+	OutputTokens int
+	CacheCreate  int
+	CacheRead    int
+	CostUSD      float64
+}
+
 type JournalDaySummary struct {
 	TasksTouched int
 	Started      int
@@ -179,7 +190,18 @@ func (s *Store) UpsertTask(task *core.Task) error {
 }
 
 func (s *Store) AppendEvent(taskID string, eventType core.EventType, detail string) error {
-	_, err := s.db.Exec(`INSERT INTO task_events (task_id, event_type, detail) VALUES (?, ?, ?)`, taskID, string(eventType), detail)
+	return s.AppendEventAt(taskID, eventType, detail, time.Time{})
+}
+
+func (s *Store) AppendEventAt(taskID string, eventType core.EventType, detail string, createdAt time.Time) error {
+	if createdAt.IsZero() {
+		_, err := s.db.Exec(`INSERT INTO task_events (task_id, event_type, detail) VALUES (?, ?, ?)`, taskID, string(eventType), detail)
+		if err != nil {
+			return fmt.Errorf("写入任务事件失败: %w", err)
+		}
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO task_events (task_id, event_type, detail, created_at) VALUES (?, ?, ?, ?)`, taskID, string(eventType), detail, createdAt)
 	if err != nil {
 		return fmt.Errorf("写入任务事件失败: %w", err)
 	}
@@ -311,9 +333,15 @@ func (s *Store) RTKComparisonBetween(start, end time.Time) (*RTKComparison, erro
 }
 
 func (s *Store) TaskTokenStats(limit int) ([]TaskTokenStat, error) {
+	return s.TaskTokenStatsBetween(time.Time{}, time.Time{}, limit)
+}
+
+func (s *Store) TaskTokenStatsBetween(start, end time.Time, limit int) ([]TaskTokenStat, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	where, args := buildTimeRangeClause("u.created_at", start, end)
+	args = append(args, limit)
 	rows, err := s.db.Query(`
 		SELECT
 			t.task_id,
@@ -329,10 +357,11 @@ func (s *Store) TaskTokenStats(limit int) ([]TaskTokenStat, error) {
 			COALESCE(MAX(u.created_at), '')
 		FROM token_usage u
 		JOIN tasks t ON t.task_id = u.task_id
+	`+where+`
 		GROUP BY t.task_id, t.issue_number, t.issue_title, t.last_session_id
 		ORDER BY MAX(u.created_at) DESC, t.issue_number DESC
 		LIMIT ?
-	`, limit)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("读取任务 token 统计失败: %w", err)
 	}
@@ -372,6 +401,82 @@ func (s *Store) TaskTokenStats(limit int) ([]TaskTokenStat, error) {
 		return nil, fmt.Errorf("遍历任务 token 统计失败: %w", err)
 	}
 	return stats, nil
+}
+
+func (s *Store) DailyTokenStatsBetween(start, end time.Time) ([]DailyTokenStat, error) {
+	where, args := buildTimeRangeClause("created_at", start, end)
+	rows, err := s.db.Query(`
+		SELECT session_id, input_tokens, output_tokens, cache_create, cache_read, cost_usd, created_at
+		FROM token_usage
+	`+where+`
+		ORDER BY created_at ASC, id ASC
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("读取每日 token 统计失败: %w", err)
+	}
+	defer rows.Close()
+
+	type aggregate struct {
+		item     DailyTokenStat
+		sessions map[string]struct{}
+	}
+
+	loc := time.Local
+	if !start.IsZero() {
+		loc = start.Location()
+	}
+	orderedKeys := make([]string, 0)
+	items := make(map[string]*aggregate)
+	for rows.Next() {
+		var (
+			sessionID    string
+			inputTokens  int
+			outputTokens int
+			cacheCreate  int
+			cacheRead    int
+			costUSD      float64
+			createdAt    string
+		)
+		if err := rows.Scan(&sessionID, &inputTokens, &outputTokens, &cacheCreate, &cacheRead, &costUSD, &createdAt); err != nil {
+			return nil, fmt.Errorf("扫描每日 token 统计失败: %w", err)
+		}
+		parsed, err := parseSQLiteTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		day := parsed.In(loc)
+		day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+		key := day.Format("2006-01-02")
+		entry, exists := items[key]
+		if !exists {
+			entry = &aggregate{
+				item:     DailyTokenStat{Day: day},
+				sessions: make(map[string]struct{}),
+			}
+			items[key] = entry
+			orderedKeys = append(orderedKeys, key)
+		}
+		entry.item.Runs++
+		entry.item.InputTokens += inputTokens
+		entry.item.OutputTokens += outputTokens
+		entry.item.CacheCreate += cacheCreate
+		entry.item.CacheRead += cacheRead
+		entry.item.CostUSD += costUSD
+		if strings.TrimSpace(sessionID) != "" {
+			entry.sessions[sessionID] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历每日 token 统计失败: %w", err)
+	}
+
+	daily := make([]DailyTokenStat, 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		entry := items[key]
+		entry.item.Sessions = len(entry.sessions)
+		daily = append(daily, entry.item)
+	}
+	return daily, nil
 }
 
 func (s *Store) ListTasks() ([]*core.Task, error) {

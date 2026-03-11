@@ -26,6 +26,9 @@ func newRootCmd() *cobra.Command {
 	var runLimit int
 	var showVersion bool
 	var showRTKComparison bool
+	var statsFrom string
+	var statsTo string
+	var statsDaily bool
 	var journalDate string
 
 	rootCmd := &cobra.Command{
@@ -92,9 +95,16 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return rt.StatsWithOptions(os.Stdout, showRTKComparison)
+			options, err := parseStatsOptions(statsFrom, statsTo, statsDaily, showRTKComparison)
+			if err != nil {
+				return err
+			}
+			return rt.StatsWithOptions(os.Stdout, options)
 		},
 	}
+	statsCmd.Flags().StringVar(&statsFrom, "from", "", "按 YYYY-MM-DD 指定统计起始日期(含当日)")
+	statsCmd.Flags().StringVar(&statsTo, "to", "", "按 YYYY-MM-DD 指定统计截止日期(含当日)")
+	statsCmd.Flags().BoolVar(&statsDaily, "daily", false, "按天输出聚合统计")
 	statsCmd.Flags().BoolVar(&showRTKComparison, "rtk-comparison", false, "显示 rtk 与非 rtk 的对比统计")
 	rootCmd.AddCommand(statsCmd)
 
@@ -271,6 +281,31 @@ func defaultConfigPath() string {
 		return filepath.Join(home, ".ccclaw", "ops", "config", "config.toml")
 	}
 	return filepath.Join("ops", "config", "config.toml")
+}
+
+func parseStatsOptions(from, to string, daily, showRTKComparison bool) (app.StatsOptions, error) {
+	options := app.StatsOptions{
+		Daily:             daily,
+		ShowRTKComparison: showRTKComparison,
+	}
+	if from != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", from, time.Local)
+		if err != nil {
+			return options, fmt.Errorf("解析 --from 失败: %w", err)
+		}
+		options.Start = parsed
+	}
+	if to != "" {
+		parsed, err := time.ParseInLocation("2006-01-02", to, time.Local)
+		if err != nil {
+			return options, fmt.Errorf("解析 --to 失败: %w", err)
+		}
+		options.End = parsed.Add(24 * time.Hour)
+	}
+	if !options.Start.IsZero() && !options.End.IsZero() && !options.Start.Before(options.End) {
+		return options, fmt.Errorf("--from 必须早于或等于 --to")
+	}
+	return options, nil
 }
 
 func defaultEnvFilePath() string {
