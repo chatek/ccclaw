@@ -14,7 +14,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-const legacyApprovalMigrationHint = "检测到废弃配置 approval.command；请执行 `ccclaw config migrate-approval`，或手工改为 approval.words / approval.reject_words"
+const OfficialControlRepo = "41490/ccclaw"
+
+const legacyApprovalMigrationHint = "检测到废弃配置 approval.command；请执行 `ccclaw config migrate`，或兼容使用 `ccclaw config migrate-approval`"
 
 type Config struct {
 	DefaultTarget string          `mapstructure:"default_target" toml:"default_target"`
@@ -99,6 +101,7 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	v.SetConfigType("toml")
+	v.SetDefault("github.control_repo", OfficialControlRepo)
 	v.SetDefault("github.issue_label", "ccclaw")
 	v.SetDefault("github.limit", 20)
 	v.SetDefault("executor.provider", "claude-code")
@@ -134,6 +137,7 @@ func Load(path string) (*Config, error) {
 }
 
 func (cfg *Config) NormalizePaths() {
+	cfg.GitHub.ControlRepo = OfficialControlRepo
 	cfg.Paths.AppDir = ExpandPath(cfg.Paths.AppDir)
 	cfg.Paths.HomeRepo = ExpandPath(cfg.Paths.HomeRepo)
 	cfg.Paths.StateDB = ExpandPath(cfg.Paths.StateDB)
@@ -496,6 +500,66 @@ func MigrateLegacyApproval(path string) (bool, error) {
 	return true, nil
 }
 
+func Migrate(path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, errors.New("配置文件路径不能为空")
+	}
+	path = ExpandPath(path)
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+
+	loadPath := path
+	updatedPayload := string(payload)
+	approvalChanged := false
+
+	if rewritten, changed, err := rewriteApprovalSection(updatedPayload); err == nil {
+		if changed {
+			updatedPayload = rewritten
+			approvalChanged = true
+		}
+	} else if !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "未找到 [approval] 配置段") {
+		return false, err
+	}
+
+	var cleanup func()
+	if approvalChanged {
+		tmpFile, err := os.CreateTemp(filepath.Dir(path), ".ccclaw-config-migrate-*.toml")
+		if err != nil {
+			return false, fmt.Errorf("创建迁移临时文件失败: %w", err)
+		}
+		loadPath = tmpFile.Name()
+		cleanup = func() { _ = os.Remove(loadPath) }
+		if _, err := tmpFile.WriteString(updatedPayload); err != nil {
+			_ = tmpFile.Close()
+			cleanup()
+			return false, fmt.Errorf("写入迁移临时文件失败: %w", err)
+		}
+		if err := tmpFile.Close(); err != nil {
+			cleanup()
+			return false, fmt.Errorf("关闭迁移临时文件失败: %w", err)
+		}
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	cfg, err := Load(loadPath)
+	if err != nil {
+		return false, err
+	}
+	rendered := renderAnnotatedConfig(cfg)
+	if rendered == string(payload) {
+		return false, nil
+	}
+	if err := os.WriteFile(path, []byte(rendered), 0o644); err != nil {
+		return false, fmt.Errorf("写入迁移后的配置文件失败: %w", err)
+	}
+	return true, nil
+}
+
 func defaultApprovalWords() []string {
 	return []string{"approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"}
 }
@@ -812,7 +876,7 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString(fmt.Sprintf("default_target = %q\n\n", cfg.DefaultTarget))
 
 	buf.WriteString("# GitHub 控制面配置。\n")
-	buf.WriteString("# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。\n")
+	buf.WriteString("# control_repo 固定指向官方控制仓库，不接受运行时自定义。\n")
 	buf.WriteString("[github]\n")
 	buf.WriteString(fmt.Sprintf("control_repo = %q\n", cfg.GitHub.ControlRepo))
 	buf.WriteString(fmt.Sprintf("issue_label = %q\n", cfg.GitHub.IssueLabel))

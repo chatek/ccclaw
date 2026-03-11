@@ -14,6 +14,7 @@
 - 只看 ingest 日志：`~/.ccclaw/bin/ccclaw scheduler logs ingest --lines 100`
 - 归档 warning 及以上日志：`~/.ccclaw/bin/ccclaw scheduler logs all --level warning --archive`
 - 升级程序：`bash ~/.ccclaw/upgrade.sh`
+  - 固定从 `41490/ccclaw` 最新官方 release 下载、校验并覆盖程序树
 
 ## systemd 运维
 
@@ -58,6 +59,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 
 - 普通配置：`~/.ccclaw/ops/config/config.toml`
 - 敏感信息：`~/.ccclaw/.env`
+- `github.control_repo` 固定为官方控制仓库 `41490/ccclaw`
 - `github.limit` 表示 ingest 每轮拉取匹配标签的 open issues 上限，不是并发数
 - `scheduler.calendar_timezone` 与 `[scheduler.timers]` 只影响 systemd timer 生成
 - `[scheduler.logs]` 控制 `scheduler logs` 的默认级别过滤与归档目录

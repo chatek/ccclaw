@@ -18,7 +18,6 @@
 
 ### 普通项，写入 `config.toml`
 
-- `control_repo`
 - `app_dir`
 - `home_repo`
 - `kb_dir`
@@ -43,6 +42,7 @@
 ## 默认策略
 
 - 若本机已有 Claude 配置：仅只读探查并直接继承
+- `control_repo` 固定为 `41490/ccclaw`，不再交互询问
 - 不默认补装 plugins / marketplace / `example-skills`
 - 若缺少 `rtk`：优先按官方 quick install 安装
 - 不默认执行 `rtk init --global`

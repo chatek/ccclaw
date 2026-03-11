@@ -34,7 +34,7 @@ APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
 HOME_REPO="${HOME_REPO:-$HOME_REPO_DEFAULT}"
 HOME_REPO_MODE="${HOME_REPO_MODE:-init}"
 HOME_REPO_REMOTE="${HOME_REPO_REMOTE:-}"
-CONTROL_REPO="${CONTROL_REPO:-$CONTROL_REPO_DEFAULT}"
+CONTROL_REPO="$CONTROL_REPO_DEFAULT"
 BIN_LINK="${BIN_LINK:-$BIN_LINK_DEFAULT}"
 SYSTEMD_USER_DIR="$SYSTEMD_USER_DIR_DEFAULT"
 TASK_CLONE_ROOT="${TASK_CLONE_ROOT:-$TASK_CLONE_ROOT_DEFAULT}"
@@ -133,7 +133,6 @@ usage() {
   --home-repo PATH          本体仓库目录，默认 /opt/ccclaw
   --home-repo-mode MODE     本体仓库模式: init|remote|local
   --home-repo-remote URL    本体远程仓库 URL 或 owner/repo；传入后自动切换 remote 模式
-  --control-repo REPO       控制仓库，默认 41490/ccclaw
   --task-repo-mode MODE     任务仓库模式: none|remote|local
   --task-repo-remote URL    任务远程仓库 URL 或 owner/repo；传入后自动切换 remote 模式
   --task-repo-local PATH    本地已有任务仓库路径；传入后自动切换 local 模式
@@ -162,7 +161,6 @@ while (($#)); do
     --home-repo) shift; HOME_REPO="$1" ;;
     --home-repo-mode) shift; HOME_REPO_MODE="$1" ;;
     --home-repo-remote) shift; HOME_REPO_REMOTE="$1"; HOME_REPO_MODE="remote" ;;
-    --control-repo) shift; CONTROL_REPO="$1" ;;
     --task-repo-mode) shift; TASK_REPO_MODE="$1" ;;
     --task-repo-remote) shift; TASK_REPO_REMOTE="$1"; TASK_REPO_MODE="remote" ;;
     --task-repo-local) shift; TASK_REPO_LOCAL="$1"; TASK_REPO_MODE="local" ;;
@@ -301,6 +299,29 @@ path_is_within() {
   return 1
 }
 
+same_existing_path() {
+  local source="$1" target="$2"
+  [[ -e "$source" && -e "$target" && "$source" -ef "$target" ]]
+}
+
+install_release_file() {
+  local mode="$1" source="$2" target="$3"
+  if same_existing_path "$source" "$target"; then
+    log "跳过同路径文件覆盖: $target"
+    return 0
+  fi
+  install -m "$mode" "$source" "$target"
+}
+
+copy_release_dir_contents() {
+  local source_dir="$1" target_dir="$2"
+  if same_existing_path "$source_dir" "$target_dir"; then
+    log "跳过同路径目录复制: $target_dir"
+    return 0
+  fi
+  cp -R "$source_dir/." "$target_dir/"
+}
+
 append_line_if_missing() {
   local file="$1" line="$2"
   if grep -Fqx "$line" "$file" 2>/dev/null; then
@@ -362,20 +383,34 @@ load_existing_scheduler_preferences() {
   [[ -f "$CONFIG_FILE" ]] || return 0
   if [[ "$SCHEDULER_EXPLICIT" -eq 0 ]]; then
     value="$(toml_get_value "$CONFIG_FILE" "scheduler" "mode")"
-    [[ -n "$value" ]] && SCHEDULER="$value"
+    if [[ -n "$value" ]]; then
+      SCHEDULER="$value"
+    fi
   fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler" "systemd_user_dir")"
-  [[ -n "$value" ]] && SYSTEMD_USER_DIR="$(expand_path "$value")"
+  if [[ -n "$value" ]]; then
+    SYSTEMD_USER_DIR="$(expand_path "$value")"
+  fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler" "calendar_timezone")"
-  [[ -n "$value" ]] && CALENDAR_TIMEZONE="$value"
+  if [[ -n "$value" ]]; then
+    CALENDAR_TIMEZONE="$value"
+  fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "ingest")"
-  [[ -n "$value" ]] && INGEST_CALENDAR="$value"
+  if [[ -n "$value" ]]; then
+    INGEST_CALENDAR="$value"
+  fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "run")"
-  [[ -n "$value" ]] && RUN_CALENDAR="$value"
+  if [[ -n "$value" ]]; then
+    RUN_CALENDAR="$value"
+  fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "patrol")"
-  [[ -n "$value" ]] && PATROL_CALENDAR="$value"
+  if [[ -n "$value" ]]; then
+    PATROL_CALENDAR="$value"
+  fi
   value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "journal")"
-  [[ -n "$value" ]] && JOURNAL_CALENDAR="$value"
+  if [[ -n "$value" ]]; then
+    JOURNAL_CALENDAR="$value"
+  fi
 }
 
 calendar_has_explicit_timezone() {
@@ -881,7 +916,8 @@ print_flow() {
    - 优先复用已有 .env 与 gh auth token
 4. 生成普通配置：
    - config.toml: $CONFIG_FILE
-   - 记录 repo/path/执行器/调度等非敏感配置
+   - 固定写入官方控制仓库: $CONTROL_REPO
+   - 记录 path/执行器/调度等非敏感配置
 5. 初始化或接管本体仓库：
    - init: 在目标目录 git init，并写入 dist/kb 初始记忆树
    - remote: clone 指定仓库到目标目录，再补齐 kb 初始树
@@ -925,7 +961,6 @@ print_flow() {
 == 交互项矩阵 ==
 - 必填且敏感(.env): GH_TOKEN
 - 可选且敏感(.env): ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, GREPTILE_API_KEY
-- 必填但可默认(config.toml): control_repo
 - 必填但可默认(config.toml): app_dir, home_repo, kb_dir, state_db, log_dir
 - 本体仓库模式: init|remote|local
 - 任务仓库模式: none|remote|local
@@ -937,7 +972,6 @@ FLOW
 collect_inputs() {
   print_stage "阶段 1/4 安装拓扑"
   prompt_default APP_DIR "程序目录" "$APP_DIR"
-  prompt_default CONTROL_REPO "控制仓库 owner/repo" "$CONTROL_REPO"
   prompt_mode HOME_REPO_MODE "本体仓库模式 (I)nit/(R)emote/(L)ocal" "$HOME_REPO_MODE" "init remote local"
   prompt_default HOME_REPO "本体仓库目录" "$HOME_REPO"
   case "$HOME_REPO_MODE" in
@@ -1252,8 +1286,8 @@ create_config_file() {
     log "保留已有普通配置: $CONFIG_FILE"
     if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
       local migrate_out
-      migrate_out="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config migrate-approval 2>&1)" \
-        || fail "自动迁移废弃 approval 配置失败: $migrate_out"
+      migrate_out="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config migrate 2>&1)" \
+        || fail "自动迁移现有配置失败: $migrate_out"
       log "$migrate_out"
     fi
     return 0
@@ -1269,7 +1303,7 @@ create_config_file() {
 default_target = ""
 
 # GitHub 控制面配置。
-# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。
+# control_repo 固定指向官方控制仓库，不接受安装期自定义。
 [github]
 control_repo = "$CONTROL_REPO"
 issue_label = "ccclaw"
@@ -1560,7 +1594,7 @@ copy_ops_tree() {
     log "[simulate] cp -R $DIST_DIR/ops/. $APP_DIR/ops/"
     return 0
   fi
-  cp -R "$DIST_DIR/ops/." "$APP_DIR/ops/"
+  copy_release_dir_contents "$DIST_DIR/ops" "$APP_DIR/ops"
 }
 
 install_release_scripts() {
@@ -1569,8 +1603,8 @@ install_release_scripts() {
     log "[simulate] install $DIST_DIR/upgrade.sh -> $APP_DIR/upgrade.sh"
     return 0
   fi
-  install -m 755 "$DIST_DIR/install.sh" "$APP_DIR/install.sh"
-  install -m 755 "$DIST_DIR/upgrade.sh" "$APP_DIR/upgrade.sh"
+  install_release_file 755 "$DIST_DIR/install.sh" "$APP_DIR/install.sh"
+  install_release_file 755 "$DIST_DIR/upgrade.sh" "$APP_DIR/upgrade.sh"
 }
 
 create_app_layout() {
@@ -1578,7 +1612,7 @@ create_app_layout() {
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] install $DIST_DIR/bin/ccclaw -> $APP_DIR/bin/ccclaw"
   else
-    install -m 755 "$DIST_DIR/bin/ccclaw" "$APP_DIR/bin/ccclaw"
+    install_release_file 755 "$DIST_DIR/bin/ccclaw" "$APP_DIR/bin/ccclaw"
   fi
   install_release_scripts
   copy_ops_tree

@@ -9,7 +9,7 @@ bash install.sh
 ## 目录内容
 
 - `install.sh`：交互式安装、预检、调度选择与首次配置采集
-- `upgrade.sh`：程序发布树升级入口
+- `upgrade.sh`：程序发布树升级入口，固定下载 `41490/ccclaw` 最新官方 release 并校验 `SHA256SUMS`
 - `bin/ccclaw`：主二进制
 - `ops/`：配置样板、systemd 单元、release notes 模板与运维脚本
 - `kb/`：本体仓库初始化目录树
@@ -18,7 +18,7 @@ bash install.sh
 
 ## 三类仓库术语
 
-- 控制仓库：接收 GitHub Issue、评论审批与执行门禁的控制面仓库，对应 `github.control_repo`
+- 控制仓库：接收 GitHub Issue、评论审批与执行门禁的官方控制面仓库，固定为 `41490/ccclaw`
 - 本体仓库：保存长期记忆、设计、报告与 `kb/**` 的仓库，默认路径 `/opt/ccclaw`
 - 任务仓库：通过 `[[targets]]` 绑定的实际工作仓库，可绑定多个
 
@@ -51,7 +51,7 @@ bash install.sh --remove-cron
 ## 安装后建议
 
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
-2. 检查控制仓库 / 本体仓库 / 任务仓库 配置是否符合预期
+2. 检查本体仓库 / 任务仓库 配置是否符合预期
 3. 若体检结果为 `systemd`，且当前会话可直连 user bus，安装/升级会自动启用或重启 timer
 4. 若体检结果为 `systemd`，但当前会话无法直连 user bus，请在登录会话中手工执行 `systemctl --user daemon-reload && systemctl --user enable --now ...`
 5. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则

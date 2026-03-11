@@ -139,6 +139,98 @@ SCRIPT
   chmod 755 "$dir/claude"
 }
 
+create_fake_gh() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat > "$dir/gh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_GH_LOG:-}"
+repo_expected="${CCCLAW_FAKE_GH_REPO:-41490/ccclaw}"
+release_dir="${CCCLAW_FAKE_GH_RELEASE_DIR:?}"
+tag="${CCCLAW_FAKE_GH_TAG:?}"
+if [[ -n "$log_file" ]]; then
+  printf '%s\n' "$*" >> "$log_file"
+fi
+if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
+  shift 2
+  while (($#)); do
+    case "$1" in
+      --repo)
+        shift
+        [[ "${1:-}" == "$repo_expected" ]] || { printf 'unexpected repo: %s\n' "${1:-}" >&2; exit 1; }
+        ;;
+      --json)
+        shift
+        ;;
+      --jq)
+        shift
+        ;;
+      *)
+        printf 'unsupported gh release view args: %s\n' "$*" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+  printf '%s\n' "$tag"
+  exit 0
+fi
+if [[ "${1:-}" == "release" && "${2:-}" == "download" ]]; then
+  shift 2
+  release_tag="${1:-}"
+  [[ -n "$release_tag" ]] || { printf 'missing release tag\n' >&2; exit 1; }
+  [[ "$release_tag" == "$tag" ]] || { printf 'unexpected release tag: %s\n' "$release_tag" >&2; exit 1; }
+  shift
+  target_dir=""
+  patterns=()
+  while (($#)); do
+    case "$1" in
+      --repo)
+        shift
+        [[ "${1:-}" == "$repo_expected" ]] || { printf 'unexpected repo: %s\n' "${1:-}" >&2; exit 1; }
+        ;;
+      --dir)
+        shift
+        target_dir="${1:-}"
+        ;;
+      --pattern)
+        shift
+        patterns+=("${1:-}")
+        ;;
+      *)
+        printf 'unsupported gh release download args: %s\n' "$*" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+  [[ -n "$target_dir" ]] || { printf 'missing target dir\n' >&2; exit 1; }
+  mkdir -p "$target_dir"
+  for pattern in "${patterns[@]}"; do
+    cp "$release_dir/$pattern" "$target_dir/$pattern"
+  done
+  exit 0
+fi
+printf 'unsupported fake gh args: %s\n' "$*" >&2
+exit 1
+SCRIPT
+  chmod 755 "$dir/gh"
+}
+
+create_release_fixture() {
+  local dir="$1"
+  local version="$2"
+  local root="$dir/ccclaw_${version}_linux_amd64"
+  mkdir -p "$root"
+  cp -R "$ROOT_DIR/dist/." "$root/"
+  tar -C "$dir" -czf "$dir/ccclaw_${version}_linux_amd64.tar.gz" "$(basename "$root")"
+  (
+    cd "$dir"
+    sha256sum "ccclaw_${version}_linux_amd64.tar.gz" > SHA256SUMS
+  )
+}
+
 prepare_dist() {
   [[ -x "$INSTALL_SCRIPT" ]] || fail "缺少安装脚本: $INSTALL_SCRIPT"
   [[ -x "$BIN_PATH" ]] || fail "缺少构建产物: $BIN_PATH"
@@ -459,7 +551,6 @@ test_interactive_mode_accepts_short_words() {
   git -C "$task_repo" remote add origin https://github.com/41490/task-local.git
   input="$(cat <<EOF
 
-
 i
 $sandbox/home-repo
 l
@@ -489,7 +580,6 @@ test_interactive_mode_accepts_full_words() {
   sandbox="$(setup_sandbox interactive-full)"
   log="$sandbox/interactive.log"
   input="$(cat <<EOF
-
 
 init
 $sandbox/home-repo
@@ -779,6 +869,103 @@ test_install_keeps_claude_read_only() {
   assert_contains "$log" 'Claude 生态处理: 默认只读探查，未自动修改 marketplace/plugins/rtk 全局配置'
 }
 
+test_upgrade_downloads_release_and_migrates_config() {
+  local sandbox fakebin fixture_dir app_dir home_repo config_file env_file gh_log version old_bin
+  sandbox="$(setup_sandbox upgrade-release)"
+  fakebin="$sandbox/fakebin"
+  fixture_dir="$sandbox/release-fixture"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo-custom"
+  config_file="$app_dir/ops/config/config.toml"
+  env_file="$app_dir/.env"
+  gh_log="$sandbox/gh.log"
+  version="$("$BIN_PATH" -V)"
+  old_bin="$app_dir/bin/ccclaw"
+
+  mkdir -p "$app_dir/bin" "$app_dir/ops/config" "$fixture_dir"
+  create_fake_gh "$fakebin"
+  create_release_fixture "$fixture_dir" "$version"
+
+  cat > "$old_bin" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-V" || "${1:-}" == "--version" ]]; then
+  printf 'old-version\n'
+  exit 0
+fi
+printf 'old binary should not be used for command: %s\n' "$*" >&2
+exit 90
+SCRIPT
+  chmod 755 "$old_bin"
+
+  cat > "$app_dir/install.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'unexpected local install invocation\n' >&2
+exit 99
+SCRIPT
+  chmod 755 "$app_dir/install.sh"
+
+  install -m 755 "$ROOT_DIR/dist/upgrade.sh" "$app_dir/upgrade.sh"
+  cat > "$config_file" <<EOF
+default_target = "41490/task-local"
+
+[github]
+control_repo = "someone/else"
+issue_label = "ccclaw"
+limit = 20
+
+[paths]
+app_dir = "$app_dir"
+home_repo = "$home_repo"
+state_db = "$app_dir/var/state.db"
+log_dir = "$app_dir/log"
+kb_dir = "$home_repo/kb"
+env_file = "$env_file"
+
+[executor]
+provider = "claude-code"
+binary = ""
+command = ["$app_dir/bin/ccclaude"]
+timeout = "30m"
+
+[scheduler]
+mode = "none"
+systemd_user_dir = "$sandbox/xdg/systemd/user"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+
+[[targets]]
+repo = "41490/task-local"
+local_path = "/opt/src/task-local"
+kb_path = "$home_repo/kb"
+EOF
+  printf 'GH_TOKEN=\n' > "$env_file"
+  chmod 600 "$env_file"
+
+  run_case "$sandbox/upgrade.log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      CCCLAW_FAKE_GH_LOG="$gh_log" \
+      CCCLAW_FAKE_GH_RELEASE_DIR="$fixture_dir" \
+      CCCLAW_FAKE_GH_TAG="$version" \
+      "$app_dir/upgrade.sh"
+
+  assert_contains "$gh_log" 'release view --repo 41490/ccclaw --json tagName --jq .tagName'
+  assert_contains "$gh_log" "release download $version --repo 41490/ccclaw"
+  assert_eq "$version" "$("$app_dir/bin/ccclaw" -V)" "升级后二进制版本异常"
+  assert_contains "$config_file" 'control_repo = "41490/ccclaw"'
+  assert_contains "$config_file" "home_repo = \"$home_repo\""
+  assert_contains "$config_file" '[scheduler.timers]'
+  assert_contains "$config_file" '[scheduler.logs]'
+  assert_contains "$config_file" 'minimum_permission = "admin"'
+  assert_not_contains "$config_file" 'command = "/ccclaw approve"'
+  assert_contains "$app_dir/install.sh" 'CONTROL_REPO_DEFAULT="41490/ccclaw"'
+}
+
 main() {
   prepare_dist
   log "开始执行 install.sh 回归测试"
@@ -806,6 +993,8 @@ main() {
   log "已通过: cron 受控写入、更新与清理"
   test_install_keeps_claude_read_only
   log "已通过: Claude 默认只读探查"
+  test_upgrade_downloads_release_and_migrates_config
+  log "已通过: upgrade.sh 官方 release 升级与配置迁移"
   log "全部 install.sh 回归测试通过"
 }
 

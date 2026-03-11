@@ -4,7 +4,7 @@
 default_target = ""
 
 # GitHub 控制面配置。
-# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。
+# control_repo 固定指向官方控制仓库，不接受运行时自定义。
 [github]
 control_repo = "41490/ccclaw"
 issue_label = "ccclaw"

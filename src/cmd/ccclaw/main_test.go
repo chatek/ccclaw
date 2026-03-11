@@ -89,6 +89,64 @@ minimum_permission = "admin"
 	}
 }
 
+func TestConfigMigrateCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "someone/else"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/data/9527"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/data/9527/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[scheduler]
+mode = "systemd"
+systemd_user_dir = "/tmp/systemd-user"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "config", "migrate"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 config migrate 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "已迁移配置") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, `control_repo = "41490/ccclaw"`) {
+		t.Fatalf("expected official control repo: %q", text)
+	}
+	if !strings.Contains(text, `[scheduler.logs]`) {
+		t.Fatalf("expected scheduler logs section: %q", text)
+	}
+	if strings.Contains(text, `command = "/ccclaw approve"`) {
+		t.Fatalf("legacy approval command should be removed: %q", text)
+	}
+}
+
 func TestConfigSetSchedulerCommand(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

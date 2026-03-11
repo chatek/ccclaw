@@ -174,6 +174,22 @@ func newRootCmd() *cobra.Command {
 		},
 	}
 	configCmd.AddCommand(&cobra.Command{
+		Use:   "migrate",
+		Short: "补齐缺失配置并迁移已废弃字段",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			changed, err := config.Migrate(configPath)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "当前配置无需迁移")
+				return nil
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已迁移配置: %s\n", configPath)
+			return nil
+		},
+	})
+	configCmd.AddCommand(&cobra.Command{
 		Use:   "migrate-approval",
 		Short: "将旧 approval.command 配置迁移为 words/reject_words",
 		RunE: func(cmd *cobra.Command, args []string) error {

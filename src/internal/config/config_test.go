@@ -187,8 +187,157 @@ minimum_permission = "maintain"
 	}
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected legacy approval.command to be rejected")
-	} else if got := err.Error(); !strings.Contains(got, "migrate-approval") {
+	} else if got := err.Error(); !strings.Contains(got, "config migrate") {
 		t.Fatalf("expected migration hint, got %q", got)
+	}
+}
+
+func TestMigrateRewritesLegacyConfigToCurrentShape(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `default_target = "41490/task-local"
+
+[github]
+control_repo = "someone/else"
+issue_label = "ccclaw"
+limit = 20
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/data/9527"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/data/9527/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+provider = "claude-code"
+binary = ""
+command = ["/tmp/ccclaw-app/bin/ccclaude"]
+timeout = "30m"
+
+[scheduler]
+mode = "systemd"
+systemd_user_dir = "/tmp/systemd-user"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "admin"
+
+[[targets]]
+repo = "41490/task-local"
+local_path = "/opt/src/task-local"
+kb_path = "/opt/data/9527/kb"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := Migrate(configPath)
+	if err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected migrate to rewrite legacy config")
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, want := range []string{
+		`control_repo = "41490/ccclaw"`,
+		`home_repo = "/opt/data/9527"`,
+		`calendar_timezone = "Asia/Shanghai"`,
+		`[scheduler.timers]`,
+		`[scheduler.logs]`,
+		`archive_dir = "/tmp/ccclaw-app/log/scheduler"`,
+		`minimum_permission = "admin"`,
+		`reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+	if strings.Contains(text, `control_repo = "someone/else"`) {
+		t.Fatalf("control repo should be normalized: %q", text)
+	}
+	if strings.Contains(text, `command = "/ccclaw approve"`) {
+		t.Fatalf("legacy approval command should be removed: %q", text)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load migrated config failed: %v", err)
+	}
+	if got, want := cfg.GitHub.ControlRepo, OfficialControlRepo; got != want {
+		t.Fatalf("unexpected control repo: got=%q want=%q", got, want)
+	}
+	if got, want := cfg.Paths.HomeRepo, "/opt/data/9527"; got != want {
+		t.Fatalf("unexpected home repo: got=%q want=%q", got, want)
+	}
+}
+
+func TestMigrateNoopForCurrentConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	cfg := &Config{
+		DefaultTarget: "41490/task-local",
+		GitHub: GitHubConfig{
+			ControlRepo: OfficialControlRepo,
+			IssueLabel:  "ccclaw",
+			Limit:       20,
+		},
+		Paths: PathsConfig{
+			AppDir:   "/tmp/ccclaw-app",
+			HomeRepo: "/opt/data/9527",
+			StateDB:  "/tmp/ccclaw-app/var/state.db",
+			LogDir:   "/tmp/ccclaw-app/log",
+			KBDir:    "/opt/data/9527/kb",
+			EnvFile:  "/tmp/ccclaw-app/.env",
+		},
+		Executor: ExecutorConfig{
+			Provider: "claude-code",
+			Command:  []string{"/tmp/ccclaw-app/bin/ccclaude"},
+			Timeout:  "30m",
+		},
+		Scheduler: SchedulerConfig{
+			Mode:             "systemd",
+			SystemdUserDir:   "/tmp/systemd-user",
+			CalendarTimezone: "Asia/Shanghai",
+			Timers: SchedulerTimersConfig{
+				Ingest:  "*:0/5",
+				Run:     "*:0/10",
+				Patrol:  "*:0/2",
+				Journal: "*-*-* 23:50:00",
+			},
+			Logs: SchedulerLogsConfig{
+				Level:      "info",
+				ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+			},
+		},
+		Approval: ApprovalConfig{
+			Words:             []string{"approve"},
+			RejectWords:       []string{"reject"},
+			MinimumPermission: "maintain",
+		},
+		Targets: []TargetConfig{{
+			Repo:      "41490/task-local",
+			LocalPath: "/opt/src/task-local",
+			KBPath:    "/opt/data/9527/kb",
+		}},
+	}
+	if err := Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := Migrate(configPath)
+	if err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	if changed {
+		t.Fatal("expected migrate to be noop for current config")
 	}
 }
 
