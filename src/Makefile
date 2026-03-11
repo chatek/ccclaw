@@ -14,10 +14,12 @@ PACKAGE_BASENAME := $(APP_NAME)_$(VERSION)_$(GOOS)_$(GOARCH)
 PACKAGE_DIR := $(RELEASE_DIR)/$(PACKAGE_BASENAME)
 PACKAGE_FILE := $(RELEASE_DIR)/$(PACKAGE_BASENAME).tar.gz
 CHECKSUM_FILE := $(RELEASE_DIR)/SHA256SUMS
+RELEASE_NOTES_TEMPLATE := $(OPS_DIR)/examples/release-notes-template.md
+RELEASE_NOTES_FILE := $(RELEASE_DIR)/RELEASE_NOTES.md
 BIN := $(DIST_DIR)/bin/$(APP_NAME)
 LDFLAGS := -X github.com/41490/ccclaw/internal/buildinfo.Version=$(VERSION) -X github.com/41490/ccclaw/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release clean
+.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release-notes release clean
 
 fmt:
 	$(GOFMT) -w ./cmd ./internal
@@ -57,14 +59,22 @@ archive: checksum
 	mkdir -p $(ARCHIVE_ROOT)/$(VERSION)
 	cp $(PACKAGE_FILE) $(CHECKSUM_FILE) $(ARCHIVE_ROOT)/$(VERSION)/
 
-release: archive
+release-notes: checksum
+	mkdir -p $(RELEASE_DIR)
+	sed \
+		-e 's/{{VERSION}}/$(VERSION)/g' \
+		-e 's/{{PACKAGE_FILE}}/$(notdir $(PACKAGE_FILE))/g' \
+		-e 's/{{CHECKSUM_FILE}}/$(notdir $(CHECKSUM_FILE))/g' \
+		$(RELEASE_NOTES_TEMPLATE) > $(RELEASE_NOTES_FILE)
+
+release: archive release-notes
 	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
 	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
 	gh release create $(VERSION) \
 		$(PACKAGE_FILE) \
 		$(CHECKSUM_FILE) \
 		--title "$(VERSION)" \
-		--generate-notes
+		--notes-file $(RELEASE_NOTES_FILE)
 
 clean:
 	rm -rf $(BUILD_DIR) $(RELEASE_DIR) $(DIST_DIR)/bin/$(APP_NAME)

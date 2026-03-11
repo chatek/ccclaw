@@ -217,7 +217,7 @@ func TestSummarizeSchedulerCronPasses(t *testing.T) {
 	detail, err := summarizeScheduler(schedulerProbe{
 		Requested:  "cron",
 		CronActive: true,
-		CronReason: "已检测到受控 crontab ingest/run 规则",
+		CronReason: "已检测到受控 crontab ingest/run/patrol/journal 规则",
 	})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -257,7 +257,20 @@ func TestSummarizeSchedulerCronMissingCommand(t *testing.T) {
 	if want := "reason=当前环境缺少 crontab，无法使用 cron 调度"; !strings.Contains(detail, want) {
 		t.Fatalf("expected cron reason %q in %q", want, detail)
 	}
-	if want := "repair=当前环境缺少 crontab；请安装 cron/cronie，或改用 systemd/none"; !strings.Contains(detail, want) {
+	if want := "repair=当前环境缺少 crontab；请安装 cron/cronie，或执行 `ccclaw scheduler disable-cron` 后改用 systemd/none"; !strings.Contains(detail, want) {
+		t.Fatalf("expected cron repair %q in %q", want, detail)
+	}
+}
+
+func TestSummarizeSchedulerCronMissingManagedEntries(t *testing.T) {
+	detail, err := summarizeScheduler(schedulerProbe{
+		Requested:  "cron",
+		CronReason: "未检测到受控 crontab 规则",
+	})
+	if err == nil {
+		t.Fatal("expected cron mismatch error")
+	}
+	if want := "repair=请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"; !strings.Contains(detail, want) {
 		t.Fatalf("expected cron repair %q in %q", want, detail)
 	}
 }

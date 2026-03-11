@@ -10,6 +10,7 @@ import (
 	"github.com/41490/ccclaw/internal/app"
 	"github.com/41490/ccclaw/internal/buildinfo"
 	"github.com/41490/ccclaw/internal/config"
+	"github.com/41490/ccclaw/internal/scheduler"
 	"github.com/spf13/cobra"
 )
 
@@ -183,7 +184,67 @@ func newRootCmd() *cobra.Command {
 			return nil
 		},
 	})
+	var schedulerMode string
+	var schedulerUserDir string
+	configSetSchedulerCmd := &cobra.Command{
+		Use:   "set-scheduler",
+		Short: "更新调度器配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			cfg.Scheduler.Mode = schedulerMode
+			if schedulerUserDir != "" {
+				cfg.Scheduler.SystemdUserDir = schedulerUserDir
+			}
+			cfg.NormalizePaths()
+			if err := config.Save(configPath, cfg); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已更新调度配置: mode=%s systemd_user_dir=%s\n", cfg.Scheduler.Mode, cfg.Scheduler.SystemdUserDir)
+			return nil
+		},
+	}
+	configSetSchedulerCmd.Flags().StringVar(&schedulerMode, "mode", "", "调度器模式: auto|systemd|cron|none")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerUserDir, "systemd-user-dir", "", "user systemd 单元目录")
+	_ = configSetSchedulerCmd.MarkFlagRequired("mode")
+	configCmd.AddCommand(configSetSchedulerCmd)
 	rootCmd.AddCommand(configCmd)
+
+	schedulerCmd := &cobra.Command{
+		Use:   "scheduler",
+		Short: "管理调度器后端",
+	}
+	schedulerCmd.AddCommand(&cobra.Command{
+		Use:   "enable-cron",
+		Short: "写入或更新当前用户的受控 crontab 规则",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			message, err := scheduler.EnableCron(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), message)
+			return nil
+		},
+	})
+	schedulerCmd.AddCommand(&cobra.Command{
+		Use:   "disable-cron",
+		Short: "只清理当前用户 crontab 中的 ccclaw 受控规则",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			message, err := scheduler.DisableCron(cmd.Context())
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), message)
+			return nil
+		},
+	})
+	rootCmd.AddCommand(schedulerCmd)
 
 	targetCmd := &cobra.Command{
 		Use:   "target",

@@ -24,6 +24,7 @@ import (
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
 	"github.com/41490/ccclaw/internal/memory"
+	"github.com/41490/ccclaw/internal/scheduler"
 	"github.com/41490/ccclaw/internal/tmux"
 )
 
@@ -1262,7 +1263,7 @@ func diagnoseScheduler(probe schedulerProbe, requested string) schedulerDiagnosi
 		diagnosis.Reason = fallbackReason(probe.SystemdReason, "已检测到启用中的 user systemd timer")
 	case probe.CronActive:
 		diagnosis.Effective = "cron"
-		diagnosis.Reason = fallbackReason(probe.CronReason, "已检测到受控 crontab ingest/run 规则")
+		diagnosis.Reason = fallbackReason(probe.CronReason, "已检测到受控 crontab ingest/run/patrol/journal 规则")
 	case probe.SystemdInstalled:
 		diagnosis.Reason = summarizeInstalledButInactiveSystemd(probe.SystemdUserDir, probe.SystemdReason)
 		diagnosis.Repair = systemdRepairHint(probe.SystemdReason, true)
@@ -1369,13 +1370,13 @@ func systemdRepairHint(reason string, installed bool) string {
 func cronRepairHint(reason string) string {
 	switch {
 	case strings.TrimSpace(reason) == "":
-		return "请补充受控 crontab 规则，确保 ingest/run 两条任务都已写入"
+		return "请补充受控 crontab 规则，确保 ingest/run/patrol/journal 四条任务都已写入"
 	case strings.Contains(reason, "未找到 crontab"):
-		return "当前环境缺少 crontab；请安装 cron/cronie，或改用 systemd/none"
+		return "当前环境缺少 crontab；请安装 cron/cronie，或执行 `ccclaw scheduler disable-cron` 后改用 systemd/none"
 	case strings.Contains(reason, "未配置 crontab"), strings.Contains(reason, "未检测到受控 crontab 规则"):
-		return "请按安装摘要中的 cron 样板补充 ingest/run 两条受控规则"
+		return "请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"
 	default:
-		return "请检查当前用户 crontab，并补齐 ccclaw ingest/run 两条受控规则"
+		return "请检查当前用户 crontab，或重新执行 `ccclaw scheduler enable-cron` 修复受控规则"
 	}
 }
 
@@ -1449,8 +1450,13 @@ func (rt *Runtime) detectCronEntries() (bool, string) {
 	if err := requireCommand("crontab"); err != nil {
 		return false, err.Error()
 	}
-	cmd := exec.Command("crontab", "-l")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "crontab", "-l")
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return false, "执行 `crontab -l` 超时"
+	}
 	if err != nil {
 		text := strings.TrimSpace(string(output))
 		if strings.Contains(text, "no crontab for") || strings.Contains(text, "没有 crontab") {
@@ -1462,13 +1468,8 @@ func (rt *Runtime) detectCronEntries() (bool, string) {
 		return false, text
 	}
 	content := string(output)
-	appBin := filepath.ToSlash(filepath.Join(rt.cfg.Paths.AppDir, "bin", "ccclaw"))
-	configPath := filepath.ToSlash(filepath.Join(rt.cfg.Paths.AppDir, "ops", "config", "config.toml"))
-	envFile := filepath.ToSlash(rt.cfg.Paths.EnvFile)
-	ingestLine := fmt.Sprintf("%s ingest --config %s --env-file %s", appBin, configPath, envFile)
-	runLine := fmt.Sprintf("%s run --config %s --env-file %s", appBin, configPath, envFile)
-	if strings.Contains(content, ingestLine) && strings.Contains(content, runLine) {
-		return true, "已检测到受控 crontab ingest/run 规则"
+	if scheduler.ContainsManagedCron(content, rt.cfg) {
+		return true, "已检测到受控 crontab ingest/run/patrol/journal 规则"
 	}
 	return false, "未检测到受控 crontab 规则"
 }

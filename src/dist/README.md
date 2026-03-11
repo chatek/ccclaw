@@ -1,45 +1,67 @@
 # ccclaw release tree
 
-本目录是 `ccclaw` 的 release 安装树源。
-
-解压发布包后，默认入口是：
+本目录是 `ccclaw` 的 release 安装树源，也是发布包解压后的默认安装入口。
 
 ```bash
 bash install.sh
 ```
 
-本目录中：
+## 目录内容
 
-- `install.sh` 负责交互式安装与首次配置采集
-- `upgrade.sh` 负责程序发布树升级
-- `bin/ccclaw` 是编译后的主二进制
-- `ops/` 保存配置样板、systemd 单元与运维脚本
-- `kb/` 提供本体仓库初始化目录树
-- `kb/**/CLAUDE.md` 提供记忆记录与整理规约模板，升级时会无损合并
-- `SHA256SUMS` 用于 release 资产校验
+- `install.sh`：交互式安装、预检、调度选择与首次配置采集
+- `upgrade.sh`：程序发布树升级入口
+- `bin/ccclaw`：主二进制
+- `ops/`：配置样板、systemd 单元、release notes 模板与运维脚本
+- `kb/`：本体仓库初始化目录树
+- `kb/**/CLAUDE.md`：记忆记录与整理规约模板，升级时无损合并
+- `SHA256SUMS`：release 资产校验文件
 
-安装默认目标：
+## 三类仓库术语
+
+- 控制仓库：接收 GitHub Issue、评论审批与执行门禁的控制面仓库，对应 `github.control_repo`
+- 本体仓库：保存长期记忆、设计、报告与 `kb/**` 的仓库，默认路径 `/opt/ccclaw`
+- 任务仓库：通过 `[[targets]]` 绑定的实际工作仓库，可绑定多个
+
+三者可以是同一个仓库，也可以拆分；但职责必须分离，不应混写。
+
+## 默认安装边界
 
 - 程序目录：`~/.ccclaw`
-- 本体仓库：`/opt/ccclaw`
 - 本体仓库模式：`init|remote|local`
 - 任务仓库模式：`none|remote|local`
 - remote 任务仓库固定 clone 入口：`/opt/src/3claw/owner/repo`
 - 调度模式：`auto|systemd|cron|none`
 
-安装完成后，默认建议：
+## 调度行为
+
+- `auto`：优先部署 `systemd --user`
+- 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
+- 受控 `cron` 会写入 `ingest/run/patrol/journal` 四类周期任务
+- `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
+- 如需清理受控块，可执行：
+
+```bash
+~/.ccclaw/bin/ccclaw scheduler disable-cron
+# 或
+bash install.sh --remove-cron
+```
+
+## 安装后建议
 
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
-2. 检查本体仓库与任务仓库绑定结果
-3. 若体检结果为 `systemd`，再手工启用 `systemd --user` timer；否则按摘要中的 `cron` 样板处理
+2. 检查控制仓库 / 本体仓库 / 任务仓库 配置是否符合预期
+3. 若体检结果为 `systemd`，手工启用 `systemd --user` timer
+4. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
 
-若需要让当前 shell 直接识别 `ccclaw`，可显式执行：
+## Shell 集成
+
+如需让当前 shell 直接识别 `ccclaw`：
 
 ```bash
 bash install.sh --inject-shell bashrc
 ```
 
-如需回滚受控块：
+如需回滚受控 shell 块：
 
 ```bash
 bash install.sh --remove-shell bashrc

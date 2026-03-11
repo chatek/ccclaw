@@ -120,6 +120,50 @@ SCRIPT
   chmod 755 "$dir/systemctl"
 }
 
+create_fake_crontab() {
+  local dir="$1"
+  local mode="${2:-ready}"
+  mkdir -p "$dir"
+  case "$mode" in
+    ready)
+      cat > "$dir/crontab" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+store="${CCCLAW_FAKE_CRONTAB_FILE:?}"
+case "${1:-}" in
+  -l)
+    if [[ -f "$store" && -s "$store" ]]; then
+      cat "$store"
+      exit 0
+    fi
+    printf 'no crontab for tester\n' >&2
+    exit 1
+    ;;
+  -)
+    cat > "$store"
+    exit 0
+    ;;
+  *)
+    printf 'unsupported crontab args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+SCRIPT
+      ;;
+    missing)
+      cat > "$dir/crontab" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'crontab: command not found\n' >&2
+exit 127
+SCRIPT
+      ;;
+    *)
+      fail "未知 fake crontab 模式: $mode"
+      ;;
+  esac
+  chmod 755 "$dir/crontab"
+}
+
 test_first_install_and_idempotent_reinstall() {
   local sandbox app_dir home_repo task_repo xdg log1 log2 config_file env_file target_count gh_count
   sandbox="$(setup_sandbox first-install)"
@@ -193,17 +237,20 @@ test_first_install_and_idempotent_reinstall() {
 }
 
 test_systemd_degrade_preflight() {
-  local sandbox readonly_xdg log
+  local sandbox readonly_xdg fakebin log
   sandbox="$(setup_sandbox systemd-degrade)"
   readonly_xdg="$sandbox/readonly-xdg"
+  fakebin="$sandbox/fakebin"
   log="$sandbox/preflight.log"
   mkdir -p "$readonly_xdg"
   chmod 500 "$readonly_xdg"
+  create_fake_crontab "$fakebin" missing
 
   run_case "$log" \
     env \
       HOME="$REAL_HOME" \
       XDG_CONFIG_HOME="$readonly_xdg" \
+      PATH="$fakebin:$PATH" \
       BIN_LINK="$sandbox/bin/ccclaw" \
       "$INSTALL_SCRIPT" \
       --yes \
@@ -217,6 +264,37 @@ test_systemd_degrade_preflight() {
   assert_contains "$log" '体检完成，未写入文件。'
   assert_contains "$log" '请求=auto, 生效=none'
   assert_matches "$log" 'dir_not_writable|user_bus_unavailable'
+}
+
+test_systemd_preflight_auto_degrades_to_cron() {
+  local sandbox readonly_xdg fakebin crontab_file log
+  sandbox="$(setup_sandbox systemd-auto-cron)"
+  readonly_xdg="$sandbox/readonly-xdg"
+  fakebin="$sandbox/fakebin"
+  crontab_file="$sandbox/crontab.txt"
+  log="$sandbox/preflight.log"
+  mkdir -p "$readonly_xdg"
+  chmod 500 "$readonly_xdg"
+  create_fake_crontab "$fakebin" ready
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$readonly_xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --preflight-only \
+      --home-repo "$sandbox/home-repo" \
+      --home-repo-mode init \
+      --task-repo-mode none \
+      --scheduler auto
+
+  chmod 700 "$readonly_xdg"
+  assert_contains "$log" '请求=auto, 生效=cron'
+  assert_contains "$log" '自动降级为 cron'
 }
 
 test_systemd_preflight_accepts_busless_deploy() {
@@ -369,6 +447,107 @@ RC
   assert_not_contains "$bashrc" 'export PATH="'"$sandbox"'/bin:$PATH"'
 }
 
+test_cron_install_update_and_remove() {
+  local sandbox fakebin crontab_file app_dir home_repo task_repo config_file log1 log2 log3 log4 block_count
+  sandbox="$(setup_sandbox cron-managed)"
+  fakebin="$sandbox/fakebin"
+  crontab_file="$sandbox/crontab.txt"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  task_repo="$sandbox/task-local"
+  config_file="$app_dir/ops/config/config.toml"
+  log1="$sandbox/install-none.log"
+  log2="$sandbox/install-cron.log"
+  log3="$sandbox/reinstall-cron.log"
+  log4="$sandbox/remove-cron.log"
+
+  create_git_repo "$task_repo"
+  create_fake_crontab "$fakebin" ready
+  printf '15 4 * * * echo keep-me\n' > "$crontab_file"
+
+  run_case "$log1" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler none
+
+  run_case "$log2" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler cron
+
+  assert_contains "$crontab_file" '15 4 * * * echo keep-me'
+  assert_contains "$crontab_file" '# >>> ccclaw managed cron >>>'
+  assert_contains "$crontab_file" '# <<< ccclaw managed cron <<<'
+  assert_contains "$crontab_file" "$app_dir/bin/ccclaw ingest --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$crontab_file" "$app_dir/bin/ccclaw run --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$crontab_file" "$app_dir/bin/ccclaw patrol --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$crontab_file" "$app_dir/bin/ccclaw journal --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$config_file" "mode = 'cron'"
+  assert_contains "$log2" '已向当前用户 crontab 追加 ccclaw 受控规则'
+
+  run_case "$log3" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler cron
+
+  block_count="$(grep -c '^# >>> ccclaw managed cron >>>$' "$crontab_file")"
+  assert_eq "1" "$block_count" "重复安装后 cron 受控块数量异常"
+
+  run_case "$log4" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --app-dir "$app_dir" \
+      --remove-cron
+
+  assert_contains "$crontab_file" '15 4 * * * echo keep-me'
+  assert_not_contains "$crontab_file" '# >>> ccclaw managed cron >>>'
+  assert_not_contains "$crontab_file" "$app_dir/bin/ccclaw ingest --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+}
+
 main() {
   prepare_dist
   log "开始执行 install.sh 回归测试"
@@ -376,6 +555,8 @@ main() {
   log "已通过: 首装 + 幂等重装"
   test_systemd_degrade_preflight
   log "已通过: systemd 降级体检"
+  test_systemd_preflight_auto_degrades_to_cron
+  log "已通过: auto 可降级到受控 cron"
   test_systemd_preflight_accepts_busless_deploy
   log "已通过: systemd 无 user bus 仍允许部署"
   test_local_repo_without_origin_requires_repo
@@ -384,6 +565,8 @@ main() {
   log "已通过: remote 路径越界失败路径"
   test_shell_integration_inject_and_remove
   log "已通过: shell 集成写入与回滚"
+  test_cron_install_update_and_remove
+  log "已通过: cron 受控写入、更新与清理"
   log "全部 install.sh 回归测试通过"
 }
 

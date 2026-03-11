@@ -86,6 +86,64 @@ minimum_permission = "admin"
 	}
 }
 
+func TestConfigSetSchedulerCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `default_target = ""
+
+[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[scheduler]
+mode = "none"
+systemd_user_dir = "/tmp/systemd-old"
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "config", "set-scheduler", "--mode", "cron", "--systemd-user-dir", "/tmp/systemd-new"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 config set-scheduler 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "已更新调度配置") {
+		t.Fatalf("unexpected output: %q", out.String())
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, "mode = 'cron'") {
+		t.Fatalf("expected scheduler mode update: %q", text)
+	}
+	if !strings.Contains(text, "systemd_user_dir = '/tmp/systemd-new'") {
+		t.Fatalf("expected systemd dir update: %q", text)
+	}
+}
+
 func TestParseStatsOptions(t *testing.T) {
 	options, err := parseStatsOptions("2026-03-09", "2026-03-10", true, true, 7)
 	if err != nil {

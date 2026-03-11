@@ -36,7 +36,7 @@ O     O     O     |  oo o   o   o
 
 - **省 token**：把轮询、门禁、调度、目录治理、日志归档交给本地程序和 `systemd`，把高价值 token 留给真正需要 Claude Code 动手的阶段。
 - **Issue 驱动**：直接复用开源项目最自然的协作入口，不额外引入新的任务系统。
-- **Linux 原生**：优先使用 `systemd --user`，异常时允许降级为 `cron` 样板或 `none`，不强绑 Docker、K8s、外部 SaaS 控制面。
+- **Linux 原生**：优先使用 `systemd --user`，异常时可自动降级到受控 `cron` 或 `none`，不强绑 Docker、K8s、外部 SaaS 控制面。
 - **记忆与程序分离**：程序树固定在 `~/.ccclaw`，本体记忆仓库固定在 `/opt/ccclaw`，升级不覆盖用户记忆。
 - **安装边界清晰**：敏感信息只进 `.env`，普通配置只进 `.toml`，运行时不依赖调用者预先 `export` 环境变量。
 - **开源协作可控**：`maintain` 及以上成员的 Issue 自动执行；其他 Issue 需要受信任成员评论 `/ccclaw <批准词>`，最新评论也可用否决词撤回。
@@ -425,7 +425,7 @@ target_repo: owner/repo-b
 ### 主机条件
 
 - Linux 主机
-- 建议存在 `systemd --user`；若不可用，安装器会自动降级并保留 `cron` 样板
+- 建议存在 `systemd --user`；若不可用，安装器会自动降级到受控 `cron`，仅在 `crontab` 也不可用时才降级到 `none`
 - 建议当前用户具备 `sudo` 能力，以便安装基础依赖与写入 `/opt/ccclaw`
 - 推荐预装或允许安装：`git`、`gh`、`curl`、`wget`、`rg`、`sqlite3`、`golang`
 
@@ -487,7 +487,7 @@ bash install.sh
 `install.sh` 当前会按真实实现执行以下动作：
 
 - 探查 `claude`、`gh`、`rg`、`sqlite3`、`rtk`、`git`、`node`、`npm`、`uv`
-- 安装前体检 `gh auth`、`systemd --user`、调度降级条件与 remote clone 入口
+- 安装前体检 `gh auth`、`systemd --user`、`crontab`、调度降级条件与 remote clone 入口
 - 探查 Claude 官方安装通道可达性
 - 在需要时安装基础系统依赖
 - 安装 `rtk`，并生成 `ccclaude` 包装器
@@ -496,7 +496,7 @@ bash install.sh
 - 生成带中文注释的 `config.toml`
 - 安装 `~/.ccclaw/bin/ccclaw`
 - 安装 `install.sh` 与 `upgrade.sh`
-- 仅在可用时安装 `systemd --user` unit 文件；否则降级继续
+- 仅在可用时安装 `systemd --user` unit 文件；若不可用则按决策自动写入或更新受控 `cron`
 - 按需绑定任务仓库并写入 `[[targets]]`
 - 输出安装完成摘要、后续命令和日常工作流程
 
@@ -587,7 +587,15 @@ ANTHROPIC_AUTH_TOKEN=
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
+systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+```
+
+如果需要手工刷新受控 `cron`：
+
+```bash
+~/.ccclaw/bin/ccclaw scheduler enable-cron \
+  --config ~/.ccclaw/ops/config/config.toml \
+  --env-file ~/.ccclaw/.env
 ```
 
 如果需要检查任务仓库绑定结果：
@@ -607,6 +615,8 @@ ccclaw config
 ccclaw ingest
 ccclaw run
 ccclaw status
+ccclaw scheduler enable-cron
+ccclaw scheduler disable-cron
 ccclaw target list
 ccclaw target add --repo owner/repo --path /abs/path/to/repo
 ccclaw target disable --repo owner/repo
@@ -702,6 +712,7 @@ release 约束：
 - 从 `src/dist/` 打包
 - 至少包含安装包与 `SHA256SUMS`
 - 本机归档目录固定为 `/ops/logs/ccclaw/`
+- `make release` 会按模板生成 release notes，并显式写入控制仓库 / 本体仓库 / 任务仓库术语
 - `make release` 仅允许在干净工作树上执行
 
 ## 从源码构建

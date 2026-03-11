@@ -10,6 +10,7 @@ REUSE_GH_AUTH=1
 REUSE_CLAUDE_AUTH=1
 SHELL_INTEGRATION="none"
 REMOVE_SHELL_INTEGRATION="none"
+REMOVE_CRON=0
 
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
@@ -63,6 +64,10 @@ ANTHROPIC_AUTH_TOKEN_SOURCE="未写入"
 GREPTILE_API_KEY_SOURCE="未写入"
 SHELL_INTEGRATION_STATUS="disabled"
 SHELL_INTEGRATION_REASON="默认关闭，未写入 shell 配置"
+CRON_READY=0
+CRON_CHECK_STATUS="未探查"
+CRON_MANAGED_STATUS="未处理"
+CRON_MANAGED_REASON="未执行受控 crontab 管理"
 
 expand_path() {
   local path="$1"
@@ -125,6 +130,7 @@ usage() {
   --reuse-claude-auth       优先复用本机 Claude 登录态，允许 API Key 留空
   --inject-shell TARGET     显式写入 shell 集成，目前仅支持 bashrc
   --remove-shell TARGET     移除受控 shell 集成块，目前仅支持 bashrc
+  --remove-cron             只清理当前用户 crontab 中的 ccclaw 受控规则
   -h, --help                显示帮助
 USAGE
 }
@@ -153,6 +159,7 @@ while (($#)); do
     --reuse-claude-auth) REUSE_CLAUDE_AUTH=1 ;;
     --inject-shell) shift; SHELL_INTEGRATION="$1" ;;
     --remove-shell) shift; REMOVE_SHELL_INTEGRATION="$1" ;;
+    --remove-cron) REMOVE_CRON=1 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -285,6 +292,10 @@ shell_quote_double() {
   value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf '%s\n' "$value"
+}
+
+single_line_text() {
+  printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
 }
 
 remove_managed_shell_block() {
@@ -626,6 +637,36 @@ probe_systemd_user() {
   fi
 }
 
+probe_crontab() {
+  local output="" status=0 text=""
+  CRON_READY=0
+  if [[ "$SCHEDULER" == "none" ]]; then
+    CRON_CHECK_STATUS="skip(none)"
+    return 0
+  fi
+  if ! have crontab; then
+    CRON_CHECK_STATUS="missing_crontab"
+    return 0
+  fi
+  output="$(crontab -l 2>&1)" || status=$?
+  text="$(single_line_text "$output")"
+  if [[ "$status" -eq 0 ]]; then
+    CRON_READY=1
+    CRON_CHECK_STATUS="ready(existing_entries)"
+    return 0
+  fi
+  if [[ "$text" == *"no crontab for"* || "$text" == *"没有 crontab"* ]]; then
+    CRON_READY=1
+    CRON_CHECK_STATUS="ready(empty)"
+    return 0
+  fi
+  if [[ "$text" == *"executable file not found"* || "$text" == *"command not found"* ]]; then
+    CRON_CHECK_STATUS="missing_crontab"
+    return 0
+  fi
+  CRON_CHECK_STATUS="probe_failed(${text:-unknown})"
+}
+
 decide_scheduler() {
   case "$SCHEDULER" in
     systemd)
@@ -649,19 +690,34 @@ decide_scheduler() {
           SCHEDULER_REASON="自动选择 user systemd；当前会话未直连 user bus，安装后需手工启用 timer"
         fi
       else
-        SCHEDULER_EFFECTIVE="none"
-        SCHEDULER_REASON="user systemd 不可用，自动降级为 none ($SYSTEMD_CHECK_STATUS)"
+        probe_crontab
+        if [[ "$CRON_READY" -eq 1 ]]; then
+          SCHEDULER_EFFECTIVE="cron"
+          SCHEDULER_REASON="user systemd 不可用，自动降级为 cron (systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
+        else
+          SCHEDULER_EFFECTIVE="none"
+          SCHEDULER_REASON="user systemd 与 cron 均不可用，自动降级为 none (systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
+        fi
       fi
       ;;
-    cron|none)
-      SCHEDULER_EFFECTIVE="$SCHEDULER"
+    cron)
+      probe_crontab
+      if [[ "$CRON_READY" -eq 1 ]]; then
+        SCHEDULER_EFFECTIVE="cron"
+        SCHEDULER_REASON="按显式参数执行，将写入或更新当前用户受控 crontab 规则"
+      else
+        fail "已显式指定 --scheduler cron，但当前环境不可用: $CRON_CHECK_STATUS"
+      fi
+      ;;
+    none)
+      SCHEDULER_EFFECTIVE="none"
       SCHEDULER_REASON="按显式参数执行"
       ;;
   esac
 }
 
 print_preflight() {
-  local gh_line systemd_line clone_root_line
+  local gh_line systemd_line cron_line clone_root_line
   probe_gh_auth
   probe_systemd_user
   decide_scheduler
@@ -683,6 +739,13 @@ print_preflight() {
     skip*) systemd_line="OK: 已跳过 user systemd 探查，当前调度模式 $SCHEDULER" ;;
     *) systemd_line="WARN: user systemd 不可直接使用($SYSTEMD_CHECK_STATUS)，将按 $SCHEDULER_EFFECTIVE 继续" ;;
   esac
+  case "$CRON_CHECK_STATUS" in
+    ready*) cron_line="OK: crontab 可写，支持受控规则写入/更新" ;;
+    skip*) cron_line="OK: 已跳过 crontab 探查，当前调度模式 $SCHEDULER" ;;
+    missing_crontab) cron_line="WARN: 未找到 crontab，无法使用 cron 调度" ;;
+    probe_failed*) cron_line="WARN: crontab 探查失败($CRON_CHECK_STATUS)" ;;
+    *) cron_line="INFO: crontab 尚未参与本轮调度决策" ;;
+  esac
   if [[ "$TASK_REPO_MODE" == "remote" ]]; then
     clone_root_line="OK: remote 任务仓库 clone 根目录固定为 $TASK_CLONE_ROOT"
   else
@@ -692,7 +755,8 @@ print_preflight() {
   cat <<INFO
 - Claude: $( [[ "$CLAUDE_AUTH_READY" -eq 1 ]] && printf 'OK: 已检测到 %s' "$CLAUDE_AUTH_METHOD" || printf 'WARN: 未检测到可复用登录态，后续可能需要手工补录 API/代理配置' )
 - GitHub: $gh_line
-- Scheduler: $systemd_line
+- Systemd: $systemd_line
+- Cron: $cron_line
 - Remote Clone Root: $clone_root_line
 - 计划调度模式: 请求=$SCHEDULER, 生效=$SCHEDULER_EFFECTIVE
 INFO
@@ -737,9 +801,11 @@ print_flow() {
    - 若本机已有插件/marketplace：直接继承
    - 若本机没有插件：安装指定官方 plugins + example-skills
    - 执行器默认走: $CLAUDE_WRAPPER
-10. 安装 user systemd 单元：
-   - 请求模式为 auto|systemd 时先体检
-   - 仅在 user systemd 可用时写入 $SYSTEMD_USER_DIR
+10. 安装调度后端：
+   - 请求模式为 auto|systemd 时先体检 user systemd
+   - user systemd 可用时写入 $SYSTEMD_USER_DIR
+   - user systemd 不可用且 crontab 可写时，auto 自动降级为受控 cron
+   - cron 仅管理带标记的 ccclaw 受控块，不覆盖用户其它规则
 11. 任务仓库绑定：
    - none: 本轮不绑定
    - remote: clone 到 $TASK_CLONE_ROOT 下约定入口，并写入 config.toml
@@ -1118,6 +1184,17 @@ reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]
 CFG
 }
 
+sync_scheduler_config() {
+  if [[ ! -x "$APP_DIR/bin/ccclaw" || ! -f "$CONFIG_FILE" ]]; then
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE config set-scheduler --mode $SCHEDULER --systemd-user-dir $SYSTEMD_USER_DIR"
+    return 0
+  fi
+  "$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config set-scheduler --mode "$SCHEDULER" --systemd-user-dir "$SYSTEMD_USER_DIR" >/dev/null
+}
+
 create_user_systemd_units() {
   local ingest_service="$SYSTEMD_USER_DIR/ccclaw-ingest.service"
   local ingest_timer="$SYSTEMD_USER_DIR/ccclaw-ingest.timer"
@@ -1226,6 +1303,58 @@ WantedBy=timers.target
 UNIT
 }
 
+reconcile_managed_crontab() {
+  local message=""
+  if [[ ! -x "$APP_DIR/bin/ccclaw" || ! -f "$CONFIG_FILE" ]]; then
+    CRON_MANAGED_STATUS="skip"
+    CRON_MANAGED_REASON="当前未发现可用 ccclaw 或配置文件，跳过受控 crontab 管理"
+    return 0
+  fi
+  case "$SCHEDULER_EFFECTIVE" in
+    cron)
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        CRON_MANAGED_STATUS="planned:enable"
+        CRON_MANAGED_REASON="模拟模式：将写入或更新当前用户 crontab 中的 ccclaw 受控规则"
+        log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
+        return 0
+      fi
+      if ! message="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" --env-file "$ENV_FILE" scheduler enable-cron 2>&1)"; then
+        fail "写入受控 crontab 失败: $message"
+      fi
+      CRON_MANAGED_STATUS="enabled"
+      CRON_MANAGED_REASON="$message"
+      log "$message"
+      ;;
+    systemd|none)
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        CRON_MANAGED_STATUS="planned:disable"
+        CRON_MANAGED_REASON="模拟模式：如存在 ccclaw 受控 crontab 规则将尝试清理"
+        log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron"
+        return 0
+      fi
+      if message="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" --env-file "$ENV_FILE" scheduler disable-cron 2>&1)"; then
+        CRON_MANAGED_STATUS="disabled"
+        CRON_MANAGED_REASON="$message"
+        log "$message"
+      else
+        CRON_MANAGED_STATUS="warn"
+        CRON_MANAGED_REASON="$message"
+        warn "清理受控 crontab 失败: $message"
+      fi
+      ;;
+  esac
+}
+
+remove_managed_crontab_only() {
+  local message=""
+  [[ -x "$APP_DIR/bin/ccclaw" ]] || fail "未找到已安装的 ccclaw: $APP_DIR/bin/ccclaw"
+  [[ -f "$CONFIG_FILE" ]] || fail "未找到调度配置文件: $CONFIG_FILE"
+  if ! message="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" --env-file "$ENV_FILE" scheduler disable-cron 2>&1)"; then
+    fail "$message"
+  fi
+  printf '%s\n' "$message"
+}
+
 copy_ops_tree() {
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] cp -R $DIST_DIR/ops/. $APP_DIR/ops/"
@@ -1257,6 +1386,8 @@ create_app_layout() {
   create_env_file
   create_config_file
   create_user_systemd_units
+  sync_scheduler_config
+  reconcile_managed_crontab
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] ln -sf $APP_DIR/bin/ccclaw $BIN_LINK"
   else
@@ -1478,15 +1609,18 @@ print_summary() {
   local result_title="当前主机部署成果"
   local scheduler_step_6=""
   local scheduler_step_7=""
+  local cron_summary="$CRON_MANAGED_REASON"
   if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
     installed_version="$("$APP_DIR/bin/ccclaw" -V 2>/dev/null || echo unknown)"
   fi
   if [[ "$PREFLIGHT_ONLY" -eq 1 ]]; then
     headline="体检完成，未写入文件。"
     result_title="当前主机体检结果"
+    cron_summary="体检模式未写入受控 crontab"
   elif [[ "$SIMULATE" -eq 1 ]]; then
     headline="模拟执行完成，未写入文件。"
     result_title="当前主机模拟结果"
+    cron_summary="模拟模式未写入受控 crontab"
   fi
   if [[ "$gh_token_summary" == "未写入" && -n "$GH_TOKEN_DETECTED" ]]; then
     gh_token_summary="待从 gh auth token 回填"
@@ -1505,23 +1639,24 @@ print_summary() {
       scheduler_step_6="6. 按需启用用户定时器:
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
-      scheduler_step_7="7. 若后续环境不适合 systemd --user，可改为手工写入 crontab 样板:
-   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
-   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
+   bash $APP_DIR/install.sh --scheduler cron"
       ;;
     cron)
-      scheduler_step_6="6. 当前调度模式为 cron，请手工写入 crontab:
-   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
-   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      scheduler_step_6="6. 当前调度模式为 cron；安装器已写入或更新当前用户 crontab 中的 ccclaw 受控规则:
+   crontab -l
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
       ;;
     none|*)
-      scheduler_step_6="6. 当前调度模式为 none；如需后台调度，可手工写入 crontab:
-   */5 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
-   */10 * * * * $APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE"
+      scheduler_step_6="6. 当前调度模式为 none；如需受控 cron，可执行:
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
       ;;
@@ -1556,7 +1691,7 @@ $result_title
   - ccclaw-patrol.timer
   - ccclaw-journal.service
   - ccclaw-journal.timer
-- crontab: 默认不自动写入，仅提供样板
+- 受控 crontab: $cron_summary
 
 建议下一步
 1. 检查 $ENV_FILE 中的敏感项是否齐全
@@ -1590,6 +1725,10 @@ main() {
   validate_shell_options
   if [[ "$REMOVE_SHELL_INTEGRATION" != "none" ]]; then
     remove_shell_integration "$REMOVE_SHELL_INTEGRATION"
+    exit 0
+  fi
+  if [[ "$REMOVE_CRON" -eq 1 ]]; then
+    remove_managed_crontab_only
     exit 0
   fi
   probe_claude
