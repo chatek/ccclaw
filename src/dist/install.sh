@@ -194,13 +194,29 @@ prompt_default() {
 
 prompt_mode() {
   local var_name="$1" label="$2" default_value="$3" allowed="$4"
-  local input="$default_value"
+  local input default_short
+  default_short="$(printf '%s' "${default_value:0:1}" | tr '[:lower:]' '[:upper:]')"
   while true; do
-    prompt_default input "$label" "$input"
+    prompt_default input "$label" "$default_short"
+    local normalized
+    normalized="$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')"
+    # 完整单词精确匹配
     case " $allowed " in
-      *" $input "*) printf -v "$var_name" '%s' "$input"; return 0 ;;
-      *) warn "无效取值: $input；允许值: $allowed" ;;
+      *" $normalized "*) printf -v "$var_name" '%s' "$normalized"; return 0 ;;
     esac
+    # 首字母缩写展开
+    local match="" word
+    for word in $allowed; do
+      if [[ "${word:0:1}" == "$normalized" ]]; then
+        match="$word"
+        break
+      fi
+    done
+    if [[ -n "$match" ]]; then
+      printf -v "$var_name" '%s' "$match"
+      return 0
+    fi
+    warn "无效取值: $input；允许值: $allowed"
   done
 }
 
@@ -831,7 +847,7 @@ collect_inputs() {
   print_stage "阶段 1/4 安装拓扑"
   prompt_default APP_DIR "程序目录" "$APP_DIR"
   prompt_default CONTROL_REPO "控制仓库 owner/repo" "$CONTROL_REPO"
-  prompt_mode HOME_REPO_MODE "本体仓库模式(init/remote/local)" "$HOME_REPO_MODE" "init remote local"
+  prompt_mode HOME_REPO_MODE "本体仓库模式 (I)nit/(R)emote/(L)ocal" "$HOME_REPO_MODE" "init remote local"
   prompt_default HOME_REPO "本体仓库目录" "$HOME_REPO"
   case "$HOME_REPO_MODE" in
     remote)
@@ -843,7 +859,7 @@ collect_inputs() {
   esac
 
   print_stage "阶段 2/4 任务仓库绑定"
-  prompt_mode TASK_REPO_MODE "任务仓库模式(none/remote/local)" "$TASK_REPO_MODE" "none remote local"
+  prompt_mode TASK_REPO_MODE "任务仓库模式 (N)one/(R)emote/(L)ocal" "$TASK_REPO_MODE" "none remote local"
   case "$TASK_REPO_MODE" in
     remote)
       prompt_default TASK_REPO_REMOTE "任务远程仓库(owner/repo 或 URL)" "$TASK_REPO_REMOTE"
@@ -858,8 +874,26 @@ collect_inputs() {
       prompt_default TASK_KB_PATH "任务仓库 kb 路径(可留空继承全局)" "$TASK_KB_PATH"
       ;;
     local)
-      prompt_default TASK_REPO_LOCAL "本地任务仓库路径" "$TASK_REPO_LOCAL"
-      if [[ -z "$TASK_REPO" && -d "$TASK_REPO_LOCAL/.git" ]]; then
+      while true; do
+        prompt_default TASK_REPO_LOCAL "本地任务仓库绝对路径" "$TASK_REPO_LOCAL"
+        if [[ -z "$TASK_REPO_LOCAL" ]]; then
+          warn "路径不可为空，请输入本地已 clone 的任务仓库绝对路径"
+          continue
+        fi
+        if [[ "$TASK_REPO_LOCAL" != /* ]]; then
+          warn "必须为绝对路径: $TASK_REPO_LOCAL"
+          continue
+        fi
+        if [[ ! -d "$TASK_REPO_LOCAL" ]]; then
+          warn "目录不存在: $TASK_REPO_LOCAL"
+          continue
+        fi
+        if [[ ! -d "$TASK_REPO_LOCAL/.git" ]]; then
+          fail "不是 git 仓库（无 .git 目录）: $TASK_REPO_LOCAL"
+        fi
+        break
+      done
+      if [[ -z "$TASK_REPO" ]]; then
         TASK_REPO="$(repo_slug_from_local_repo "$TASK_REPO_LOCAL" 2>/dev/null || true)"
       fi
       if [[ -n "$TASK_REPO" ]]; then
@@ -873,7 +907,7 @@ collect_inputs() {
   esac
 
   print_stage "阶段 3/4 调度器"
-  prompt_mode SCHEDULER "调度器模式(auto/systemd/cron/none)" "$SCHEDULER" "auto systemd cron none"
+  prompt_mode SCHEDULER "调度器模式 (A)uto/(S)ystemd/(C)ron/(N)one" "$SCHEDULER" "auto systemd cron none"
   refresh_paths
 }
 
@@ -1124,6 +1158,12 @@ ENV
 create_config_file() {
   if [[ -f "$CONFIG_FILE" ]]; then
     log "保留已有普通配置: $CONFIG_FILE"
+    if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
+      local migrate_out
+      migrate_out="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config migrate-approval 2>&1)" \
+        || fail "自动迁移废弃 approval 配置失败: $migrate_out"
+      log "$migrate_out"
+    fi
     return 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
