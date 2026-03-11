@@ -32,6 +32,9 @@ func newRootCmd() *cobra.Command {
 	var statsDaily bool
 	var statsLimit int
 	var journalDate string
+	var schedulerLogsFollow bool
+	var schedulerLogsSince string
+	var schedulerLogsLines int
 
 	rootCmd := &cobra.Command{
 		Use:           "ccclaw",
@@ -186,6 +189,11 @@ func newRootCmd() *cobra.Command {
 	})
 	var schedulerMode string
 	var schedulerUserDir string
+	var schedulerCalendarTimezone string
+	var schedulerIngestCalendar string
+	var schedulerRunCalendar string
+	var schedulerPatrolCalendar string
+	var schedulerJournalCalendar string
 	configSetSchedulerCmd := &cobra.Command{
 		Use:   "set-scheduler",
 		Short: "更新调度器配置",
@@ -198,16 +206,36 @@ func newRootCmd() *cobra.Command {
 			if schedulerUserDir != "" {
 				cfg.Scheduler.SystemdUserDir = schedulerUserDir
 			}
+			if schedulerCalendarTimezone != "" {
+				cfg.Scheduler.CalendarTimezone = schedulerCalendarTimezone
+			}
+			if schedulerIngestCalendar != "" {
+				cfg.Scheduler.Timers.Ingest = schedulerIngestCalendar
+			}
+			if schedulerRunCalendar != "" {
+				cfg.Scheduler.Timers.Run = schedulerRunCalendar
+			}
+			if schedulerPatrolCalendar != "" {
+				cfg.Scheduler.Timers.Patrol = schedulerPatrolCalendar
+			}
+			if schedulerJournalCalendar != "" {
+				cfg.Scheduler.Timers.Journal = schedulerJournalCalendar
+			}
 			cfg.NormalizePaths()
-			if err := config.Save(configPath, cfg); err != nil {
+			if err := config.UpdateSchedulerSection(configPath, cfg.Scheduler); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已更新调度配置: mode=%s systemd_user_dir=%s\n", cfg.Scheduler.Mode, cfg.Scheduler.SystemdUserDir)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "已更新调度配置: mode=%s systemd_user_dir=%s calendar_timezone=%s\n", cfg.Scheduler.Mode, cfg.Scheduler.SystemdUserDir, cfg.Scheduler.CalendarTimezone)
 			return nil
 		},
 	}
 	configSetSchedulerCmd.Flags().StringVar(&schedulerMode, "mode", "", "调度器模式: auto|systemd|cron|none")
 	configSetSchedulerCmd.Flags().StringVar(&schedulerUserDir, "systemd-user-dir", "", "user systemd 单元目录")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerCalendarTimezone, "calendar-timezone", "", "systemd timer 日程解释时区，默认 Asia/Shanghai")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerIngestCalendar, "ingest-calendar", "", "ingest timer 的 OnCalendar 表达式")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerRunCalendar, "run-calendar", "", "run timer 的 OnCalendar 表达式")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerPatrolCalendar, "patrol-calendar", "", "patrol timer 的 OnCalendar 表达式")
+	configSetSchedulerCmd.Flags().StringVar(&schedulerJournalCalendar, "journal-calendar", "", "journal timer 的 OnCalendar 表达式")
 	_ = configSetSchedulerCmd.MarkFlagRequired("mode")
 	configCmd.AddCommand(configSetSchedulerCmd)
 	rootCmd.AddCommand(configCmd)
@@ -231,6 +259,62 @@ func newRootCmd() *cobra.Command {
 			return err
 		},
 	})
+	schedulerCmd.AddCommand(&cobra.Command{
+		Use:   "timers",
+		Short: "查看 ccclaw user systemd timers 状态与下一次触发时间",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			items, err := scheduler.ListManagedTimers(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+			location := cfg.Scheduler.CalendarTimezone
+			if location == "" {
+				location = "Local"
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "主机时区: %s\n", time.Now().Location().String())
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "配置时区: %s\n\n", location)
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "TIMER\tACTIVE\tENABLED\tCALENDAR\tNEXT_LOCAL\tNEXT_CFG\tLAST_LOCAL\tLAST_CFG")
+			for _, item := range items {
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					item.TimerUnit,
+					item.ActiveState,
+					item.UnitFileState,
+					item.CalendarWithTZ,
+					item.NextLocal,
+					item.NextConfigTZ,
+					item.LastLocal,
+					item.LastConfigTZ,
+				)
+			}
+			return w.Flush()
+		},
+	})
+	schedulerLogsCmd := &cobra.Command{
+		Use:   "logs [all|ingest|run|patrol|journal]",
+		Short: "查看或追随 ccclaw user systemd 服务日志",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scope := "all"
+			if len(args) == 1 {
+				scope = args[0]
+			}
+			return scheduler.StreamLogs(cmd.Context(), scheduler.LogsOptions{
+				Scope:  scope,
+				Follow: schedulerLogsFollow,
+				Since:  schedulerLogsSince,
+				Lines:  schedulerLogsLines,
+			}, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		},
+	}
+	schedulerLogsCmd.Flags().BoolVarP(&schedulerLogsFollow, "follow", "f", false, "持续追随日志输出")
+	schedulerLogsCmd.Flags().StringVar(&schedulerLogsSince, "since", "", "仅显示指定时间之后的日志，如 '1 hour ago'")
+	schedulerLogsCmd.Flags().IntVar(&schedulerLogsLines, "lines", 50, "默认显示最近多少行日志")
+	schedulerCmd.AddCommand(schedulerLogsCmd)
 	schedulerCmd.AddCommand(&cobra.Command{
 		Use:   "enable-cron",
 		Short: "写入或更新当前用户的受控 crontab 规则",
@@ -272,7 +356,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := config.Save(configPath, cfg); err != nil {
+			if err := config.UpdateSchedulerSection(configPath, cfg.Scheduler); err != nil {
 				return err
 			}
 			for _, step := range result.Steps {

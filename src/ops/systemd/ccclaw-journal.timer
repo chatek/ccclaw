@@ -1,8 +1,8 @@
 [Unit]
-Description=Run ccclaw journal every day at 23:50 (user)
+Description=Run ccclaw journal on schedule (user)
 
 [Timer]
-OnCalendar=*-*-* 23:50:00
+OnCalendar=*-*-* 23:50:00 Asia/Shanghai
 Persistent=true
 Unit=ccclaw-journal.service
 

@@ -11,6 +11,7 @@ REUSE_CLAUDE_AUTH=1
 SHELL_INTEGRATION="none"
 REMOVE_SHELL_INTEGRATION="none"
 REMOVE_CRON=0
+SCHEDULER_EXPLICIT=0
 
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
@@ -19,6 +20,11 @@ BIN_LINK_DEFAULT="$HOME/.local/bin/ccclaw"
 SYSTEMD_USER_DIR_DEFAULT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 TASK_CLONE_ROOT_DEFAULT="/opt/src/3claw"
 SCHEDULER_DEFAULT="auto"
+CALENDAR_TIMEZONE_DEFAULT="Asia/Shanghai"
+INGEST_CALENDAR_DEFAULT="*:0/5"
+RUN_CALENDAR_DEFAULT="*:0/10"
+PATROL_CALENDAR_DEFAULT="*:0/2"
+JOURNAL_CALENDAR_DEFAULT="*-*-* 23:50:00"
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BASHRC_FILE="${BASHRC_FILE:-$HOME/.bashrc}"
 SHELL_BLOCK_BEGIN="# >>> ccclaw managed block >>>"
@@ -40,6 +46,11 @@ TASK_REPO_LOCAL="${TASK_REPO_LOCAL:-}"
 TASK_REPO="${TASK_REPO:-}"
 TASK_REPO_PATH="${TASK_REPO_PATH:-}"
 TASK_KB_PATH="${TASK_KB_PATH:-}"
+CALENDAR_TIMEZONE="${CALENDAR_TIMEZONE:-$CALENDAR_TIMEZONE_DEFAULT}"
+INGEST_CALENDAR="${INGEST_CALENDAR:-$INGEST_CALENDAR_DEFAULT}"
+RUN_CALENDAR="${RUN_CALENDAR:-$RUN_CALENDAR_DEFAULT}"
+PATROL_CALENDAR="${PATROL_CALENDAR:-$PATROL_CALENDAR_DEFAULT}"
+JOURNAL_CALENDAR="${JOURNAL_CALENDAR:-$JOURNAL_CALENDAR_DEFAULT}"
 
 ENV_FILE=""
 CONFIG_FILE=""
@@ -68,6 +79,9 @@ CRON_READY=0
 CRON_CHECK_STATUS="未探查"
 CRON_MANAGED_STATUS="未处理"
 CRON_MANAGED_REASON="未执行受控 crontab 管理"
+SYSTEMD_ACTIVATION_STATUS="未处理"
+SYSTEMD_ACTIVATION_REASON="未执行 user systemd 激活"
+CONFIG_FILE_ALREADY_EXISTS=0
 
 expand_path() {
   local path="$1"
@@ -142,7 +156,7 @@ while (($#)); do
     --preflight-only) PREFLIGHT_ONLY=1 ;;
     --skip-deps) SKIP_DEPS=1 ;;
     --install-claude) INSTALL_CLAUDE=1 ;;
-    --scheduler) shift; SCHEDULER="$1" ;;
+    --scheduler) shift; SCHEDULER="$1"; SCHEDULER_EXPLICIT=1 ;;
     --task-clone-root) shift; TASK_CLONE_ROOT="$1" ;;
     --app-dir) shift; APP_DIR="$1" ;;
     --home-repo) shift; HOME_REPO="$1" ;;
@@ -314,6 +328,77 @@ single_line_text() {
   printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
 }
 
+toml_get_value() {
+  local file="$1" section="$2" key="$3"
+  [[ -f "$file" ]] || return 0
+  awk -v target="[$section]" -v key="$key" '
+    BEGIN { in_section=0 }
+    /^[[:space:]]*\[/ {
+      trimmed=$0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
+      if (trimmed == target) {
+        in_section=1
+        next
+      }
+      if (in_section == 1) {
+        in_section=0
+      }
+    }
+    in_section == 1 {
+      pattern = "^[[:space:]]*" key "[[:space:]]*="
+      if ($0 ~ pattern) {
+        line=$0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/^[\"'\'' ]+|[\"'\'' ]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$file"
+}
+
+load_existing_scheduler_preferences() {
+  local value=""
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  if [[ "$SCHEDULER_EXPLICIT" -eq 0 ]]; then
+    value="$(toml_get_value "$CONFIG_FILE" "scheduler" "mode")"
+    [[ -n "$value" ]] && SCHEDULER="$value"
+  fi
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler" "systemd_user_dir")"
+  [[ -n "$value" ]] && SYSTEMD_USER_DIR="$(expand_path "$value")"
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler" "calendar_timezone")"
+  [[ -n "$value" ]] && CALENDAR_TIMEZONE="$value"
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "ingest")"
+  [[ -n "$value" ]] && INGEST_CALENDAR="$value"
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "run")"
+  [[ -n "$value" ]] && RUN_CALENDAR="$value"
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "patrol")"
+  [[ -n "$value" ]] && PATROL_CALENDAR="$value"
+  value="$(toml_get_value "$CONFIG_FILE" "scheduler.timers" "journal")"
+  [[ -n "$value" ]] && JOURNAL_CALENDAR="$value"
+}
+
+calendar_has_explicit_timezone() {
+  local calendar="$1" last=""
+  set -- $calendar
+  [[ "$#" -gt 0 ]] || return 1
+  last="${!#}"
+  [[ "$last" == "UTC" || "$last" == */* ]]
+}
+
+calendar_with_timezone() {
+  local calendar="$1"
+  if [[ -z "$calendar" || -z "$CALENDAR_TIMEZONE" ]]; then
+    printf '%s\n' "$calendar"
+    return 0
+  fi
+  if calendar_has_explicit_timezone "$calendar"; then
+    printf '%s\n' "$calendar"
+    return 0
+  fi
+  printf '%s %s\n' "$calendar" "$CALENDAR_TIMEZONE"
+}
+
 remove_managed_shell_block() {
   local file="$1" tmp
   [[ -f "$file" ]] || return 0
@@ -472,6 +557,10 @@ merge_kb_contracts() {
     target="$HOME_REPO/kb/$relative"
     merge_managed_markdown "$template" "$target"
   done < <(find "$DIST_DIR/kb" -type f -name 'CLAUDE.md' | sort)
+}
+
+sync_app_readme() {
+  merge_managed_markdown "$DIST_DIR/ops/examples/app-readme.md" "$APP_DIR/README.md"
 }
 
 normalize_repo_slug() {
@@ -1159,6 +1248,7 @@ ENV
 
 create_config_file() {
   if [[ -f "$CONFIG_FILE" ]]; then
+    CONFIG_FILE_ALREADY_EXISTS=1
     log "保留已有普通配置: $CONFIG_FILE"
     if [[ -x "$APP_DIR/bin/ccclaw" ]]; then
       local migrate_out
@@ -1183,6 +1273,9 @@ default_target = ""
 [github]
 control_repo = "$CONTROL_REPO"
 issue_label = "ccclaw"
+# ingest 每轮通过 GitHub API 拉取 open issues 的上限。
+# - 只统计匹配 issue_label 的 Issue
+# - 不是并发数，也不是 run 阶段的执行上限
 limit = 20
 
 # 固定路径边界：
@@ -1205,11 +1298,23 @@ command = ["$CLAUDE_WRAPPER"]
 timeout = "30m"
 
 # 调度策略配置：
-# - mode: 安装时请求的调度模式
+# - mode: 安装时请求的调度模式 auto|systemd|cron|none
 # - systemd_user_dir: user systemd 单元写入目录
+# - calendar_timezone: systemd timer 周期解释时区；默认按北京时间 Asia/Shanghai
 [scheduler]
 mode = "$SCHEDULER"
 systemd_user_dir = "$SYSTEMD_USER_DIR"
+calendar_timezone = "$CALENDAR_TIMEZONE"
+
+# systemd timer 周期，采用 systemd OnCalendar 语法。
+# - "*-*-* 23:50:00" 表示“每年-每月-每日 23:50:00”
+# - 若要配置凌晨 01:01:42，可写为 "*-*-* 01:01:42"
+# - 若表达式未显式带时区，运行时会自动追加 scheduler.calendar_timezone
+[scheduler.timers]
+ingest = "$INGEST_CALENDAR"
+run = "$RUN_CALENDAR"
+patrol = "$PATROL_CALENDAR"
+journal = "$JOURNAL_CALENDAR"
 
 # maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。
 [approval]
@@ -1231,10 +1336,17 @@ sync_scheduler_config() {
     return 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE config set-scheduler --mode $SCHEDULER --systemd-user-dir $SYSTEMD_USER_DIR"
+    log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE config set-scheduler --mode $SCHEDULER --systemd-user-dir $SYSTEMD_USER_DIR --calendar-timezone $CALENDAR_TIMEZONE --ingest-calendar '$INGEST_CALENDAR' --run-calendar '$RUN_CALENDAR' --patrol-calendar '$PATROL_CALENDAR' --journal-calendar '$JOURNAL_CALENDAR'"
     return 0
   fi
-  "$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config set-scheduler --mode "$SCHEDULER" --systemd-user-dir "$SYSTEMD_USER_DIR" >/dev/null
+  "$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config set-scheduler \
+    --mode "$SCHEDULER" \
+    --systemd-user-dir "$SYSTEMD_USER_DIR" \
+    --calendar-timezone "$CALENDAR_TIMEZONE" \
+    --ingest-calendar "$INGEST_CALENDAR" \
+    --run-calendar "$RUN_CALENDAR" \
+    --patrol-calendar "$PATROL_CALENDAR" \
+    --journal-calendar "$JOURNAL_CALENDAR" >/dev/null
 }
 
 create_user_systemd_units() {
@@ -1246,6 +1358,7 @@ create_user_systemd_units() {
   local patrol_timer="$SYSTEMD_USER_DIR/ccclaw-patrol.timer"
   local journal_service="$SYSTEMD_USER_DIR/ccclaw-journal.service"
   local journal_timer="$SYSTEMD_USER_DIR/ccclaw-journal.timer"
+  local ingest_calendar run_calendar patrol_calendar journal_calendar
   if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
     log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
     return 0
@@ -1255,6 +1368,10 @@ create_user_systemd_units() {
     log "[simulate] write user systemd units into $SYSTEMD_USER_DIR"
     return 0
   fi
+  ingest_calendar="$(calendar_with_timezone "$INGEST_CALENDAR")"
+  run_calendar="$(calendar_with_timezone "$RUN_CALENDAR")"
+  patrol_calendar="$(calendar_with_timezone "$PATROL_CALENDAR")"
+  journal_calendar="$(calendar_with_timezone "$JOURNAL_CALENDAR")"
   cat > "$ingest_service" <<UNIT
 [Unit]
 Description=ccclaw ingest service
@@ -1267,10 +1384,10 @@ ExecStart=$APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
 UNIT
   cat > "$ingest_timer" <<UNIT
 [Unit]
-Description=Run ccclaw ingest every 5 minutes
+Description=Run ccclaw ingest on schedule
 
 [Timer]
-OnCalendar=*:0/5
+OnCalendar=$ingest_calendar
 Persistent=true
 Unit=ccclaw-ingest.service
 
@@ -1289,10 +1406,10 @@ ExecStart=$APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE
 UNIT
   cat > "$run_timer" <<UNIT
 [Unit]
-Description=Run ccclaw worker every 10 minutes
+Description=Run ccclaw worker on schedule
 
 [Timer]
-OnCalendar=*:0/10
+OnCalendar=$run_calendar
 Persistent=true
 Unit=ccclaw-run.service
 
@@ -1311,10 +1428,10 @@ ExecStart=$APP_DIR/bin/ccclaw patrol --config $CONFIG_FILE --env-file $ENV_FILE
 UNIT
   cat > "$patrol_timer" <<UNIT
 [Unit]
-Description=Run ccclaw patrol every 2 minutes
+Description=Run ccclaw patrol on schedule
 
 [Timer]
-OnCalendar=*:0/2
+OnCalendar=$patrol_calendar
 Persistent=true
 Unit=ccclaw-patrol.service
 
@@ -1333,10 +1450,10 @@ ExecStart=$APP_DIR/bin/ccclaw journal --config $CONFIG_FILE --env-file $ENV_FILE
 UNIT
   cat > "$journal_timer" <<UNIT
 [Unit]
-Description=Run ccclaw journal every day at 23:50
+Description=Run ccclaw journal on schedule
 
 [Timer]
-OnCalendar=*-*-* 23:50:00
+OnCalendar=$journal_calendar
 Persistent=true
 Unit=ccclaw-journal.service
 
@@ -1387,6 +1504,39 @@ reconcile_managed_crontab() {
   esac
 }
 
+activate_user_systemd_timers() {
+  if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
+    SYSTEMD_ACTIVATION_STATUS="skip($SCHEDULER_EFFECTIVE)"
+    SYSTEMD_ACTIVATION_REASON="当前调度模式不是 systemd，跳过 user systemd 激活"
+    return 0
+  fi
+  if [[ "$SYSTEMD_CONTROL_READY" -ne 1 ]]; then
+    SYSTEMD_ACTIVATION_STATUS="manual"
+    SYSTEMD_ACTIVATION_REASON="当前会话未直连 user bus；需在登录会话手工执行 daemon-reload + enable --now"
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    SYSTEMD_ACTIVATION_STATUS="planned:auto"
+    SYSTEMD_ACTIVATION_REASON="模拟模式：将自动执行 daemon-reload + enable --now"
+    log "[simulate] systemctl --user daemon-reload"
+    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+    if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
+      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+    fi
+    return 0
+  fi
+  systemctl --user daemon-reload
+  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+  if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
+    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+    SYSTEMD_ACTIVATION_STATUS="restarted"
+    SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit"
+    return 0
+  fi
+  SYSTEMD_ACTIVATION_STATUS="enabled"
+  SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并启用托管 timer"
+}
+
 remove_managed_crontab_only() {
   local message=""
   [[ -x "$APP_DIR/bin/ccclaw" ]] || fail "未找到已安装的 ccclaw: $APP_DIR/bin/ccclaw"
@@ -1424,12 +1574,14 @@ create_app_layout() {
   fi
   install_release_scripts
   copy_ops_tree
+  sync_app_readme
   create_claude_wrapper
   create_env_file
   create_config_file
   create_user_systemd_units
   sync_scheduler_config
   reconcile_managed_crontab
+  activate_user_systemd_timers
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] ln -sf $APP_DIR/bin/ccclaw $BIN_LINK"
   else
@@ -1617,9 +1769,15 @@ print_summary() {
   esac
   case "$SCHEDULER_EFFECTIVE" in
     systemd)
-      scheduler_step_6="6. 按需启用用户定时器:
+      if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+        scheduler_step_6="6. 当前会话可直连 user bus；安装/升级已自动完成 daemon-reload 与 timer 启用。
+   可复核:
+   $APP_DIR/bin/ccclaw scheduler timers --config $CONFIG_FILE --env-file $ENV_FILE"
+      else
+        scheduler_step_6="6. 当前会话未直连 user bus；请在登录会话中手工启用用户定时器:
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+      fi
       scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    bash $APP_DIR/install.sh --scheduler cron"
@@ -1653,6 +1811,7 @@ $result_title
 - 可执行文件: $APP_DIR/bin/ccclaw
 - 执行器包装: $CLAUDE_WRAPPER
 - 隐私配置: $ENV_FILE
+- 程序手册: $APP_DIR/README.md
 - GH_TOKEN 来源: $gh_token_summary
 - Claude 凭据态: $CLAUDE_AUTH_METHOD
 - Claude 生态处理: 默认只读探查，未自动修改 marketplace/plugins/rtk 全局配置
@@ -1663,6 +1822,7 @@ $result_title
 - 任务仓库绑定: $task_summary
 - 调度器: 请求=$SCHEDULER, 生效=$SCHEDULER_EFFECTIVE
 - 调度器说明: $SCHEDULER_REASON
+- user systemd 激活: $SYSTEMD_ACTIVATION_REASON
 - user systemd 单元目录: $SYSTEMD_USER_DIR
 - user systemd 单元(仅 systemd 模式写入):
   - ccclaw-ingest.service
@@ -1705,6 +1865,7 @@ MSG
 
 main() {
   validate_shell_options
+  load_existing_scheduler_preferences
   if [[ "$REMOVE_SHELL_INTEGRATION" != "none" ]]; then
     remove_shell_integration "$REMOVE_SHELL_INTEGRATION"
     exit 0

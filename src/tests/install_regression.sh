@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_SCRIPT="$ROOT_DIR/dist/install.sh"
 BIN_PATH="$ROOT_DIR/dist/bin/ccclaw"
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ccclaw-install-regression.XXXXXX")"
-REAL_HOME="${HOME}"
 
 cleanup() {
   rm -rf "$WORK_ROOT"
@@ -160,6 +159,22 @@ fi
 exit 0
 SCRIPT
       ;;
+    ready)
+      cat > "$dir/systemctl" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:-}"
+if [[ -n "$log_file" ]]; then
+  printf '%s\n' "$*" >> "$log_file"
+fi
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'HOME=%s\n' "${HOME:-/tmp}"
+  printf 'XDG_RUNTIME_DIR=%s\n' "${XDG_RUNTIME_DIR:-/run/user/1000}"
+  exit 0
+fi
+exit 0
+SCRIPT
+      ;;
     *)
       fail "未知 fake systemctl 模式: $mode"
       ;;
@@ -252,9 +267,9 @@ test_first_install_and_idempotent_reinstall() {
   assert_file_missing "$xdg/systemd/user/ccclaw-patrol.timer"
   assert_file_missing "$xdg/systemd/user/ccclaw-journal.service"
   assert_file_missing "$xdg/systemd/user/ccclaw-journal.timer"
-  assert_contains "$config_file" "repo = '41490/task-local'"
-  assert_contains "$config_file" "local_path = '$task_repo'"
-  assert_contains "$config_file" "default_target = '41490/task-local'"
+  assert_contains "$config_file" 'repo = "41490/task-local"'
+  assert_contains "$config_file" "local_path = \"$task_repo\""
+  assert_contains "$config_file" 'default_target = "41490/task-local"'
   assert_contains "$env_file" 'GH_TOKEN='
   assert_contains "$log1" '安装完成。'
   assert_contains "$log1" '请求=none, 生效=none'
@@ -295,7 +310,7 @@ test_systemd_degrade_preflight() {
 
   run_case "$log" \
     env \
-      HOME="$REAL_HOME" \
+      HOME="$sandbox/home" \
       XDG_CONFIG_HOME="$readonly_xdg" \
       PATH="$fakebin:$PATH" \
       BIN_LINK="$sandbox/bin/ccclaw" \
@@ -368,6 +383,68 @@ test_systemd_preflight_accepts_busless_deploy() {
   assert_contains "$log" '请求=auto, 生效=systemd'
   assert_contains "$log" '未直连 user bus'
   assert_contains "$log" '手工启用 timer'
+}
+
+test_systemd_install_auto_enable_and_restart() {
+  local sandbox fakebin app_dir home_repo task_repo log1 log2 config_file readme_file systemctl_log
+  sandbox="$(setup_sandbox systemd-auto-enable)"
+  fakebin="$sandbox/fakebin"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  task_repo="$sandbox/task-local"
+  log1="$sandbox/install.log"
+  log2="$sandbox/reinstall.log"
+  config_file="$app_dir/ops/config/config.toml"
+  readme_file="$app_dir/README.md"
+  systemctl_log="$sandbox/systemctl.log"
+
+  create_git_repo "$task_repo"
+  create_fake_systemctl "$fakebin" ready
+
+  run_case "$log1" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_SYSTEMCTL_LOG="$systemctl_log" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler systemd
+
+  assert_file_exists "$readme_file"
+  assert_contains "$readme_file" 'scheduler logs -f'
+  assert_contains "$config_file" 'calendar_timezone = "Asia/Shanghai"'
+  assert_contains "$config_file" '[scheduler.timers]'
+  assert_contains "$systemctl_log" '--user daemon-reload'
+  assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
+
+  run_case "$log2" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_SYSTEMCTL_LOG="$systemctl_log" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler systemd
+
+  assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
 }
 
 test_interactive_mode_accepts_short_words() {
@@ -443,7 +520,7 @@ test_local_repo_without_origin_requires_repo() {
 
   run_expect_fail "$log" \
     env \
-      HOME="$REAL_HOME" \
+      HOME="$sandbox/home" \
       XDG_CONFIG_HOME="$sandbox/xdg" \
       BIN_LINK="$sandbox/bin/ccclaw" \
       "$INSTALL_SCRIPT" \
@@ -467,7 +544,7 @@ test_remote_repo_path_must_stay_within_clone_root() {
 
   run_expect_fail "$log" \
     env \
-      HOME="$REAL_HOME" \
+      HOME="$sandbox/home" \
       XDG_CONFIG_HOME="$sandbox/xdg" \
       BIN_LINK="$sandbox/bin/ccclaw" \
       "$INSTALL_SCRIPT" \
@@ -618,7 +695,7 @@ test_cron_install_update_and_remove() {
   assert_contains "$crontab_file" "$app_dir/bin/ccclaw run --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
   assert_contains "$crontab_file" "$app_dir/bin/ccclaw patrol --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
   assert_contains "$crontab_file" "$app_dir/bin/ccclaw journal --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
-  assert_contains "$config_file" "mode = 'cron'"
+  assert_contains "$config_file" 'mode = "cron"'
   assert_contains "$log2" '已向当前用户 crontab 追加 ccclaw 受控规则'
 
   run_case "$log3" \
@@ -711,6 +788,8 @@ main() {
   log "已通过: auto 可降级到受控 cron"
   test_systemd_preflight_accepts_busless_deploy
   log "已通过: systemd 无 user bus 仍允许部署"
+  test_systemd_install_auto_enable_and_restart
+  log "已通过: systemd 安装自动启用与重装重启"
   test_interactive_mode_accepts_short_words
   log "已通过: 交互模式接受单字母输入"
   test_interactive_mode_accepts_full_words

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
-	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/viper"
 )
 
@@ -49,8 +49,17 @@ type ExecutorConfig struct {
 }
 
 type SchedulerConfig struct {
-	Mode           string `mapstructure:"mode" toml:"mode"`
-	SystemdUserDir string `mapstructure:"systemd_user_dir" toml:"systemd_user_dir"`
+	Mode             string                `mapstructure:"mode" toml:"mode"`
+	SystemdUserDir   string                `mapstructure:"systemd_user_dir" toml:"systemd_user_dir"`
+	CalendarTimezone string                `mapstructure:"calendar_timezone" toml:"calendar_timezone"`
+	Timers           SchedulerTimersConfig `mapstructure:"timers" toml:"timers"`
+}
+
+type SchedulerTimersConfig struct {
+	Ingest  string `mapstructure:"ingest" toml:"ingest"`
+	Run     string `mapstructure:"run" toml:"run"`
+	Patrol  string `mapstructure:"patrol" toml:"patrol"`
+	Journal string `mapstructure:"journal" toml:"journal"`
 }
 
 type ApprovalConfig struct {
@@ -91,6 +100,11 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.timeout", "30m")
 	v.SetDefault("scheduler.mode", "none")
 	v.SetDefault("scheduler.systemd_user_dir", "~/.config/systemd/user")
+	v.SetDefault("scheduler.calendar_timezone", "Asia/Shanghai")
+	v.SetDefault("scheduler.timers.ingest", defaultSchedulerTimers().Ingest)
+	v.SetDefault("scheduler.timers.run", defaultSchedulerTimers().Run)
+	v.SetDefault("scheduler.timers.patrol", defaultSchedulerTimers().Patrol)
+	v.SetDefault("scheduler.timers.journal", defaultSchedulerTimers().Journal)
 	v.SetDefault("approval.words", defaultApprovalWords())
 	v.SetDefault("approval.reject_words", defaultRejectWords())
 	v.SetDefault("approval.minimum_permission", "maintain")
@@ -127,6 +141,11 @@ func (cfg *Config) NormalizePaths() {
 	} else {
 		cfg.Scheduler.SystemdUserDir = ExpandPath(cfg.Scheduler.SystemdUserDir)
 	}
+	cfg.Scheduler.CalendarTimezone = strings.TrimSpace(cfg.Scheduler.CalendarTimezone)
+	if cfg.Scheduler.CalendarTimezone == "" {
+		cfg.Scheduler.CalendarTimezone = "Asia/Shanghai"
+	}
+	normalizeSchedulerTimers(&cfg.Scheduler.Timers)
 	for idx := range cfg.Targets {
 		cfg.Targets[idx].LocalPath = ExpandPath(cfg.Targets[idx].LocalPath)
 		cfg.Targets[idx].KBPath = ExpandPath(cfg.Targets[idx].KBPath)
@@ -166,6 +185,21 @@ func (cfg *Config) Validate() error {
 	case "", "auto", "systemd", "cron", "none":
 	default:
 		return fmt.Errorf("scheduler.mode 取值无效: %s", cfg.Scheduler.Mode)
+	}
+	if strings.TrimSpace(cfg.Scheduler.CalendarTimezone) != "" {
+		if _, err := time.LoadLocation(cfg.Scheduler.CalendarTimezone); err != nil {
+			return fmt.Errorf("scheduler.calendar_timezone 无效: %w", err)
+		}
+	}
+	for key, value := range map[string]string{
+		"ingest":  cfg.Scheduler.Timers.Ingest,
+		"run":     cfg.Scheduler.Timers.Run,
+		"patrol":  cfg.Scheduler.Timers.Patrol,
+		"journal": cfg.Scheduler.Timers.Journal,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("scheduler.timers.%s 不能为空", key)
+		}
 	}
 	if len(normalizeApprovalWords(cfg.Approval.Words)) == 0 {
 		return errors.New("approval.words 至少需要一个批准词")
@@ -282,17 +316,36 @@ func Save(path string, cfg *Config) error {
 	if cfg == nil {
 		return errors.New("配置不能为空")
 	}
+	cfg.NormalizePaths()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	encoder := toml.NewEncoder(&buf)
-	encoder.SetIndentTables(true)
-	if err := encoder.Encode(cfg); err != nil {
-		return fmt.Errorf("序列化配置文件失败: %w", err)
-	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	payload := renderAnnotatedConfig(cfg)
+	if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
+	}
+	return nil
+}
+
+func UpdateSchedulerSection(path string, scheduler SchedulerConfig) error {
+	path = ExpandPath(path)
+	normalizeSchedulerConfig(&scheduler)
+	if err := validateSchedulerConfig(scheduler); err != nil {
+		return err
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	updated, changed, err := rewriteSchedulerSection(string(payload), scheduler)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("写入 scheduler 配置失败: %w", err)
 	}
 	return nil
 }
@@ -437,6 +490,81 @@ func defaultRejectWords() []string {
 	return []string{"reject", "no", "cancel", "nil", "null", "拒绝", "000"}
 }
 
+func defaultSchedulerTimers() SchedulerTimersConfig {
+	return SchedulerTimersConfig{
+		Ingest:  "*:0/5",
+		Run:     "*:0/10",
+		Patrol:  "*:0/2",
+		Journal: "*-*-* 23:50:00",
+	}
+}
+
+func normalizeSchedulerTimers(timers *SchedulerTimersConfig) {
+	if timers == nil {
+		return
+	}
+	defaults := defaultSchedulerTimers()
+	timers.Ingest = strings.TrimSpace(timers.Ingest)
+	if timers.Ingest == "" {
+		timers.Ingest = defaults.Ingest
+	}
+	timers.Run = strings.TrimSpace(timers.Run)
+	if timers.Run == "" {
+		timers.Run = defaults.Run
+	}
+	timers.Patrol = strings.TrimSpace(timers.Patrol)
+	if timers.Patrol == "" {
+		timers.Patrol = defaults.Patrol
+	}
+	timers.Journal = strings.TrimSpace(timers.Journal)
+	if timers.Journal == "" {
+		timers.Journal = defaults.Journal
+	}
+}
+
+func normalizeSchedulerConfig(scheduler *SchedulerConfig) {
+	if scheduler == nil {
+		return
+	}
+	scheduler.Mode = strings.TrimSpace(scheduler.Mode)
+	if scheduler.Mode == "" {
+		scheduler.Mode = "none"
+	}
+	scheduler.SystemdUserDir = ExpandPath(scheduler.SystemdUserDir)
+	if scheduler.SystemdUserDir == "" {
+		scheduler.SystemdUserDir = ExpandPath("~/.config/systemd/user")
+	}
+	scheduler.CalendarTimezone = strings.TrimSpace(scheduler.CalendarTimezone)
+	if scheduler.CalendarTimezone == "" {
+		scheduler.CalendarTimezone = "Asia/Shanghai"
+	}
+	normalizeSchedulerTimers(&scheduler.Timers)
+}
+
+func validateSchedulerConfig(scheduler SchedulerConfig) error {
+	switch scheduler.Mode {
+	case "auto", "systemd", "cron", "none":
+	default:
+		return fmt.Errorf("scheduler.mode 取值无效: %s", scheduler.Mode)
+	}
+	if scheduler.CalendarTimezone != "" {
+		if _, err := time.LoadLocation(scheduler.CalendarTimezone); err != nil {
+			return fmt.Errorf("scheduler.calendar_timezone 无效: %w", err)
+		}
+	}
+	for key, value := range map[string]string{
+		"ingest":  scheduler.Timers.Ingest,
+		"run":     scheduler.Timers.Run,
+		"patrol":  scheduler.Timers.Patrol,
+		"journal": scheduler.Timers.Journal,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("scheduler.timers.%s 不能为空", key)
+		}
+	}
+	return nil
+}
+
 func normalizeApprovalWords(words []string) []string {
 	normalized := make([]string, 0, len(words))
 	seen := make(map[string]struct{}, len(words))
@@ -502,6 +630,42 @@ func rewriteApprovalSection(content string) (string, bool, error) {
 	return strings.Join(updatedLines, "\n"), true, nil
 }
 
+func rewriteSchedulerSection(content string, scheduler SchedulerConfig) (string, bool, error) {
+	lines := strings.Split(content, "\n")
+	start := -1
+	end := len(lines)
+	for idx, line := range lines {
+		if isSchedulerHeader(line) {
+			start = idx
+			break
+		}
+	}
+	replacement := renderSchedulerSection(scheduler)
+	if start < 0 {
+		updated := strings.TrimRight(content, "\n")
+		if updated != "" {
+			updated += "\n\n"
+		}
+		updated += strings.Join(replacement, "\n")
+		return updated + "\n", true, nil
+	}
+	for idx := start + 1; idx < len(lines); idx++ {
+		if isSchedulerScopedHeader(lines[idx]) {
+			continue
+		}
+		if isAnyTableHeader(lines[idx]) {
+			end = idx
+			break
+		}
+	}
+	updatedLines := make([]string, 0, len(lines)-len(lines[start:end])+len(replacement))
+	updatedLines = append(updatedLines, lines[:start]...)
+	updatedLines = append(updatedLines, replacement...)
+	updatedLines = append(updatedLines, lines[end:]...)
+	updated := strings.Join(updatedLines, "\n")
+	return updated, updated != content, nil
+}
+
 func isApprovalHeader(line string) bool {
 	return strings.EqualFold(strings.TrimSpace(line), "[approval]")
 }
@@ -509,6 +673,20 @@ func isApprovalHeader(line string) bool {
 func isSectionHeader(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	return strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")
+}
+
+func isAnyTableHeader(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")
+}
+
+func isSchedulerHeader(line string) bool {
+	return strings.EqualFold(strings.TrimSpace(line), "[scheduler]")
+}
+
+func isSchedulerScopedHeader(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.EqualFold(trimmed, "[scheduler]") || strings.EqualFold(trimmed, "[scheduler.timers]")
 }
 
 func sectionHasLegacyCommand(lines []string) bool {
@@ -541,4 +719,96 @@ func tomlArrayLiteral(values []string) string {
 		quoted = append(quoted, fmt.Sprintf("%q", value))
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+func renderSchedulerSection(scheduler SchedulerConfig) []string {
+	return []string{
+		"# 调度策略配置：",
+		"# - mode: 安装时请求的调度模式 auto|systemd|cron|none",
+		"# - systemd_user_dir: user systemd 单元写入目录",
+		"# - calendar_timezone: systemd timer 日程解释时区；默认 Asia/Shanghai",
+		"[scheduler]",
+		fmt.Sprintf("mode = %q", scheduler.Mode),
+		fmt.Sprintf("systemd_user_dir = %q", scheduler.SystemdUserDir),
+		fmt.Sprintf("calendar_timezone = %q", scheduler.CalendarTimezone),
+		"",
+		"# systemd timer 周期，采用 systemd OnCalendar 语法。",
+		"# - `*-*-* 23:50:00` 表示“每年-每月-每日 23:50:00”",
+		"# - 若要配置凌晨 01:01:42，可写为 `*-*-* 01:01:42`",
+		"# - 若表达式未显式附带时区，运行时会追加 scheduler.calendar_timezone",
+		"[scheduler.timers]",
+		fmt.Sprintf("ingest = %q", scheduler.Timers.Ingest),
+		fmt.Sprintf("run = %q", scheduler.Timers.Run),
+		fmt.Sprintf("patrol = %q", scheduler.Timers.Patrol),
+		fmt.Sprintf("journal = %q", scheduler.Timers.Journal),
+		"",
+	}
+}
+
+func renderAnnotatedConfig(cfg *Config) string {
+	var buf bytes.Buffer
+	buf.WriteString("# default_target:\n")
+	buf.WriteString("# - 留空时，运行时必须依赖 Issue body 中的 target_repo: owner/repo\n")
+	buf.WriteString("# - 仅在存在多个 [[targets]] 时建议显式指定默认值\n")
+	buf.WriteString(fmt.Sprintf("default_target = %q\n\n", cfg.DefaultTarget))
+
+	buf.WriteString("# GitHub 控制面配置。\n")
+	buf.WriteString("# control_repo 用于收 Issue、评论审批和权限判定，不等于实际干活的代码仓库。\n")
+	buf.WriteString("[github]\n")
+	buf.WriteString(fmt.Sprintf("control_repo = %q\n", cfg.GitHub.ControlRepo))
+	buf.WriteString(fmt.Sprintf("issue_label = %q\n", cfg.GitHub.IssueLabel))
+	buf.WriteString("# ingest 每轮通过 GitHub API 拉取 open issues 的上限。\n")
+	buf.WriteString("# - 只统计匹配 issue_label 的 Issue\n")
+	buf.WriteString("# - 不是并发数，也不是 run 阶段的执行上限\n")
+	buf.WriteString(fmt.Sprintf("limit = %d\n\n", cfg.GitHub.Limit))
+
+	buf.WriteString("# 固定路径边界：\n")
+	buf.WriteString("# - app_dir: 程序树\n")
+	buf.WriteString("# - home_repo: 本体记忆仓库\n")
+	buf.WriteString("# - kb_dir: 默认知识库目录\n")
+	buf.WriteString("# - env_file: 所有敏感信息唯一入口\n")
+	buf.WriteString("[paths]\n")
+	buf.WriteString(fmt.Sprintf("app_dir = %q\n", cfg.Paths.AppDir))
+	buf.WriteString(fmt.Sprintf("home_repo = %q\n", cfg.Paths.HomeRepo))
+	buf.WriteString(fmt.Sprintf("state_db = %q\n", cfg.Paths.StateDB))
+	buf.WriteString(fmt.Sprintf("log_dir = %q\n", cfg.Paths.LogDir))
+	buf.WriteString(fmt.Sprintf("kb_dir = %q\n", cfg.Paths.KBDir))
+	buf.WriteString(fmt.Sprintf("env_file = %q\n\n", cfg.Paths.EnvFile))
+
+	buf.WriteString("# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。\n")
+	buf.WriteString("[executor]\n")
+	buf.WriteString(fmt.Sprintf("provider = %q\n", cfg.Executor.Provider))
+	buf.WriteString(fmt.Sprintf("binary = %q\n", cfg.Executor.Binary))
+	buf.WriteString(fmt.Sprintf("command = %s\n", tomlArrayLiteral(cfg.Executor.Command)))
+	buf.WriteString(fmt.Sprintf("timeout = %q\n\n", cfg.Executor.Timeout))
+
+	buf.WriteString(strings.Join(renderSchedulerSection(cfg.Scheduler), "\n"))
+	buf.WriteString("\n")
+
+	buf.WriteString("# maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。\n")
+	buf.WriteString("[approval]\n")
+	buf.WriteString(fmt.Sprintf("minimum_permission = %q\n", cfg.Approval.MinimumPermission))
+	buf.WriteString(fmt.Sprintf("words = %s\n", tomlArrayLiteral(cfg.Approval.Words)))
+	buf.WriteString(fmt.Sprintf("reject_words = %s\n", tomlArrayLiteral(cfg.Approval.RejectWords)))
+
+	if len(cfg.Targets) == 0 {
+		buf.WriteString("\n# 任务仓库样例：\n")
+		buf.WriteString("# [[targets]]\n")
+		buf.WriteString("# repo = \"owner/repo\"\n")
+		buf.WriteString("# local_path = \"/opt/src/3claw/owner/repo\"\n")
+		buf.WriteString(fmt.Sprintf("# kb_path = %q\n", cfg.Paths.KBDir))
+		buf.WriteString("# disabled = false\n")
+		return buf.String()
+	}
+
+	for _, target := range cfg.Targets {
+		buf.WriteString("\n\n[[targets]]\n")
+		buf.WriteString(fmt.Sprintf("repo = %q\n", target.Repo))
+		buf.WriteString(fmt.Sprintf("local_path = %q\n", target.LocalPath))
+		buf.WriteString(fmt.Sprintf("kb_path = %q\n", target.KBPath))
+		if target.Disabled {
+			buf.WriteString("disabled = true\n")
+		}
+	}
+	return buf.String() + "\n"
 }

@@ -1,8 +1,8 @@
 [Unit]
-Description=Run ccclaw patrol every 2 minutes (user)
+Description=Run ccclaw patrol on schedule (user)
 
 [Timer]
-OnCalendar=*:0/2
+OnCalendar=*:0/2 Asia/Shanghai
 Persistent=true
 Unit=ccclaw-patrol.service
 

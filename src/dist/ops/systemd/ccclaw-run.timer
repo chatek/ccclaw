@@ -1,8 +1,8 @@
 [Unit]
-Description=Run ccclaw worker every 10 minutes (user)
+Description=Run ccclaw worker on schedule (user)
 
 [Timer]
-OnCalendar=*:0/10
+OnCalendar=*:0/10 Asia/Shanghai
 Persistent=true
 Unit=ccclaw-run.service
 

@@ -235,6 +235,17 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 			EnvFile:  "/tmp/app/.env",
 		},
 		Executor: ExecutorConfig{Command: []string{"claude"}, Timeout: "30m"},
+		Scheduler: SchedulerConfig{
+			Mode:             "none",
+			SystemdUserDir:   "/tmp/systemd-user",
+			CalendarTimezone: "Asia/Shanghai",
+			Timers: SchedulerTimersConfig{
+				Ingest:  "*:0/5",
+				Run:     "*:0/10",
+				Patrol:  "*:0/2",
+				Journal: "*-*-* 23:50:00",
+			},
+		},
 		Approval: ApprovalConfig{
 			Words:             []string{"approve", "go"},
 			RejectWords:       []string{"reject"},
@@ -254,5 +265,59 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 	}
 	if !cfg.Targets[0].Disabled {
 		t.Fatal("expected target to be disabled")
+	}
+}
+
+func TestUpdateSchedulerSectionPreservesOuterContent(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `default_target = ""
+
+[github]
+control_repo = "41490/ccclaw"
+# github 注释应保留
+
+[scheduler]
+mode = "none"
+systemd_user_dir = "~/.config/systemd/user"
+
+[approval]
+minimum_permission = "maintain"
+words = ["approve"]
+reject_words = ["reject"]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := UpdateSchedulerSection(configPath, SchedulerConfig{
+		Mode:             "systemd",
+		SystemdUserDir:   "/tmp/systemd-user",
+		CalendarTimezone: "Asia/Shanghai",
+		Timers: SchedulerTimersConfig{
+			Ingest:  "*:0/5",
+			Run:     "*:0/10",
+			Patrol:  "*:0/2",
+			Journal: "*-*-* 01:01:42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("update scheduler failed: %v", err)
+	}
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, want := range []string{
+		`# github 注释应保留`,
+		`mode = "systemd"`,
+		`systemd_user_dir = "/tmp/systemd-user"`,
+		`calendar_timezone = "Asia/Shanghai"`,
+		`journal = "*-*-* 01:01:42"`,
+		`# - 若要配置凌晨 01:01:42，可写为 ` + "`*-*-* 01:01:42`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
 	}
 }

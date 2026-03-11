@@ -139,11 +139,14 @@ minimum_permission = "maintain"
 		t.Fatal(err)
 	}
 	text := string(payload)
-	if !strings.Contains(text, "mode = 'cron'") {
+	if !strings.Contains(text, `mode = "cron"`) {
 		t.Fatalf("expected scheduler mode update: %q", text)
 	}
-	if !strings.Contains(text, "systemd_user_dir = '/tmp/systemd-new'") {
+	if !strings.Contains(text, `systemd_user_dir = "/tmp/systemd-new"`) {
 		t.Fatalf("expected systemd dir update: %q", text)
+	}
+	if !strings.Contains(text, `calendar_timezone = "Asia/Shanghai"`) {
+		t.Fatalf("expected scheduler timezone update: %q", text)
 	}
 }
 
@@ -180,6 +183,77 @@ func TestSchedulerStatusCommand(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "request=none effective=none") {
 		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
+func TestSchedulerTimersCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctlTimers(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "timers"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler timers 失败: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "配置时区: Asia/Shanghai") || !strings.Contains(text, "ccclaw-ingest.timer") {
+		t.Fatalf("unexpected output: %q", text)
+	}
+}
+
+func TestSchedulerLogsCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	journalLog := filepath.Join(dir, "journalctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeJournalctl(t, filepath.Join(fakeBin, "journalctl"), journalLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", journalLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "logs", "run", "--lines", "12"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler logs 失败: %v", err)
+	}
+	payload, err := os.ReadFile(journalLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "--user --no-pager -n 12 -u ccclaw-run.service") {
+		t.Fatalf("unexpected journalctl args: %q", string(payload))
 	}
 }
 
@@ -225,7 +299,7 @@ func TestSchedulerUseCronCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(payload), "mode = 'cron'") {
+	if !strings.Contains(string(payload), `mode = "cron"`) {
 		t.Fatalf("expected mode=cron: %q", string(payload))
 	}
 	cronPayload, err := os.ReadFile(crontabStore)
@@ -307,7 +381,7 @@ func TestSchedulerUseSystemdCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(payload), "mode = 'systemd'") {
+	if !strings.Contains(string(payload), `mode = "systemd"`) {
 		t.Fatalf("expected mode=systemd: %q", string(payload))
 	}
 	cronPayload, err := os.ReadFile(crontabStore)
@@ -468,6 +542,52 @@ log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
 printf '%s\n' "$*" >> "$log_file"
 printf 'disabled\n' >&2
 exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeSystemctlTimers(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+if [[ "${1:-}" == "--user" && "${2:-}" == "show" ]]; then
+  unit="${3:-}"
+  cat <<EOF
+Id=${unit}
+ActiveState=active
+UnitFileState=enabled
+NextElapseUSecRealtime=Wed 2026-03-11 06:15:00 EDT
+LastTriggerUSec=Wed 2026-03-11 06:10:15 EDT
+Result=success
+Triggers=${unit%.timer}.service
+EOF
+  exit 0
+fi
+printf 'unsupported systemctl args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeJournalctl(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_JOURNALCTL_LOG:?}"
+printf '%s\n' "$*" > "$log_file"
+printf 'ok\n'
 `
 	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
 		t.Fatal(err)

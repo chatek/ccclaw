@@ -52,12 +52,15 @@ bash install.sh --remove-cron
 
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
 2. 检查控制仓库 / 本体仓库 / 任务仓库 配置是否符合预期
-3. 若体检结果为 `systemd`，手工启用 `systemd --user` timer
-4. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
-5. 如需单独查看或切换调度后端：
+3. 若体检结果为 `systemd`，且当前会话可直连 user bus，安装/升级会自动启用或重启 timer
+4. 若体检结果为 `systemd`，但当前会话无法直连 user bus，请在登录会话中手工执行 `systemctl --user daemon-reload && systemctl --user enable --now ...`
+5. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
+6. 如需单独查看或切换调度后端：
 
 ```bash
 ~/.ccclaw/bin/ccclaw scheduler status
+~/.ccclaw/bin/ccclaw scheduler timers
+~/.ccclaw/bin/ccclaw scheduler logs -f
 ~/.ccclaw/bin/ccclaw scheduler use cron
 ~/.ccclaw/bin/ccclaw scheduler use systemd
 ~/.ccclaw/bin/ccclaw scheduler use none

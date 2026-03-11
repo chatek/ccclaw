@@ -1,8 +1,8 @@
 [Unit]
-Description=Run ccclaw ingest every 5 minutes (user)
+Description=Run ccclaw ingest on schedule (user)
 
 [Timer]
-OnCalendar=*:0/5
+OnCalendar=*:0/5 Asia/Shanghai
 Persistent=true
 Unit=ccclaw-ingest.service
 
