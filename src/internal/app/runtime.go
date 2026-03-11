@@ -820,15 +820,34 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	if err != nil {
 		return err
 	}
-	approval, err := rt.gh.FindApproval(issue.Number, rt.cfg.Approval.Command, rt.cfg.Approval.MinimumPermission)
+	approval, err := rt.gh.FindApproval(
+		issue.Number,
+		rt.cfg.Approval.Words,
+		rt.cfg.Approval.RejectWords,
+		rt.cfg.Approval.MinimumPermission,
+	)
 	if err != nil {
 		return err
 	}
-	approved := trusted || approval.Approved
+	approved := trusted
+	switch {
+	case approval.Rejected:
+		approved = false
+	case approval.Approved:
+		approved = true
+	}
 	targetRepo, routeReasons := rt.resolveTargetRepo(issue.Body)
 	blockReasons := make([]string, 0, 2)
-	if !approved {
-		blockReasons = append(blockReasons, fmt.Sprintf("发起者 `%s` 权限为 `%s`，等待管理员评论 `%s`", issue.User.Login, permission, rt.cfg.Approval.Command))
+	if approval.Rejected {
+		blockReasons = append(blockReasons, fmt.Sprintf("最近审批被 `%s` 使用 `%s` 否决", approval.Actor, approval.Command))
+	} else if !approved {
+		blockReasons = append(blockReasons, fmt.Sprintf(
+			"发起者 `%s` 权限为 `%s`，等待 `%s` 及以上成员评论 %s",
+			issue.User.Login,
+			permission,
+			rt.cfg.Approval.MinimumPermission,
+			approvalCommandHelp(rt.cfg.Approval.Words),
+		))
 	}
 	blockReasons = append(blockReasons, routeReasons...)
 	labels := github.LabelNames(issue.Labels)
@@ -852,7 +871,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	existing.RiskLevel = core.InferRisk(labels)
 	existing.Approved = approved
 	existing.TargetRepo = targetRepo
-	existing.ApprovalCommand = rt.cfg.Approval.Command
+	existing.ApprovalCommand = approval.Command
 	existing.ApprovalActor = approval.Actor
 	existing.ApprovalCommentID = approval.CommentID
 
@@ -1542,6 +1561,39 @@ func blockReasonText(reasons []string) string {
 		return "无"
 	}
 	return strings.Join(reasons, "；")
+}
+
+func approvalCommandHelp(words []string) string {
+	normalized := normalizeApprovalWords(words)
+	if len(normalized) == 0 {
+		return fmt.Sprintf("`%s approve`", github.ApprovalPrefix)
+	}
+	if len(normalized) == 1 {
+		return fmt.Sprintf("`%s %s`", github.ApprovalPrefix, normalized[0])
+	}
+	return fmt.Sprintf(
+		"`%s %s`（同义词: %s）",
+		github.ApprovalPrefix,
+		normalized[0],
+		strings.Join(normalized[1:], " / "),
+	)
+}
+
+func normalizeApprovalWords(words []string) []string {
+	normalized := make([]string, 0, len(words))
+	seen := make(map[string]struct{}, len(words))
+	for _, word := range words {
+		candidate := strings.ToLower(strings.TrimSpace(word))
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		normalized = append(normalized, candidate)
+	}
+	return normalized
 }
 
 func displayTargetRepo(repo string) string {

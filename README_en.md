@@ -45,7 +45,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 - **Linux-first**: no Docker, Kubernetes, or hosted control plane required for the default setup.
 - **Program tree and memory tree are separated**: upgrades do not overwrite user memory under `/opt/ccclaw`.
 - **Strict config boundaries**: secrets live in `.env`, normal config lives in `.toml`, and runtime does not depend on pre-exported shell variables.
-- **Open-source safe gate**: admin-created issues can execute automatically; non-admin issues require `/ccclaw approve`.
+- **Open-source safe gate**: issues from `maintain` or above can execute automatically; other issues require a trusted `/ccclaw <approval-word>` comment, and the latest trusted reject comment can revoke execution.
 - **Release-ready packaging**: releases are built from `src/dist/` and include at least the install package plus `SHA256SUMS`.
 
 ## Best Fit
@@ -124,8 +124,8 @@ Its main job is not to hold the working code. It acts as the control plane entry
 
 - Issues are the task source of truth
 - comments carry approvals, follow-ups, extra context, and execution feedback
-- admin permission checks are evaluated against this repository
-- `/ccclaw approve` and similar gate commands happen here
+- maintain/admin permission checks are evaluated against this repository
+- `/ccclaw approve`, `/ccclaw go`, `/ccclaw reject`, and similar gate commands happen here
 - execution results, blocked reasons, and audit traces flow back here
 
 You can think of the control repository as:
@@ -651,9 +651,9 @@ It contains:
 
 Open-source gate flow:
 
-1. admin-created Issues are eligible for automatic execution
+1. Issues created by members with `maintain` or above are eligible for automatic execution
 2. external Issues are inspected and discussed by default
-3. an admin comment `/ccclaw approve` moves the Issue into execution
+3. a trusted `/ccclaw <approval-word>` comment moves the Issue into execution, and a later trusted reject word can pull it back
 
 ## Upgrade and Release
 

@@ -56,8 +56,9 @@ command = ["~/.ccclaw/bin/ccclaude"]
 timeout = "30m"
 
 [approval]
-command = "/ccclaw approve"
-minimum_permission = "admin"
+words = ["approve", "go", "推进"]
+reject_words = ["reject", "no", "拒绝"]
+minimum_permission = "maintain"
 
 [[targets]]
 repo = "41490/ccclaw"
@@ -104,8 +105,9 @@ command = ["~/.ccclaw/bin/ccclaude"]
 timeout = "30m"
 
 [approval]
-command = "/ccclaw approve"
-minimum_permission = "admin"
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -116,6 +118,37 @@ minimum_permission = "admin"
 	}
 	if len(cfg.Targets) != 0 {
 		t.Fatalf("expected no targets, got %d", len(cfg.Targets))
+	}
+}
+
+func TestLoadConfigRejectsLegacyApprovalCommandField(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "~/.ccclaw"
+home_repo = "/opt/ccclaw"
+state_db = "~/.ccclaw/var/state.db"
+log_dir = "~/.ccclaw/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "~/.ccclaw/.env"
+
+[executor]
+provider = "claude-code"
+command = ["~/.ccclaw/bin/ccclaude"]
+timeout = "30m"
+
+[approval]
+command = "/ccclaw approve"
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected legacy approval.command to be rejected")
 	}
 }
 
@@ -132,7 +165,11 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 			EnvFile:  "/tmp/app/.env",
 		},
 		Executor: ExecutorConfig{Command: []string{"claude"}, Timeout: "30m"},
-		Approval: ApprovalConfig{Command: "/ccclaw approve", MinimumPermission: "admin"},
+		Approval: ApprovalConfig{
+			Words:             []string{"approve", "go"},
+			RejectWords:       []string{"reject"},
+			MinimumPermission: "maintain",
+		},
 		Targets: []TargetConfig{{
 			Repo:      "41490/ccclaw",
 			LocalPath: "/opt/src/ccclaw",

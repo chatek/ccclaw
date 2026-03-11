@@ -1103,10 +1103,11 @@ timeout = "30m"
 mode = "$SCHEDULER"
 systemd_user_dir = "$SYSTEMD_USER_DIR"
 
-# 仅管理员 Issue 自动执行；非管理员需要管理员评论 /ccclaw approve。
+# maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。
 [approval]
-command = "/ccclaw approve"
-minimum_permission = "admin"
+minimum_permission = "maintain"
+words = ["approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"]
+reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]
 
 # 任务仓库样例：
 # [[targets]]
@@ -1579,9 +1580,9 @@ $scheduler_step_7
 3. 检验工作成果，并继续在 Issue 中回复交流
 
 开源协作流程
-1. 管理员创建的 Issue 会自动进入执行判定
+1. maintain 及以上成员创建的 Issue 会自动进入执行判定
 2. 外部成员 Issue 默认只巡查与讨论，不自动执行
-3. 值得接受的提案，由管理员评论 /ccclaw approve 后进入执行
+3. 值得接受的提案，由受信任成员评论 /ccclaw <批准词> 后进入执行；最新评论也可用否决词撤回
 MSG
 }
 

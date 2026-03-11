@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/41490/ccclaw/internal/adapters/github"
 	"github.com/41490/ccclaw/internal/adapters/storage"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
@@ -57,6 +58,104 @@ func TestResolveTargetRepoBlocksWhenNoTargetConfigured(t *testing.T) {
 	}
 	if len(reasons) != 1 {
 		t.Fatalf("expected 1 reason, got %#v", reasons)
+	}
+}
+
+func TestSyncIssueRejectCommandOverridesTrustedAuthor(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/ccclaw/collaborators/author/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  "repos/41490/ccclaw/collaborators/reviewer/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  "repos/41490/ccclaw/issues/15/comments?per_page=100")
+    cat <<'JSON'
+[
+  {"id":301,"body":"/ccclaw reject","user":{"login":"reviewer"}}
+]
+JSON
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+
+	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Approval: config.ApprovalConfig{
+				Words:             []string{"approve", "go"},
+				RejectWords:       []string{"reject", "拒绝"},
+				MinimumPermission: "maintain",
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: "/opt/src/ccclaw",
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store: store,
+		gh:    github.NewClient("41490/ccclaw", map[string]string{}),
+	}
+
+	issue := github.Issue{
+		Number:    15,
+		Title:     "审批否决覆盖可信发起者",
+		Body:      "请先暂停\n\ntarget_repo: 41490/ccclaw\n",
+		User:      github.User{Login: "author"},
+		CreatedAt: time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC),
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("syncIssue failed: %v", err)
+	}
+
+	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Number))
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected task to be created")
+	}
+	if task.Approved {
+		t.Fatalf("expected task to remain blocked: %#v", task)
+	}
+	if task.State != core.StateBlocked {
+		t.Fatalf("unexpected task state: %#v", task)
+	}
+	if task.ApprovalActor != "reviewer" || task.ApprovalCommentID != 301 {
+		t.Fatalf("unexpected approval metadata: %#v", task)
+	}
+	if task.ApprovalCommand != "/ccclaw reject" {
+		t.Fatalf("unexpected approval command: %#v", task)
 	}
 }
 

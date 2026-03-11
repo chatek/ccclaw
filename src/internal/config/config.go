@@ -52,8 +52,9 @@ type SchedulerConfig struct {
 }
 
 type ApprovalConfig struct {
-	Command           string `mapstructure:"command" toml:"command"`
-	MinimumPermission string `mapstructure:"minimum_permission" toml:"minimum_permission"`
+	Words             []string `mapstructure:"words" toml:"words"`
+	RejectWords       []string `mapstructure:"reject_words" toml:"reject_words"`
+	MinimumPermission string   `mapstructure:"minimum_permission" toml:"minimum_permission"`
 }
 
 type TargetConfig struct {
@@ -79,8 +80,9 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.timeout", "30m")
 	v.SetDefault("scheduler.mode", "none")
 	v.SetDefault("scheduler.systemd_user_dir", "~/.config/systemd/user")
-	v.SetDefault("approval.command", "/ccclaw approve")
-	v.SetDefault("approval.minimum_permission", "admin")
+	v.SetDefault("approval.words", defaultApprovalWords())
+	v.SetDefault("approval.reject_words", defaultRejectWords())
+	v.SetDefault("approval.minimum_permission", "maintain")
 	v.SetDefault("default_target", "")
 
 	if err := v.ReadInConfig(); err != nil {
@@ -153,6 +155,14 @@ func (cfg *Config) Validate() error {
 	case "", "auto", "systemd", "cron", "none":
 	default:
 		return fmt.Errorf("scheduler.mode 取值无效: %s", cfg.Scheduler.Mode)
+	}
+	if len(normalizeApprovalWords(cfg.Approval.Words)) == 0 {
+		return errors.New("approval.words 至少需要一个批准词")
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Approval.MinimumPermission)) {
+	case "admin", "maintain", "write", "triage", "read", "none":
+	default:
+		return fmt.Errorf("approval.minimum_permission 取值无效: %s", cfg.Approval.MinimumPermission)
 	}
 	seenTargets := map[string]struct{}{}
 	for _, target := range cfg.Targets {
@@ -372,4 +382,29 @@ func ExpandPath(path string) string {
 		}
 	}
 	return path
+}
+
+func defaultApprovalWords() []string {
+	return []string{"approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"}
+}
+
+func defaultRejectWords() []string {
+	return []string{"reject", "no", "cancel", "nil", "null", "拒绝", "000"}
+}
+
+func normalizeApprovalWords(words []string) []string {
+	normalized := make([]string, 0, len(words))
+	seen := make(map[string]struct{}, len(words))
+	for _, word := range words {
+		candidate := strings.ToLower(strings.TrimSpace(word))
+		if candidate == "" {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		normalized = append(normalized, candidate)
+	}
+	return normalized
 }

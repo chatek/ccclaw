@@ -29,9 +29,11 @@
 
 ## 执行门禁
 
-- 仅管理员 Issue 自动执行
-- 非管理员 Issue 仅在管理员评论 `/ccclaw approve` 后执行
-- 管理员身份必须通过 GitHub 权限动态判断
+- `maintain` 及以上权限的 Issue 自动执行
+- 其他 Issue 仅在受信任成员评论 `/ccclaw <批准词>` 后执行
+- 批准词默认支持 `approve/go/confirm/批准/agree/同意/推进/通过/ok`
+- 否决词默认支持 `reject/no/cancel/nil/null/拒绝/000`
+- 成员身份必须通过 GitHub 权限动态判断
 
 ## 发布约束
 

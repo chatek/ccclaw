@@ -39,7 +39,7 @@ O     O     O     |  oo o   o   o
 - **Linux 原生**：优先使用 `systemd --user`，异常时允许降级为 `cron` 样板或 `none`，不强绑 Docker、K8s、外部 SaaS 控制面。
 - **记忆与程序分离**：程序树固定在 `~/.ccclaw`，本体记忆仓库固定在 `/opt/ccclaw`，升级不覆盖用户记忆。
 - **安装边界清晰**：敏感信息只进 `.env`，普通配置只进 `.toml`，运行时不依赖调用者预先 `export` 环境变量。
-- **开源协作可控**：管理员 Issue 自动执行；非管理员 Issue 必须管理员评论 `/ccclaw approve` 后才进入执行。
+- **开源协作可控**：`maintain` 及以上成员的 Issue 自动执行；其他 Issue 需要受信任成员评论 `/ccclaw <批准词>`，最新评论也可用否决词撤回。
 - **可发布可升级**：release 从 `src/dist/` 出包，产物至少包含安装包与 `SHA256SUMS`，并提供 `upgrade.sh` 升级程序树。
 
 ## 适用场景
@@ -119,8 +119,8 @@ systemd --user timers
 
 - Issue 是任务事实源
 - Comment 是审批、追问、补充上下文和回执的载体
-- admin 权限检查基于这个仓库的 GitHub 权限
-- `/ccclaw approve` 等门禁命令也发生在这里
+- maintain/admin 权限检查基于这个仓库的 GitHub 权限
+- `/ccclaw approve`、`/ccclaw go`、`/ccclaw reject` 等门禁命令也发生在这里
 - 执行结果、阻塞原因、审计痕迹最终都会回到这里
 
 可以把控制仓库理解为：
@@ -648,9 +648,9 @@ CLI 约定：
 
 开源协作门禁流程：
 
-1. 管理员创建的 Issue 自动进入执行判定
+1. `maintain` 及以上成员创建的 Issue 自动进入执行判定
 2. 外部成员 Issue 默认只巡查与讨论
-3. 管理员评论 `/ccclaw approve` 后，Issue 才进入执行
+3. 受信任成员评论 `/ccclaw <批准词>` 后，Issue 才进入执行；最新评论也可用 `/ccclaw <否决词>` 撤回
 
 ## 升级与发布
 

@@ -31,4 +31,4 @@
 - 文件命名遵循 `yymmdd_[Issue No.]_[Case Summary].md`
 - 升级程序时禁止覆盖用户本体仓库记忆内容
 - `ccclaw` 无参数与 `-h|--help` 显示帮助，`-V|--version` 显示版本
-- 非管理员 Issue 仅在管理员评论 `/ccclaw approve` 后放行
+- 非 `maintain` 成员 Issue 仅在受信任成员评论 `/ccclaw <批准词>` 后放行，且最新评论可显式否决

@@ -36,10 +36,11 @@ timeout = "30m"
 mode = "none"
 systemd_user_dir = "~/.config/systemd/user"
 
-# 仅管理员 Issue 自动执行；非管理员需要管理员评论 /ccclaw approve。
+# maintain 及以上权限的 Issue 自动执行；其他情况需要受信任成员评论 /ccclaw + 同义词。
 [approval]
-command = "/ccclaw approve"
-minimum_permission = "admin"
+minimum_permission = "maintain"
+words = ["approve", "go", "confirm", "批准", "agree", "同意", "推进", "通过", "ok"]
+reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]
 
 # 任务仓库样例：
 # [[targets]]

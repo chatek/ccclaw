@@ -1,13 +1,111 @@
 package github
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
-func TestHasApprovalCommand(t *testing.T) {
-	body := "请先评审\n/ccclaw approve\n谢谢"
-	if !HasApprovalCommand(body, "/ccclaw approve") {
+func TestMatchApprovalCommandSupportsAliasesAndCaseInsensitive(t *testing.T) {
+	body := "请先评审\n/CCCLAW OK 现在可以继续\n谢谢"
+	match, ok := MatchApprovalCommand(body, []string{"approve", "ok"}, []string{"reject"})
+	if !ok {
 		t.Fatal("expected approval command to be detected")
 	}
-	if HasApprovalCommand(body, "/ccclaw reject") {
-		t.Fatal("did not expect unrelated command")
+	if !match.Approved || match.Rejected {
+		t.Fatalf("unexpected match: %#v", match)
+	}
+	if match.Command != "/ccclaw ok" {
+		t.Fatalf("unexpected command: %#v", match)
+	}
+}
+
+func TestMatchApprovalCommandSupportsRejectWords(t *testing.T) {
+	body := "/ccclaw 拒绝\n原因稍后补"
+	match, ok := MatchApprovalCommand(body, []string{"approve"}, []string{"reject", "拒绝"})
+	if !ok {
+		t.Fatal("expected reject command to be detected")
+	}
+	if match.Approved || !match.Rejected {
+		t.Fatalf("unexpected match: %#v", match)
+	}
+	if match.Command != "/ccclaw 拒绝" {
+		t.Fatalf("unexpected command: %#v", match)
+	}
+}
+
+func TestFindApprovalPrefersLatestTrustedCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/ccclaw/issues/15/comments?per_page=100")
+    cat <<'JSON'
+[
+  {"id":101,"body":"/ccclaw approve","user":{"login":"outsider"}},
+  {"id":102,"body":"准备推进\n/ccclaw approve","user":{"login":"maintainer"}},
+  {"id":103,"body":"/CCCLAW reject","user":{"login":"maintainer"}}
+]
+JSON
+    ;;
+  "repos/41490/ccclaw/collaborators/outsider/permission")
+    printf '{"permission":"read"}\n'
+    ;;
+  "repos/41490/ccclaw/collaborators/maintainer/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+
+	client := NewClient("41490/ccclaw", map[string]string{})
+	approval, err := client.FindApproval(15, []string{"approve", "go"}, []string{"reject", "拒绝"}, "maintain")
+	if err != nil {
+		t.Fatalf("FindApproval failed: %v", err)
+	}
+	if approval == nil {
+		t.Fatal("expected approval result")
+	}
+	if approval.Approved || !approval.Rejected {
+		t.Fatalf("unexpected approval result: %#v", approval)
+	}
+	if approval.Actor != "maintainer" || approval.CommentID != 103 {
+		t.Fatalf("unexpected actor/comment: %#v", approval)
+	}
+	if approval.Command != "/ccclaw reject" {
+		t.Fatalf("unexpected command: %#v", approval)
+	}
+}
+
+func TestFindApprovalSkipsUnknownCommands(t *testing.T) {
+	match, ok := MatchApprovalCommand("/ccclaw maybe", []string{"approve"}, []string{"reject"})
+	if ok {
+		t.Fatalf("did not expect unknown command: %#v", match)
+	}
+}
+
+func TestIssueURL(t *testing.T) {
+	if got := IssueURL("41490/ccclaw", 15); !strings.Contains(got, "/issues/15") {
+		t.Fatalf("unexpected issue url: %s", got)
 	}
 }

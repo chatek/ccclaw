@@ -12,6 +12,7 @@ import (
 )
 
 const defaultTimeout = 20 * time.Second
+const ApprovalPrefix = "/ccclaw"
 
 type Label struct {
 	Name string `json:"name"`
@@ -43,8 +44,10 @@ type Comment struct {
 
 type Approval struct {
 	Approved  bool
+	Rejected  bool
 	Actor     string
 	CommentID int64
+	Command   string
 }
 
 type Client struct {
@@ -129,14 +132,15 @@ func (c *Client) IsTrustedActor(username, minimumPermission string) (bool, strin
 	return permissionRank(permission) >= permissionRank(minimumPermission), permission, nil
 }
 
-func (c *Client) FindApproval(number int, command, minimumPermission string) (*Approval, error) {
+func (c *Client) FindApproval(number int, words, rejectWords []string, minimumPermission string) (*Approval, error) {
 	comments, err := c.ListComments(number)
 	if err != nil {
 		return nil, err
 	}
 	for idx := len(comments) - 1; idx >= 0; idx-- {
 		comment := comments[idx]
-		if !HasApprovalCommand(comment.Body, command) {
+		match, ok := MatchApprovalCommand(comment.Body, words, rejectWords)
+		if !ok {
 			continue
 		}
 		trusted, _, err := c.IsTrustedActor(comment.User.Login, minimumPermission)
@@ -144,19 +148,57 @@ func (c *Client) FindApproval(number int, command, minimumPermission string) (*A
 			return nil, err
 		}
 		if trusted {
-			return &Approval{Approved: true, Actor: comment.User.Login, CommentID: comment.ID}, nil
+			return &Approval{
+				Approved:  match.Approved,
+				Rejected:  match.Rejected,
+				Actor:     comment.User.Login,
+				CommentID: comment.ID,
+				Command:   match.Command,
+			}, nil
 		}
 	}
 	return &Approval{}, nil
 }
 
-func HasApprovalCommand(body, command string) bool {
+type ApprovalCommandMatch struct {
+	Approved bool
+	Rejected bool
+	Command  string
+}
+
+func MatchApprovalCommand(body string, words, rejectWords []string) (ApprovalCommandMatch, bool) {
+	approveSet := approvalWordSet(words)
+	rejectSet := approvalWordSet(rejectWords)
 	for _, line := range strings.Split(body, "\n") {
-		if strings.TrimSpace(line) == strings.TrimSpace(command) {
-			return true
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		if !strings.EqualFold(fields[0], ApprovalPrefix) {
+			continue
+		}
+		word := strings.ToLower(strings.TrimSpace(fields[1]))
+		command := ApprovalPrefix + " " + word
+		if _, ok := rejectSet[word]; ok {
+			return ApprovalCommandMatch{Rejected: true, Command: command}, true
+		}
+		if _, ok := approveSet[word]; ok {
+			return ApprovalCommandMatch{Approved: true, Command: command}, true
 		}
 	}
-	return false
+	return ApprovalCommandMatch{}, false
+}
+
+func approvalWordSet(words []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(words))
+	for _, word := range words {
+		candidate := strings.ToLower(strings.TrimSpace(word))
+		if candidate == "" {
+			continue
+		}
+		set[candidate] = struct{}{}
+	}
+	return set
 }
 
 func (c *Client) permissionOf(username string) (string, error) {
