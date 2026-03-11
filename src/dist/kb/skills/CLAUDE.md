@@ -15,6 +15,12 @@
 - 根 `summary.md` 汇总高频技巧、升级提醒、常用入口与跨层链接
 - 同一技巧若被多处引用，应在上层 `summary.md` 建唯一索引，避免重复维护
 
+## Skill 载体
+
+- 单个 Skill 统一使用目录承载，入口文件命名为 `CLAUDE.md`
+- `CLAUDE.md` 头部使用 YAML frontmatter 记录 `name`、`description`、`keywords`
+- `summary.md` 只保留目录级人工汇总，不再承担单个 Skill 的结构化元数据职责
+
 ## 定期整理
 
 - 每次复用成功后，补充适用条件、前置依赖、失败信号与退出条件

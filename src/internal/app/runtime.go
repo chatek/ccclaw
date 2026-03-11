@@ -28,12 +28,14 @@ import (
 )
 
 type Runtime struct {
-	cfg     *config.Config
-	secrets *config.Secrets
-	store   *storage.Store
-	gh      *github.Client
-	rep     *reporter.Reporter
-	mem     *memory.Index
+	cfg      *config.Config
+	secrets  *config.Secrets
+	store    *storage.Store
+	gh       *github.Client
+	rep      *reporter.Reporter
+	mem      *memory.Index
+	memRoot  string
+	memCache map[string]*memory.Index
 }
 
 const (
@@ -86,7 +88,16 @@ func NewRuntime(configPath, envFile string) (*Runtime, error) {
 		return nil, fmt.Errorf("构建 kb 索引失败: %w", err)
 	}
 	ghClient := github.NewClient(cfg.GitHub.ControlRepo, secrets.Values)
-	return &Runtime{cfg: cfg, secrets: secrets, store: store, gh: ghClient, rep: reporter.New(ghClient), mem: mem}, nil
+	return &Runtime{
+		cfg:      cfg,
+		secrets:  secrets,
+		store:    store,
+		gh:       ghClient,
+		rep:      reporter.New(ghClient),
+		mem:      mem,
+		memRoot:  cfg.Paths.KBDir,
+		memCache: map[string]*memory.Index{cfg.Paths.KBDir: mem},
+	}, nil
 }
 
 func (rt *Runtime) Ingest(ctx context.Context) error {
@@ -891,13 +902,13 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 	keywords := make([]string, 0, len(task.Labels)+3)
 	keywords = append(keywords, string(task.Intent), string(task.RiskLevel), task.IssueTitle)
 	keywords = append(keywords, task.Labels...)
-	matches := rt.mem.Match(keywords, 6)
+	matches := rt.memoryIndex(target).Match(keywords, 6)
 	reportFile := filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), task.IssueNumber, task.IssueTitle)))
 
 	var sb strings.Builder
 	sb.WriteString("你是 ccclaw 执行器，请在目标仓库中完成以下 Issue 任务。\n\n")
 	sb.WriteString(fmt.Sprintf("## 控制仓库\n- %s\n\n", task.ControlRepo))
-	sb.WriteString(fmt.Sprintf("## 目标仓库\n- repo: %s\n- local_path: %s\n\n", target.Repo, target.LocalPath))
+	sb.WriteString(fmt.Sprintf("## 目标仓库\n- repo: %s\n- local_path: %s\n- kb_path: %s\n\n", target.Repo, target.LocalPath, target.KBPath))
 	sb.WriteString(fmt.Sprintf("## Issue #%d: %s\n\n%s\n\n", task.IssueNumber, task.IssueTitle, task.IssueBody))
 	sb.WriteString("## 元数据\n")
 	sb.WriteString(fmt.Sprintf("- 发起者: %s\n- 发起者权限: %s\n- 风险等级: %s\n- 意图: %s\n- 标签: %s\n", task.IssueAuthor, task.IssueAuthorPermission, task.RiskLevel, task.Intent, strings.Join(task.Labels, ", ")))
@@ -905,10 +916,14 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 		sb.WriteString(fmt.Sprintf("- 审批人: %s\n", task.ApprovalActor))
 	}
 	if len(matches) > 0 {
-		sb.WriteString("\n## 相关 kb 记忆\n")
+		sb.WriteString("\n## 相关 kb 摘要\n")
 		for _, doc := range matches {
-			sb.WriteString(fmt.Sprintf("\n### %s\n%s\n", doc.Path, doc.Content))
+			sb.WriteString(fmt.Sprintf("- 路径: %s\n  标题: %s\n  摘要: %s\n", doc.Path, doc.Title, doc.Summary))
+			if len(doc.Keywords) > 0 {
+				sb.WriteString(fmt.Sprintf("  关键词: %s\n", strings.Join(doc.Keywords, ", ")))
+			}
 		}
+		sb.WriteString("- 使用方式: 以上仅为索引摘要；仅在确有必要时再按路径打开原文细节\n")
 	}
 	sb.WriteString("\n## 交付要求\n")
 	sb.WriteString("- 优先修改根因，不要做表面补丁\n")
@@ -954,6 +969,40 @@ func (rt *Runtime) buildResumePrompt(task *core.Task, basePrompt string) string 
 	sb.WriteString("\n以下是原始任务提示词，继续执行时请保持同一交付边界：\n\n")
 	sb.WriteString(basePrompt)
 	return sb.String()
+}
+
+func (rt *Runtime) memoryIndex(target *config.TargetConfig) *memory.Index {
+	if rt == nil {
+		return &memory.Index{}
+	}
+	kbPath := rt.memRoot
+	if target != nil && strings.TrimSpace(target.KBPath) != "" {
+		kbPath = target.KBPath
+	}
+	if strings.TrimSpace(kbPath) == "" {
+		if rt.mem != nil {
+			return rt.mem
+		}
+		return &memory.Index{}
+	}
+	if rt.memCache == nil {
+		rt.memCache = map[string]*memory.Index{}
+	}
+	if idx, ok := rt.memCache[kbPath]; ok && idx != nil {
+		return idx
+	}
+	idx, err := memory.Build(kbPath)
+	if err != nil {
+		if rt.mem != nil {
+			return rt.mem
+		}
+		return &memory.Index{}
+	}
+	rt.memCache[kbPath] = idx
+	if kbPath == rt.memRoot && rt.mem == nil {
+		rt.mem = idx
+	}
+	return idx
 }
 
 func (rt *Runtime) newExecutor() (*executor.Executor, error) {

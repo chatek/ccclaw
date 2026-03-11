@@ -14,6 +14,7 @@ import (
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
+	"github.com/41490/ccclaw/internal/memory"
 )
 
 func TestParseTargetRepo(t *testing.T) {
@@ -915,5 +916,70 @@ func TestFinishTaskExecutionClearsResumeSessionAfterFailure(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected resume fallback warning, got %#v", events)
+	}
+}
+
+func TestBuildPromptUsesTargetKBPathAndSummaryOnly(t *testing.T) {
+	base := t.TempDir()
+	globalKB := filepath.Join(base, "kb-global")
+	targetKB := filepath.Join(base, "kb-target")
+	globalDoc := filepath.Join(globalKB, "skills", "summary.md")
+	targetDoc := filepath.Join(targetKB, "skills", "git-conflict-resolve", "CLAUDE.md")
+	for _, dir := range []string{filepath.Dir(globalDoc), filepath.Dir(targetDoc)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("创建测试目录失败: %v", err)
+		}
+	}
+	if err := os.WriteFile(globalDoc, []byte("# 全局\n\n这份全局知识不应进入 prompt。"), 0o644); err != nil {
+		t.Fatalf("写入全局 kb 失败: %v", err)
+	}
+	targetContent := `---
+name: git-conflict-resolve
+description: 处理 git 冲突的最小路径
+keywords: [git, conflict, resolve]
+---
+# 细节正文
+
+SECRET-LONG-BODY
+`
+	if err := os.WriteFile(targetDoc, []byte(targetContent), 0o644); err != nil {
+		t.Fatalf("写入 target kb 失败: %v", err)
+	}
+	globalIndex, err := memory.Build(globalKB)
+	if err != nil {
+		t.Fatalf("构建全局索引失败: %v", err)
+	}
+
+	rt := &Runtime{
+		mem:      globalIndex,
+		memRoot:  globalKB,
+		memCache: map[string]*memory.Index{globalKB: globalIndex},
+	}
+	task := &core.Task{
+		ControlRepo: "41490/ccclaw",
+		IssueNumber: 14,
+		IssueTitle:  "处理 git conflict",
+		IssueBody:   "请整理最小步骤",
+		IssueAuthor: "ZoomQuiet",
+		Labels:      []string{"ccclaw"},
+		Intent:      core.IntentFix,
+		RiskLevel:   core.RiskLow,
+	}
+	target := &config.TargetConfig{
+		Repo:      "41490/ccclaw",
+		LocalPath: "/opt/src/ccclaw",
+		KBPath:    targetKB,
+	}
+
+	prompt := rt.buildPrompt(task, target)
+	for _, want := range []string{"kb_path: " + targetKB, "git-conflict-resolve", "处理 git 冲突的最小路径"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected %q in prompt: %q", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{"SECRET-LONG-BODY", "这份全局知识不应进入 prompt"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("did not expect %q in prompt: %q", unwanted, prompt)
+		}
 	}
 }
