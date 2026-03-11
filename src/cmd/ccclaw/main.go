@@ -29,6 +29,7 @@ func newRootCmd() *cobra.Command {
 	var statsFrom string
 	var statsTo string
 	var statsDaily bool
+	var statsLimit int
 	var journalDate string
 
 	rootCmd := &cobra.Command{
@@ -95,7 +96,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			options, err := parseStatsOptions(statsFrom, statsTo, statsDaily, showRTKComparison)
+			options, err := parseStatsOptions(statsFrom, statsTo, statsDaily, showRTKComparison, statsLimit)
 			if err != nil {
 				return err
 			}
@@ -105,6 +106,7 @@ func newRootCmd() *cobra.Command {
 	statsCmd.Flags().StringVar(&statsFrom, "from", "", "按 YYYY-MM-DD 指定统计起始日期(含当日)")
 	statsCmd.Flags().StringVar(&statsTo, "to", "", "按 YYYY-MM-DD 指定统计截止日期(含当日)")
 	statsCmd.Flags().BoolVar(&statsDaily, "daily", false, "按天输出聚合统计")
+	statsCmd.Flags().IntVar(&statsLimit, "limit", 20, "限制任务明细与 daily 视图输出规模")
 	statsCmd.Flags().BoolVar(&showRTKComparison, "rtk-comparison", false, "显示 rtk 与非 rtk 的对比统计")
 	rootCmd.AddCommand(statsCmd)
 
@@ -283,10 +285,14 @@ func defaultConfigPath() string {
 	return filepath.Join("ops", "config", "config.toml")
 }
 
-func parseStatsOptions(from, to string, daily, showRTKComparison bool) (app.StatsOptions, error) {
+func parseStatsOptions(from, to string, daily, showRTKComparison bool, limit int) (app.StatsOptions, error) {
 	options := app.StatsOptions{
 		Daily:             daily,
 		ShowRTKComparison: showRTKComparison,
+		Limit:             limit,
+	}
+	if options.Limit <= 0 {
+		return options, fmt.Errorf("--limit 必须大于 0")
 	}
 	if from != "" {
 		parsed, err := time.ParseInLocation("2006-01-02", from, time.Local)

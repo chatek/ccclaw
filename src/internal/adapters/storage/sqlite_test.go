@@ -306,4 +306,15 @@ func TestStoreSupportsStatsDateRangeAndDailyAggregation(t *testing.T) {
 	if daily[1].Day.Format("2006-01-02") != "2026-03-09" || daily[1].Runs != 2 || daily[1].Sessions != 2 {
 		t.Fatalf("unexpected daily item: %#v", daily[1])
 	}
+
+	dailyRTK, err := store.DailyRTKComparisonBetween(time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("读取按天 rtk 对比失败: %v", err)
+	}
+	if len(dailyRTK) != 3 {
+		t.Fatalf("unexpected daily rtk count: %d", len(dailyRTK))
+	}
+	if dailyRTK[1].Day.Format("2006-01-02") != "2026-03-09" || dailyRTK[1].RTKRuns != 0 || dailyRTK[1].PlainRuns != 2 {
+		t.Fatalf("unexpected daily rtk item: %#v", dailyRTK[1])
+	}
 }

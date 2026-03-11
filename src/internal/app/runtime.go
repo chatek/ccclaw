@@ -52,7 +52,17 @@ type StatsOptions struct {
 	End               time.Time
 	Daily             bool
 	ShowRTKComparison bool
+	Limit             int
 }
+
+const (
+	defaultStatsLimit      = 20
+	journalManagedStartTag = "<!-- ccclaw:managed:start -->"
+	journalManagedEndTag   = "<!-- ccclaw:managed:end -->"
+	journalUserStartTag    = "<!-- ccclaw:user:start -->"
+	journalUserEndTag      = "<!-- ccclaw:user:end -->"
+	journalUserPlaceholder = "<!-- 本区块留给本机人工补充；自动更新时会保留这里的内容。 -->"
+)
 
 func NewRuntime(configPath, envFile string) (*Runtime, error) {
 	cfg, err := config.Load(configPath)
@@ -140,6 +150,9 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 		if result != nil && result.Pending {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
 			continue
+		}
+		if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
+			result = &executor.Result{ResumeSessionID: runOpts.ResumeSessionID}
 		}
 		if result != nil {
 			if result.SessionID != "" {
@@ -257,6 +270,10 @@ func (rt *Runtime) Stats(out io.Writer) error {
 
 func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 	defer rt.store.Close()
+	limit := options.Limit
+	if limit <= 0 {
+		limit = defaultStatsLimit
+	}
 	summary, err := rt.store.TokenStatsBetween(options.Start, options.End)
 	if err != nil {
 		return err
@@ -297,9 +314,14 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 		if err != nil {
 			return err
 		}
+		daily, dailyTruncated := limitDailyTokenStats(daily, limit)
 		if len(daily) > 0 {
 			_, _ = fmt.Fprintln(out)
-			_, _ = fmt.Fprintln(out, "按天聚合:")
+			if dailyTruncated {
+				_, _ = fmt.Fprintf(out, "按天聚合(最近 %d 天):\n", limit)
+			} else {
+				_, _ = fmt.Fprintln(out, "按天聚合:")
+			}
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "DAY\tRUNS\tSESSIONS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD")
 			for _, item := range daily {
@@ -319,41 +341,41 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 			}
 		}
 	}
-	stats, err := rt.store.TaskTokenStatsBetween(options.Start, options.End, 20)
+	stats, err := rt.store.TaskTokenStatsBetween(options.Start, options.End, limit)
 	if err != nil {
 		return err
 	}
-	if len(stats) == 0 {
-		return nil
-	}
-	_, _ = fmt.Fprintln(out)
-	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ISSUE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD\tSESSION\tTITLE")
-	for _, item := range stats {
-		title := item.IssueTitle
-		if len(title) > 40 {
-			title = title[:37] + "..."
+	if len(stats) > 0 {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "任务明细(最近 %d 项):\n", limit)
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "ISSUE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD\tSESSION\tTITLE")
+		for _, item := range stats {
+			title := item.IssueTitle
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+			sessionID := item.LastSessionID
+			if sessionID == "" {
+				sessionID = "-"
+			}
+			_, _ = fmt.Fprintf(
+				w,
+				"#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
+				item.IssueNumber,
+				item.Runs,
+				item.InputTokens,
+				item.OutputTokens,
+				item.CacheCreate,
+				item.CacheRead,
+				item.CostUSD,
+				sessionID,
+				title,
+			)
 		}
-		sessionID := item.LastSessionID
-		if sessionID == "" {
-			sessionID = "-"
+		if err := w.Flush(); err != nil {
+			return err
 		}
-		_, _ = fmt.Fprintf(
-			w,
-			"#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
-			item.IssueNumber,
-			item.Runs,
-			item.InputTokens,
-			item.OutputTokens,
-			item.CacheCreate,
-			item.CacheRead,
-			item.CostUSD,
-			sessionID,
-			title,
-		)
-	}
-	if err := w.Flush(); err != nil {
-		return err
 	}
 	if !options.ShowRTKComparison {
 		return nil
@@ -371,11 +393,57 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 	_, _ = fmt.Fprintf(out, "  RTK avg tokens: %.1f\n", comparison.RTKAvgTokens)
 	_, _ = fmt.Fprintf(out, "  Plain avg tokens: %.1f\n", comparison.PlainAvgTokens)
 	_, _ = fmt.Fprintf(out, "  Estimated savings: %.2f%%\n", comparison.SavingsPercent)
+	if options.Daily {
+		dailyComparison, err := rt.store.DailyRTKComparisonBetween(options.Start, options.End)
+		if err != nil {
+			return err
+		}
+		dailyComparison, dailyComparisonTruncated := limitDailyRTKComparisons(dailyComparison, limit)
+		if len(dailyComparison) > 0 {
+			_, _ = fmt.Fprintln(out)
+			if dailyComparisonTruncated {
+				_, _ = fmt.Fprintf(out, "按天 RTK 对比(最近 %d 天):\n", limit)
+			} else {
+				_, _ = fmt.Fprintln(out, "按天 RTK 对比:")
+			}
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "DAY\tRTK_RUNS\tPLAIN_RUNS\tRTK_AVG_COST\tPLAIN_AVG_COST\tRTK_AVG_TOKENS\tPLAIN_AVG_TOKENS\tSAVINGS")
+			for _, item := range dailyComparison {
+				_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%.4f\t%.4f\t%.1f\t%.1f\t%.2f%%\n",
+					item.Day.Format("2006-01-02"),
+					item.RTKRuns,
+					item.PlainRuns,
+					item.RTKAvgCostUSD,
+					item.PlainAvgCostUSD,
+					item.RTKAvgTokens,
+					item.PlainAvgTokens,
+					item.SavingsPercent,
+				)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
 func hasStatsRange(start, end time.Time) bool {
 	return !start.IsZero() || !end.IsZero()
+}
+
+func limitDailyTokenStats(items []storage.DailyTokenStat, limit int) ([]storage.DailyTokenStat, bool) {
+	if limit <= 0 || len(items) <= limit {
+		return items, false
+	}
+	return items[len(items)-limit:], true
+}
+
+func limitDailyRTKComparisons(items []storage.DailyRTKComparison, limit int) ([]storage.DailyRTKComparison, bool) {
+	if limit <= 0 || len(items) <= limit {
+		return items, false
+	}
+	return items[len(items)-limit:], true
 }
 
 func (rt *Runtime) Status(out io.Writer) error {
@@ -937,15 +1005,21 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 	if task == nil {
 		return nil
 	}
+	resumeSessionID := ""
 	if result != nil {
 		if result.SessionID != "" {
 			task.LastSessionID = result.SessionID
 		}
+		resumeSessionID = strings.TrimSpace(result.ResumeSessionID)
 		if err := rt.persistExecutionMetrics(task, result); err != nil {
 			return err
 		}
 	}
 	if runErr != nil {
+		if resumeSessionID != "" {
+			task.LastSessionID = ""
+			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("恢复 session %s 失败，后续重试将降级为新执行", resumeSessionID))
+		}
 		task.RetryCount++
 		task.ErrorMsg = runErr.Error()
 		task.State = core.StateFailed
@@ -1545,22 +1619,261 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("写入 journal 失败: %w", err)
 	}
+	if err := rt.refreshJournalSummaries(day); err != nil {
+		return err
+	}
 	_, _ = fmt.Fprintf(out, "journal 已生成: %s\n", path)
 	return nil
 }
 
 func (rt *Runtime) journalFilePath(day time.Time) string {
+	return filepath.Join(rt.journalMonthDir(day), fmt.Sprintf("%s.%s.ccclaw_log.md", day.Format("2006.01.02"), journalUserName()))
+}
+
+func (rt *Runtime) journalRootDir() string {
+	return filepath.Join(rt.cfg.Paths.HomeRepo, "kb", "journal")
+}
+
+func (rt *Runtime) journalYearDir(day time.Time) string {
+	return filepath.Join(rt.journalRootDir(), day.Format("2006"))
+}
+
+func (rt *Runtime) journalMonthDir(day time.Time) string {
 	year := day.Format("2006")
 	month := day.Format("01")
-	username := journalUserName()
-	return filepath.Join(
-		rt.cfg.Paths.HomeRepo,
-		"kb",
-		"journal",
-		year,
-		month,
-		fmt.Sprintf("%s.%s.ccclaw_log.md", day.Format("2006.01.02"), username),
+	return filepath.Join(rt.journalRootDir(), year, month)
+}
+
+func (rt *Runtime) refreshJournalSummaries(day time.Time) error {
+	if err := rt.writeJournalMonthSummary(day); err != nil {
+		return err
+	}
+	if err := rt.writeJournalYearSummary(day); err != nil {
+		return err
+	}
+	if err := rt.writeJournalRootSummary(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (rt *Runtime) writeJournalMonthSummary(day time.Time) error {
+	monthStart := time.Date(day.Year(), day.Month(), 1, 0, 0, 0, 0, day.Location())
+	monthEnd := monthStart.AddDate(0, 1, 0)
+	summary, err := rt.store.JournalSummaryBetween(monthStart, monthEnd)
+	if err != nil {
+		return err
+	}
+	comparison, err := rt.store.RTKComparisonBetween(monthStart, monthEnd)
+	if err != nil {
+		return err
+	}
+	files, err := collectJournalFiles(rt.journalMonthDir(day), ".ccclaw_log.md")
+	if err != nil {
+		return err
+	}
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("## 范围\n\n- 月份: %s\n- 日志文件数: %d\n", monthStart.Format("2006-01"), len(files)))
+	body.WriteString(renderJournalPeriodMetrics(summary, comparison))
+	body.WriteString("\n## 日志入口\n\n")
+	if len(files) == 0 {
+		body.WriteString("- 当月暂无日报\n")
+	} else {
+		for _, name := range files {
+			dayLabel := strings.TrimSuffix(name, ".ccclaw_log.md")
+			body.WriteString(fmt.Sprintf("- [%s](./%s)\n", dayLabel, name))
+		}
+	}
+	return writeManagedJournalFile(
+		filepath.Join(rt.journalMonthDir(day), "summary.md"),
+		fmt.Sprintf("# ccclaw journal 月汇总 %s", monthStart.Format("2006-01")),
+		body.String(),
 	)
+}
+
+func (rt *Runtime) writeJournalYearSummary(day time.Time) error {
+	yearStart := time.Date(day.Year(), 1, 1, 0, 0, 0, 0, day.Location())
+	yearEnd := yearStart.AddDate(1, 0, 0)
+	summary, err := rt.store.JournalSummaryBetween(yearStart, yearEnd)
+	if err != nil {
+		return err
+	}
+	comparison, err := rt.store.RTKComparisonBetween(yearStart, yearEnd)
+	if err != nil {
+		return err
+	}
+	monthDirs, err := collectJournalSubdirs(rt.journalYearDir(day))
+	if err != nil {
+		return err
+	}
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("## 范围\n\n- 年度: %s\n- 月目录数: %d\n", yearStart.Format("2006"), len(monthDirs)))
+	body.WriteString(renderJournalPeriodMetrics(summary, comparison))
+	body.WriteString("\n## 月度入口\n\n")
+	if len(monthDirs) == 0 {
+		body.WriteString("- 当年暂无月度归档\n")
+	} else {
+		for _, month := range monthDirs {
+			body.WriteString(fmt.Sprintf("- [%s](./%s/summary.md)\n", month, month))
+		}
+	}
+	return writeManagedJournalFile(
+		filepath.Join(rt.journalYearDir(day), "summary.md"),
+		fmt.Sprintf("# ccclaw journal 年汇总 %s", yearStart.Format("2006")),
+		body.String(),
+	)
+}
+
+func (rt *Runtime) writeJournalRootSummary() error {
+	summary, err := rt.store.JournalSummaryBetween(time.Time{}, time.Time{})
+	if err != nil {
+		return err
+	}
+	comparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
+	if err != nil {
+		return err
+	}
+	yearDirs, err := collectJournalSubdirs(rt.journalRootDir())
+	if err != nil {
+		return err
+	}
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("## 范围\n\n- 年度目录数: %d\n", len(yearDirs)))
+	body.WriteString(renderJournalPeriodMetrics(summary, comparison))
+	body.WriteString("\n## 年度入口\n\n")
+	if len(yearDirs) == 0 {
+		body.WriteString("- 当前暂无年度归档\n")
+	} else {
+		for _, year := range yearDirs {
+			body.WriteString(fmt.Sprintf("- [%s](./%s/summary.md)\n", year, year))
+		}
+	}
+	return writeManagedJournalFile(
+		filepath.Join(rt.journalRootDir(), "summary.md"),
+		"# ccclaw journal 总览",
+		body.String(),
+	)
+}
+
+func renderJournalPeriodMetrics(summary *storage.JournalDaySummary, comparison *storage.RTKComparison) string {
+	if summary == nil {
+		summary = &storage.JournalDaySummary{}
+	}
+	if comparison == nil {
+		comparison = &storage.RTKComparison{}
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## 聚合指标\n\n")
+	sb.WriteString(fmt.Sprintf("- 任务触达数: %d\n", summary.TasksTouched))
+	sb.WriteString(fmt.Sprintf("- 启动任务数: %d\n", summary.Started))
+	sb.WriteString(fmt.Sprintf("- 完成任务数: %d\n", summary.Done))
+	sb.WriteString(fmt.Sprintf("- 失败任务数: %d\n", summary.Failed))
+	sb.WriteString(fmt.Sprintf("- 僵死任务数: %d\n", summary.Dead))
+	sb.WriteString(fmt.Sprintf("- 输入 tokens: %d\n", summary.InputTokens))
+	sb.WriteString(fmt.Sprintf("- 输出 tokens: %d\n", summary.OutputTokens))
+	sb.WriteString(fmt.Sprintf("- 缓存创建 tokens: %d\n", summary.CacheCreate))
+	sb.WriteString(fmt.Sprintf("- 缓存命中 tokens: %d\n", summary.CacheRead))
+	sb.WriteString(fmt.Sprintf("- 累计成本(USD): %.4f\n", summary.CostUSD))
+	sb.WriteString(fmt.Sprintf("- RTK runs: %d\n", comparison.RTKRuns))
+	sb.WriteString(fmt.Sprintf("- Plain runs: %d\n", comparison.PlainRuns))
+	sb.WriteString(fmt.Sprintf("- RTK 平均成本(USD): %.4f\n", comparison.RTKAvgCostUSD))
+	sb.WriteString(fmt.Sprintf("- 非 RTK 平均成本(USD): %.4f\n", comparison.PlainAvgCostUSD))
+	sb.WriteString(fmt.Sprintf("- 估算节省比例: %.2f%%\n", comparison.SavingsPercent))
+	return sb.String()
+}
+
+func collectJournalFiles(dir, suffix string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 journal 目录失败: %w", err)
+	}
+	items := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "summary.md" || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		items = append(items, name)
+	}
+	return items, nil
+}
+
+func collectJournalSubdirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 journal 子目录失败: %w", err)
+	}
+	items := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			items = append(items, entry.Name())
+		}
+	}
+	return items, nil
+}
+
+func writeManagedJournalFile(path, title, managedBody string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建 journal summary 目录失败: %w", err)
+	}
+	userBody, err := readJournalUserBody(path)
+	if err != nil {
+		return err
+	}
+	content := buildManagedJournalFile(title, managedBody, userBody)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("写入 journal summary 失败: %w", err)
+	}
+	return nil
+}
+
+func readJournalUserBody(path string) (string, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return journalUserPlaceholder, nil
+		}
+		return "", fmt.Errorf("读取 journal summary 失败: %w", err)
+	}
+	text := string(payload)
+	start := strings.Index(text, journalUserStartTag)
+	end := strings.Index(text, journalUserEndTag)
+	if start < 0 || end < 0 || end < start {
+		return journalUserPlaceholder, nil
+	}
+	body := strings.TrimSpace(text[start+len(journalUserStartTag) : end])
+	if body == "" {
+		return journalUserPlaceholder, nil
+	}
+	return body, nil
+}
+
+func buildManagedJournalFile(title, managedBody, userBody string) string {
+	var sb strings.Builder
+	sb.WriteString(title)
+	sb.WriteString("\n\n")
+	sb.WriteString(journalManagedStartTag)
+	sb.WriteString("\n")
+	sb.WriteString(strings.TrimSpace(managedBody))
+	sb.WriteString("\n")
+	sb.WriteString(journalManagedEndTag)
+	sb.WriteString("\n\n")
+	sb.WriteString(journalUserStartTag)
+	sb.WriteString("\n")
+	sb.WriteString(strings.TrimSpace(userBody))
+	sb.WriteString("\n")
+	sb.WriteString(journalUserEndTag)
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func (rt *Runtime) renderJournal(day time.Time, summary *storage.JournalDaySummary, comparison *storage.RTKComparison, tasks []storage.JournalTaskSummary, events []storage.EventRecord) string {

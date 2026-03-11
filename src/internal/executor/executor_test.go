@@ -92,6 +92,27 @@ func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
 	}
 }
 
+func TestExecutorRunUsesWrapperRTKMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-wrapper.sh")
+	script := "#!/bin/sh\nset -eu\nif [ -n \"${CCCLAW_RTK_MARKER_FILE:-}\" ]; then\n  printf '1\\n' > \"$CCCLAW_RTK_MARKER_FILE\"\nfi\ncat <<'EOF'\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sess-rtk\",\"result\":\"任务完成\",\"total_cost_usd\":0.125,\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}\nEOF\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	result, err := execEngine.Run(context.Background(), tmpDir, "10#body", RunOptions{Prompt: "test prompt"})
+	if err != nil {
+		t.Fatalf("执行器运行失败: %v", err)
+	}
+	if !result.RTKEnabled {
+		t.Fatalf("expected explicit rtk marker, got %#v", result)
+	}
+}
+
 func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	manager := &fakeTMuxManager{}

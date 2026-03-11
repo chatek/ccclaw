@@ -38,12 +38,15 @@ func TestRootCmdHelpByDefault(t *testing.T) {
 }
 
 func TestParseStatsOptions(t *testing.T) {
-	options, err := parseStatsOptions("2026-03-09", "2026-03-10", true, true)
+	options, err := parseStatsOptions("2026-03-09", "2026-03-10", true, true, 7)
 	if err != nil {
 		t.Fatalf("解析 stats 选项失败: %v", err)
 	}
 	if !options.Daily || !options.ShowRTKComparison {
 		t.Fatalf("unexpected options flags: %#v", options)
+	}
+	if options.Limit != 7 {
+		t.Fatalf("unexpected limit: %#v", options)
 	}
 	if options.Start.Format("2006-01-02") != "2026-03-09" {
 		t.Fatalf("unexpected start: %#v", options.Start)
@@ -54,14 +57,14 @@ func TestParseStatsOptions(t *testing.T) {
 }
 
 func TestParseStatsOptionsRejectsInvalidRange(t *testing.T) {
-	_, err := parseStatsOptions("2026-03-10", "2026-03-09", false, false)
+	_, err := parseStatsOptions("2026-03-10", "2026-03-09", false, false, 20)
 	if err == nil {
 		t.Fatal("预期无效日期范围报错")
 	}
 }
 
 func TestParseStatsOptionsAcceptsOpenEndedRange(t *testing.T) {
-	options, err := parseStatsOptions("", "2026-03-10", false, false)
+	options, err := parseStatsOptions("", "2026-03-10", false, false, 20)
 	if err != nil {
 		t.Fatalf("解析开放区间失败: %v", err)
 	}
@@ -71,5 +74,12 @@ func TestParseStatsOptionsAcceptsOpenEndedRange(t *testing.T) {
 	want := time.Date(2026, 3, 11, 0, 0, 0, 0, time.Local)
 	if !options.End.Equal(want) {
 		t.Fatalf("unexpected end: got=%v want=%v", options.End, want)
+	}
+}
+
+func TestParseStatsOptionsRejectsNonPositiveLimit(t *testing.T) {
+	_, err := parseStatsOptions("", "", false, false, 0)
+	if err == nil {
+		t.Fatal("预期 limit 非法时报错")
 	}
 }

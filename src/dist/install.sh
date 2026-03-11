@@ -955,7 +955,13 @@ create_claude_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 if command -v rtk >/dev/null 2>&1; then
+  if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
+    printf '1\n' > "$CCCLAW_RTK_MARKER_FILE"
+  fi
   exec rtk proxy claude "$@"
+fi
+if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
+  printf '0\n' > "$CCCLAW_RTK_MARKER_FILE"
 fi
 exec claude "$@"
 WRAP

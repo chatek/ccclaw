@@ -75,6 +75,17 @@ type DailyTokenStat struct {
 	CostUSD      float64
 }
 
+type DailyRTKComparison struct {
+	Day             time.Time
+	RTKRuns         int
+	PlainRuns       int
+	RTKAvgCostUSD   float64
+	PlainAvgCostUSD float64
+	RTKAvgTokens    float64
+	PlainAvgTokens  float64
+	SavingsPercent  float64
+}
+
 type JournalDaySummary struct {
 	TasksTouched int
 	Started      int
@@ -326,7 +337,7 @@ func (s *Store) RTKComparisonBetween(start, end time.Time) (*RTKComparison, erro
 		item.PlainAvgCostUSD = plainTotalCost / float64(item.PlainRuns)
 		item.PlainAvgTokens = float64(plainTotalTokens) / float64(item.PlainRuns)
 	}
-	if item.PlainAvgCostUSD > 0 {
+	if item.RTKRuns > 0 && item.PlainRuns > 0 && item.PlainAvgCostUSD > 0 {
 		item.SavingsPercent = (item.PlainAvgCostUSD - item.RTKAvgCostUSD) / item.PlainAvgCostUSD * 100
 	}
 	return &item, nil
@@ -479,6 +490,98 @@ func (s *Store) DailyTokenStatsBetween(start, end time.Time) ([]DailyTokenStat, 
 	return daily, nil
 }
 
+func (s *Store) DailyRTKComparisonBetween(start, end time.Time) ([]DailyRTKComparison, error) {
+	where, args := buildTimeRangeClause("created_at", start, end)
+	rows, err := s.db.Query(`
+		SELECT rtk_enabled, input_tokens, output_tokens, cache_create, cache_read, cost_usd, created_at
+		FROM token_usage
+	`+where+`
+		ORDER BY created_at ASC, id ASC
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("读取每日 rtk 对比失败: %w", err)
+	}
+	defer rows.Close()
+
+	type bucket struct {
+		runs       int
+		totalCost  float64
+		totalToken int
+	}
+	type aggregate struct {
+		day   time.Time
+		rtk   bucket
+		plain bucket
+	}
+
+	loc := time.Local
+	if !start.IsZero() {
+		loc = start.Location()
+	}
+	orderedKeys := make([]string, 0)
+	items := make(map[string]*aggregate)
+	for rows.Next() {
+		var (
+			rtkEnabled   int
+			inputTokens  int
+			outputTokens int
+			cacheCreate  int
+			cacheRead    int
+			costUSD      float64
+			createdAt    string
+		)
+		if err := rows.Scan(&rtkEnabled, &inputTokens, &outputTokens, &cacheCreate, &cacheRead, &costUSD, &createdAt); err != nil {
+			return nil, fmt.Errorf("扫描每日 rtk 对比失败: %w", err)
+		}
+		parsed, err := parseSQLiteTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		day := parsed.In(loc)
+		day = time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
+		key := day.Format("2006-01-02")
+		entry, exists := items[key]
+		if !exists {
+			entry = &aggregate{day: day}
+			items[key] = entry
+			orderedKeys = append(orderedKeys, key)
+		}
+		target := &entry.plain
+		if rtkEnabled == 1 {
+			target = &entry.rtk
+		}
+		target.runs++
+		target.totalCost += costUSD
+		target.totalToken += inputTokens + outputTokens + cacheCreate + cacheRead
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历每日 rtk 对比失败: %w", err)
+	}
+
+	itemsByDay := make([]DailyRTKComparison, 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		entry := items[key]
+		item := DailyRTKComparison{
+			Day:       entry.day,
+			RTKRuns:   entry.rtk.runs,
+			PlainRuns: entry.plain.runs,
+		}
+		if entry.rtk.runs > 0 {
+			item.RTKAvgCostUSD = entry.rtk.totalCost / float64(entry.rtk.runs)
+			item.RTKAvgTokens = float64(entry.rtk.totalToken) / float64(entry.rtk.runs)
+		}
+		if entry.plain.runs > 0 {
+			item.PlainAvgCostUSD = entry.plain.totalCost / float64(entry.plain.runs)
+			item.PlainAvgTokens = float64(entry.plain.totalToken) / float64(entry.plain.runs)
+		}
+		if item.RTKRuns > 0 && item.PlainRuns > 0 && item.PlainAvgCostUSD > 0 {
+			item.SavingsPercent = (item.PlainAvgCostUSD - item.RTKAvgCostUSD) / item.PlainAvgCostUSD * 100
+		}
+		itemsByDay = append(itemsByDay, item)
+	}
+	return itemsByDay, nil
+}
+
 func (s *Store) ListTasks() ([]*core.Task, error) {
 	rows, err := s.db.Query(`
 		SELECT task_id, idempotency_key, control_repo, target_repo, last_session_id, issue_number, issue_title, issue_body,
@@ -564,6 +667,10 @@ func (s *Store) ListRunning() ([]*core.Task, error) {
 
 func (s *Store) JournalDaySummary(day time.Time) (*JournalDaySummary, error) {
 	start, end := dayBounds(day)
+	return s.JournalSummaryBetween(start, end)
+}
+
+func (s *Store) JournalSummaryBetween(start, end time.Time) (*JournalDaySummary, error) {
 	tokenSummary, err := s.TokenStatsBetween(start, end)
 	if err != nil {
 		return nil, err

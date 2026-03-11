@@ -399,6 +399,7 @@ func TestStatsWithDateRangeAndDailyRendersSections(t *testing.T) {
 		End:               time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC),
 		Daily:             true,
 		ShowRTKComparison: true,
+		Limit:             1,
 	}); err != nil {
 		t.Fatalf("执行 stats 范围/按天失败: %v", err)
 	}
@@ -408,18 +409,20 @@ func TestStatsWithDateRangeAndDailyRendersSections(t *testing.T) {
 		"起始日期: 2026-03-09",
 		"截止日期: 2026-03-10 (含当日)",
 		"执行次数: 3",
-		"按天聚合:",
-		"2026-03-09",
+		"按天聚合(最近 1 天):",
 		"2026-03-10",
-		"#21",
+		"任务明细(最近 1 项):",
 		"RTK 对比:",
+		"按天 RTK 对比(最近 1 天):",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
 	}
-	if strings.Contains(text, "2026-03-08") {
-		t.Fatalf("unexpected out-of-range day in %q", text)
+	for _, unexpected := range []string{"2026-03-08", "#20"} {
+		if strings.Contains(text, unexpected) {
+			t.Fatalf("unexpected limited output %q in %q", unexpected, text)
+		}
 	}
 }
 
@@ -830,5 +833,87 @@ func TestJournalWritesDailyFile(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
+	}
+
+	for path, wants := range map[string][]string{
+		filepath.Join(tmpDir, "kb", "journal", "2026", "03", "summary.md"): {
+			"# ccclaw journal 月汇总 2026-03",
+			"2026.03.10",
+		},
+		filepath.Join(tmpDir, "kb", "journal", "2026", "summary.md"): {
+			"# ccclaw journal 年汇总 2026",
+			"./03/summary.md",
+		},
+		filepath.Join(tmpDir, "kb", "journal", "summary.md"): {
+			"# ccclaw journal 总览",
+			"./2026/summary.md",
+		},
+	} {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("读取 summary 文件失败(%s): %v", path, err)
+		}
+		text := string(payload)
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Fatalf("expected %q in %q", want, text)
+			}
+		}
+	}
+}
+
+func TestFinishTaskExecutionClearsResumeSessionAfterFailure(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         "30#body",
+		IdempotencyKey: "30#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		LastSessionID:  "sess-30",
+		IssueNumber:    30,
+		IssueTitle:     "resume fallback",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateFailed,
+		RetryCount:     1,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	rt := &Runtime{store: store}
+	if err := rt.finishTaskExecution(task, &executor.Result{
+		ResumeSessionID: "sess-30",
+		PromptFile:      filepath.Join(t.TempDir(), "prompt.md"),
+	}, context.DeadlineExceeded); err != nil {
+		t.Fatalf("finishTaskExecution 失败: %v", err)
+	}
+
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded.LastSessionID != "" {
+		t.Fatalf("expected cleared session id, got %#v", loaded)
+	}
+	events, err := store.ListTaskEvents(10)
+	if err != nil {
+		t.Fatalf("读取事件失败: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.EventType == core.EventWarning && strings.Contains(event.Detail, "降级为新执行") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected resume fallback warning, got %#v", events)
 	}
 }
