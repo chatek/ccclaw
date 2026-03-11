@@ -297,6 +297,78 @@ test_remote_repo_path_must_stay_within_clone_root() {
   assert_contains "$log" "remote 模式下任务仓库本地路径必须位于固定 clone 入口 $clone_root"
 }
 
+test_shell_integration_inject_and_remove() {
+  local sandbox app_dir home_repo task_repo bashrc log1 log2 log3 block_count
+  sandbox="$(setup_sandbox shell-integration)"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  task_repo="$sandbox/task-local"
+  bashrc="$sandbox/home/.bashrc"
+  log1="$sandbox/install.log"
+  log2="$sandbox/reinstall.log"
+  log3="$sandbox/remove.log"
+
+  create_git_repo "$task_repo"
+  cat > "$bashrc" <<'RC'
+# user custom line
+export FOO=bar
+RC
+
+  run_case "$log1" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      BASHRC_FILE="$bashrc" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --inject-shell bashrc \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler none
+
+  assert_contains "$bashrc" '# user custom line'
+  assert_contains "$bashrc" '# >>> ccclaw managed block >>>'
+  assert_contains "$bashrc" 'export PATH="'"$sandbox"'/bin:$PATH"'
+
+  run_case "$log2" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      BASHRC_FILE="$bashrc" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --inject-shell bashrc \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode init \
+      --task-repo-mode local \
+      --task-repo-local "$task_repo" \
+      --task-repo "41490/task-local" \
+      --scheduler none
+
+  block_count="$(grep -c '^# >>> ccclaw managed block >>>$' "$bashrc")"
+  assert_eq "1" "$block_count" "重复安装后 shell 受控块数量异常"
+
+  run_case "$log3" \
+    env \
+      HOME="$sandbox/home" \
+      BASHRC_FILE="$bashrc" \
+      "$INSTALL_SCRIPT" \
+      --remove-shell bashrc
+
+  assert_contains "$bashrc" '# user custom line'
+  assert_not_contains "$bashrc" '# >>> ccclaw managed block >>>'
+  assert_not_contains "$bashrc" 'export PATH="'"$sandbox"'/bin:$PATH"'
+}
+
 main() {
   prepare_dist
   log "开始执行 install.sh 回归测试"
@@ -310,6 +382,8 @@ main() {
   log "已通过: local 无 origin 失败路径"
   test_remote_repo_path_must_stay_within_clone_root
   log "已通过: remote 路径越界失败路径"
+  test_shell_integration_inject_and_remove
+  log "已通过: shell 集成写入与回滚"
   log "全部 install.sh 回归测试通过"
 }
 

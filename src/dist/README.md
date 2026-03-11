@@ -32,3 +32,15 @@ bash install.sh
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
 2. 检查本体仓库与任务仓库绑定结果
 3. 若体检结果为 `systemd`，再手工启用 `systemd --user` timer；否则按摘要中的 `cron` 样板处理
+
+若需要让当前 shell 直接识别 `ccclaw`，可显式执行：
+
+```bash
+bash install.sh --inject-shell bashrc
+```
+
+如需回滚受控块：
+
+```bash
+bash install.sh --remove-shell bashrc
+```

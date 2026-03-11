@@ -601,6 +601,45 @@ func (s *Store) ListTaskEventsBetween(start, end time.Time, limit int) ([]EventR
 	return items, nil
 }
 
+func (s *Store) ListTaskEvents(limit int) ([]EventRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT task_id, event_type, detail, created_at
+		FROM task_events
+		ORDER BY created_at DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读取任务事件失败: %w", err)
+	}
+	defer rows.Close()
+
+	var items []EventRecord
+	for rows.Next() {
+		var (
+			item      EventRecord
+			eventType string
+			createdAt string
+		)
+		if err := rows.Scan(&item.TaskID, &eventType, &item.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("扫描任务事件失败: %w", err)
+		}
+		item.EventType = core.EventType(eventType)
+		parsed, err := parseSQLiteTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parsed
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历任务事件失败: %w", err)
+	}
+	return items, nil
+}
+
 func (s *Store) init() error {
 	ddl := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (

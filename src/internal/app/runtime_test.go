@@ -314,6 +314,220 @@ func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
 	}
 }
 
+func TestStatusRendersRuntimeSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	fixtureDir := filepath.Join(tmpDir, "fixture")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("创建 fixture 目录失败: %v", err)
+	}
+
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	tmuxBody := `#!/bin/bash
+set -euo pipefail
+fixture_dir="${TMUX_FIXTURE_DIR:?}"
+if [[ "${1:-}" == "list-panes" ]]; then
+  cat "$fixture_dir/list-panes.txt"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(tmuxScript, []byte(tmuxBody), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+	systemctlScript := filepath.Join(fakeBin, "systemctl")
+	systemctlBody := "#!/bin/bash\nprintf 'Failed to connect to bus: No medium found\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(systemctlScript, []byte(systemctlBody), 0o755); err != nil {
+		t.Fatalf("写入 fake systemctl 失败: %v", err)
+	}
+	crontabScript := filepath.Join(fakeBin, "crontab")
+	crontabBody := "#!/bin/bash\nprintf 'no crontab for tester\\n' >&2\nexit 1\n"
+	if err := os.WriteFile(crontabScript, []byte(crontabBody), 0o755); err != nil {
+		t.Fatalf("写入 fake crontab 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	tasks := []*core.Task{
+		{
+			TaskID:         "10#body",
+			IdempotencyKey: "10#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    10,
+			IssueTitle:     "status running",
+			IssueAuthor:    "zoomq",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateRunning,
+		},
+		{
+			TaskID:         "11#body",
+			IdempotencyKey: "11#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    11,
+			IssueTitle:     "status failed",
+			IssueAuthor:    "zoomq",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentFix,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateFailed,
+			ErrorMsg:       "tmux 会话超时",
+		},
+		{
+			TaskID:         "12#body",
+			IdempotencyKey: "12#body",
+			ControlRepo:    "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    12,
+			IssueTitle:     "status done",
+			IssueAuthor:    "zoomq",
+			Labels:         []string{"ccclaw"},
+			Intent:         core.IntentResearch,
+			RiskLevel:      core.RiskLow,
+			State:          core.StateDone,
+		},
+	}
+	for _, task := range tasks {
+		if err := store.UpsertTask(task); err != nil {
+			t.Fatalf("写入任务失败: %v", err)
+		}
+	}
+	if err := store.AppendEvent("11#body", core.EventDead, "tmux 会话超时"); err != nil {
+		t.Fatalf("写入异常事件失败: %v", err)
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     "10#body",
+		SessionID:  "sess-10",
+		PromptFile: "/tmp/10.md",
+		Usage:      core.TokenUsage{InputTokens: 30, OutputTokens: 10},
+		CostUSD:    0.10,
+		RTKEnabled: true,
+		RecordedAt: time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("写入 rtk 记录失败: %v", err)
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     "12#body",
+		SessionID:  "sess-12",
+		PromptFile: "/tmp/12.md",
+		Usage:      core.TokenUsage{InputTokens: 60, OutputTokens: 20},
+		CostUSD:    0.30,
+		RTKEnabled: false,
+		RecordedAt: time.Date(2026, 3, 10, 16, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("写入 plain 记录失败: %v", err)
+	}
+
+	sessionName := executor.SessionName("10#body")
+	listPanes := sessionName + "\t" + strconv.FormatInt(time.Now().Add(-25*time.Minute).Unix(), 10) + "\t0\t0\t123\n" +
+		"ccclaw-orphan\t" + strconv.FormatInt(time.Now().Add(-5*time.Minute).Unix(), 10) + "\t0\t0\t456\n"
+	if err := os.WriteFile(filepath.Join(fixtureDir, "list-panes.txt"), []byte(listPanes), 0o644); err != nil {
+		t.Fatalf("写入 list-panes fixture 失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  filepath.Join(tmpDir, "app"),
+				LogDir:  filepath.Join(tmpDir, "log"),
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+				EnvFile: filepath.Join(tmpDir, ".env"),
+			},
+			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Scheduler: config.SchedulerConfig{Mode: "none"},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Status(&out); err != nil {
+		t.Fatalf("执行 status 失败: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"当前快照",
+		"调度快照:",
+		"会话快照:",
+		"会话健康: 正常=0 接近超时=1 超时=0 已退出=0 丢失=0 孤儿=1",
+		"#10",
+		"warning",
+		"任务总数: 3",
+		"Token 快照:",
+		"RTK 对比样本: rtk=1 plain=1",
+		"RTK 估算节省:",
+		"详情请执行: ccclaw stats --rtk-comparison",
+		"最近异常:",
+		"tmux 会话超时",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+}
+
+func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  filepath.Join(tmpDir, "app"),
+				LogDir:  filepath.Join(tmpDir, "log"),
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+				EnvFile: filepath.Join(tmpDir, ".env"),
+			},
+			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Scheduler: config.SchedulerConfig{Mode: "none"},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Status(&out); err != nil {
+		t.Fatalf("执行 status 失败: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"当前快照",
+		"任务总数: 0",
+		"当前无任务",
+		"tmux 状态: 未检测到 tmux CLI，当前无法汇报会话健康",
+		"未检测到 token 使用记录",
+		"最近 7 天无失败/超时告警",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+}
+
 func TestPatrolFinalizesDeadTMuxSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")

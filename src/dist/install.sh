@@ -8,6 +8,8 @@ INSTALL_CLAUDE=0
 PREFLIGHT_ONLY=0
 REUSE_GH_AUTH=1
 REUSE_CLAUDE_AUTH=1
+SHELL_INTEGRATION="none"
+REMOVE_SHELL_INTEGRATION="none"
 
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
@@ -17,6 +19,9 @@ SYSTEMD_USER_DIR_DEFAULT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 TASK_CLONE_ROOT_DEFAULT="/opt/src/3claw"
 SCHEDULER_DEFAULT="auto"
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASHRC_FILE="${BASHRC_FILE:-$HOME/.bashrc}"
+SHELL_BLOCK_BEGIN="# >>> ccclaw managed block >>>"
+SHELL_BLOCK_END="# <<< ccclaw managed block <<<"
 
 APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
 HOME_REPO="${HOME_REPO:-$HOME_REPO_DEFAULT}"
@@ -56,6 +61,8 @@ ANTHROPIC_API_KEY_SOURCE="未写入"
 ANTHROPIC_BASE_URL_SOURCE="未写入"
 ANTHROPIC_AUTH_TOKEN_SOURCE="未写入"
 GREPTILE_API_KEY_SOURCE="未写入"
+SHELL_INTEGRATION_STATUS="disabled"
+SHELL_INTEGRATION_REASON="默认关闭，未写入 shell 配置"
 
 expand_path() {
   local path="$1"
@@ -74,6 +81,7 @@ refresh_paths() {
   APP_DIR="$(expand_path "$APP_DIR")"
   HOME_REPO="$(expand_path "$HOME_REPO")"
   BIN_LINK="$(expand_path "$BIN_LINK")"
+  BASHRC_FILE="$(expand_path "$BASHRC_FILE")"
   TASK_CLONE_ROOT="$(expand_path "$TASK_CLONE_ROOT")"
   TASK_REPO_LOCAL="$(expand_path "$TASK_REPO_LOCAL")"
   TASK_REPO_PATH="$(expand_path "$TASK_REPO_PATH")"
@@ -115,6 +123,8 @@ usage() {
   --task-repo-kb-path PATH  任务仓库对应 kb 路径，默认继承全局 kb_dir
   --reuse-gh-auth           优先复用 gh auth token 写入 GH_TOKEN
   --reuse-claude-auth       优先复用本机 Claude 登录态，允许 API Key 留空
+  --inject-shell TARGET     显式写入 shell 集成，目前仅支持 bashrc
+  --remove-shell TARGET     移除受控 shell 集成块，目前仅支持 bashrc
   -h, --help                显示帮助
 USAGE
 }
@@ -141,6 +151,8 @@ while (($#)); do
     --task-repo-kb-path) shift; TASK_KB_PATH="$1" ;;
     --reuse-gh-auth) REUSE_GH_AUTH=1 ;;
     --reuse-claude-auth) REUSE_CLAUDE_AUTH=1 ;;
+    --inject-shell) shift; SHELL_INTEGRATION="$1" ;;
+    --remove-shell) shift; REMOVE_SHELL_INTEGRATION="$1" ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -258,6 +270,101 @@ append_line_if_missing() {
     return 0
   fi
   printf '%s\n' "$line" >> "$file"
+}
+
+shell_target_file() {
+  case "$1" in
+    bashrc) printf '%s\n' "$BASHRC_FILE" ;;
+    none|"") printf '\n' ;;
+    *) fail "未知 shell 集成目标: $1" ;;
+  esac
+}
+
+shell_quote_double() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s\n' "$value"
+}
+
+remove_managed_shell_block() {
+  local file="$1" tmp
+  [[ -f "$file" ]] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ccclaw-shell.XXXXXX")"
+  awk -v begin="$SHELL_BLOCK_BEGIN" -v end="$SHELL_BLOCK_END" '
+    $0 == begin { skip=1; next }
+    $0 == end { skip=0; next }
+    skip == 0 { print }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+render_shell_block() {
+  local shell_dir shell_dir_escaped install_script_escaped
+  shell_dir="$(dirname "$BIN_LINK")"
+  shell_dir_escaped="$(shell_quote_double "$shell_dir")"
+  install_script_escaped="$(shell_quote_double "$APP_DIR/install.sh")"
+  cat <<BLOCK
+$SHELL_BLOCK_BEGIN
+# 由 ccclaw install.sh 管理；如需移除请执行: bash "$install_script_escaped" --remove-shell bashrc
+if [ -d "$shell_dir_escaped" ] && [[ ":\$PATH:" != *":$shell_dir_escaped:"* ]]; then
+  export PATH="$shell_dir_escaped:\$PATH"
+fi
+$SHELL_BLOCK_END
+BLOCK
+}
+
+plan_shell_integration() {
+  case "$SHELL_INTEGRATION" in
+    none|"")
+      SHELL_INTEGRATION_STATUS="disabled"
+      SHELL_INTEGRATION_REASON="默认关闭，未写入 shell 配置"
+      ;;
+    bashrc)
+      SHELL_INTEGRATION_STATUS="planned:bashrc"
+      SHELL_INTEGRATION_REASON="已请求向 $BASHRC_FILE 写入受控 PATH 块"
+      ;;
+  esac
+}
+
+apply_shell_integration() {
+  local target="$1" file
+  case "$target" in
+    none|"")
+      SHELL_INTEGRATION_STATUS="disabled"
+      SHELL_INTEGRATION_REASON="默认关闭，未写入 shell 配置"
+      return 0
+      ;;
+    bashrc)
+      file="$(shell_target_file "$target")"
+      if [[ "$SIMULATE" -eq 1 ]]; then
+        log "[simulate] inject shell block into $file"
+        SHELL_INTEGRATION_STATUS="planned:bashrc"
+        SHELL_INTEGRATION_REASON="模拟写入受控 PATH 块到 $file"
+        return 0
+      fi
+      mkdir -p "$(dirname "$file")"
+      touch "$file"
+      remove_managed_shell_block "$file"
+      if [[ -s "$file" ]]; then
+        printf '\n' >> "$file"
+      fi
+      render_shell_block >> "$file"
+      SHELL_INTEGRATION_STATUS="enabled:bashrc"
+      SHELL_INTEGRATION_REASON="已向 $file 写入受控 PATH 块"
+      ;;
+  esac
+}
+
+remove_shell_integration() {
+  local target="$1" file
+  file="$(shell_target_file "$target")"
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] remove shell block from $file"
+    return 0
+  fi
+  remove_managed_shell_block "$file"
+  log "已移除受控 shell 集成块: $file"
 }
 
 managed_file_has_markers() {
@@ -621,6 +728,7 @@ print_flow() {
    - $APP_DIR/install.sh
    - $APP_DIR/upgrade.sh
    - $APP_DIR/ops/*
+   - shell 集成默认关闭；仅在 --inject-shell bashrc 时写入受控 PATH 块
 8. 安装基础工具：
    - 必装: git gh rg sqlite3 tmux curl wget golang
    - 能力工具: node npm uv
@@ -704,6 +812,7 @@ collect_inputs() {
 }
 
 validate_inputs() {
+  validate_shell_options
   validate_mode "本体仓库模式" "$HOME_REPO_MODE" "init remote local"
   validate_mode "任务仓库模式" "$TASK_REPO_MODE" "none remote local"
   validate_mode "调度器模式" "$SCHEDULER" "auto systemd cron none"
@@ -733,6 +842,14 @@ validate_inputs() {
       fi
       ;;
   esac
+}
+
+validate_shell_options() {
+  validate_mode "shell 集成模式" "$SHELL_INTEGRATION" "none bashrc"
+  validate_mode "shell 回滚模式" "$REMOVE_SHELL_INTEGRATION" "none bashrc"
+  if [[ "$SHELL_INTEGRATION" != "none" && "$REMOVE_SHELL_INTEGRATION" != "none" ]]; then
+    fail "--inject-shell 与 --remove-shell 不能同时使用"
+  fi
 }
 
 ensure_system_packages() {
@@ -1417,6 +1534,8 @@ $result_title
 - Claude 凭据态: $CLAUDE_AUTH_METHOD
 - 普通配置: $CONFIG_FILE
 - 本地命令链接: $BIN_LINK
+- shell 集成: $SHELL_INTEGRATION_STATUS
+- shell 集成说明: $SHELL_INTEGRATION_REASON
 - 任务仓库绑定: $task_summary
 - 调度器: 请求=$SCHEDULER, 生效=$SCHEDULER_EFFECTIVE
 - 调度器说明: $SCHEDULER_REASON
@@ -1461,9 +1580,15 @@ MSG
 }
 
 main() {
+  validate_shell_options
+  if [[ "$REMOVE_SHELL_INTEGRATION" != "none" ]]; then
+    remove_shell_integration "$REMOVE_SHELL_INTEGRATION"
+    exit 0
+  fi
   probe_claude
   collect_inputs
   validate_inputs
+  plan_shell_integration
   if [[ "$TASK_REPO_MODE" == "local" && -z "$TASK_REPO_PATH" ]]; then
     TASK_REPO_PATH="$TASK_REPO_LOCAL"
   fi
@@ -1481,6 +1606,7 @@ main() {
   install_claude_official
   install_rtk
   create_app_layout
+  apply_shell_integration "$SHELL_INTEGRATION"
   init_or_attach_home_repo
   bind_task_repo
   configure_claude_assets

@@ -74,7 +74,7 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "status",
-		Short: "查看任务状态",
+		Short: "查看当前运行态快照",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rt, err := app.NewRuntime(configPath, envFile)
 			if err != nil {

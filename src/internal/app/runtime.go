@@ -332,35 +332,266 @@ func (rt *Runtime) Status(out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if len(tasks) == 0 {
-		_, _ = fmt.Fprintln(out, "暂无任务")
-		return nil
-	}
 	counts := map[core.State]int{}
 	for _, task := range tasks {
 		counts[task.State]++
 	}
-	_, _ = fmt.Fprintf(out, "任务总数: %d\n", len(tasks))
-	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
-		if counts[state] > 0 {
-			_, _ = fmt.Fprintf(out, "  %-8s %d\n", state, counts[state])
+	probe := rt.inspectScheduler()
+	diagnosis := diagnoseScheduler(probe, probe.Requested)
+	sessionSnapshot := rt.collectStatusSessions(tasks)
+	tokenSummary, err := rt.store.TokenStats()
+	if err != nil {
+		return err
+	}
+	rtkComparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
+	if err != nil {
+		return err
+	}
+	recentEvents, err := rt.store.ListTaskEvents(20)
+	if err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintln(out, "当前快照")
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "调度快照:")
+	_, _ = fmt.Fprintf(out, "  配置请求: %s\n", probe.Requested)
+	_, _ = fmt.Fprintf(out, "  当前生效: %s\n", diagnosis.Effective)
+	_, _ = fmt.Fprintf(out, "  当前说明: %s\n", diagnosis.Reason)
+	if diagnosis.Repair != "" {
+		_, _ = fmt.Fprintf(out, "  修复建议: %s\n", diagnosis.Repair)
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "会话快照:")
+	_, _ = fmt.Fprintf(out, "  运行中任务: %d\n", sessionSnapshot.RunningTasks)
+	if sessionSnapshot.Error != "" {
+		_, _ = fmt.Fprintf(out, "  tmux 状态: %s\n", sessionSnapshot.Error)
+	} else {
+		_, _ = fmt.Fprintf(out, "  tmux 会话: %d\n", sessionSnapshot.TotalSessions)
+		_, _ = fmt.Fprintf(out, "  会话健康: 正常=%d 接近超时=%d 超时=%d 已退出=%d 丢失=%d 孤儿=%d\n",
+			sessionSnapshot.HealthySessions,
+			sessionSnapshot.WarningSessions,
+			sessionSnapshot.TimeoutSessions,
+			sessionSnapshot.DeadSessions,
+			sessionSnapshot.MissingSessions,
+			sessionSnapshot.OrphanedSessions,
+		)
+		if len(sessionSnapshot.Items) > 0 {
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "ISSUE\tSESSION\tAGE\tHEALTH\tTITLE")
+			for _, item := range sessionSnapshot.Items {
+				_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%s\n", item.IssueNumber, item.SessionName, item.Age, item.Health, item.Title)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
 		}
 	}
 	_, _ = fmt.Fprintln(out)
-	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tTARGET\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
-	for _, task := range tasks {
-		title := task.IssueTitle
-		if len(title) > 46 {
-			title = title[:43] + "..."
-		}
-		targetRepo := task.TargetRepo
-		if targetRepo == "" {
-			targetRepo = "-"
-		}
-		_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
+
+	_, _ = fmt.Fprintln(out, "任务概览:")
+	_, _ = fmt.Fprintf(out, "  任务总数: %d\n", len(tasks))
+	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
+		_, _ = fmt.Fprintf(out, "  %-8s %d\n", state, counts[state])
 	}
-	return w.Flush()
+	if len(tasks) == 0 {
+		_, _ = fmt.Fprintln(out, "  当前无任务")
+	} else {
+		_, _ = fmt.Fprintln(out)
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tTARGET\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
+		for _, task := range tasks {
+			title := task.IssueTitle
+			if len(title) > 46 {
+				title = title[:43] + "..."
+			}
+			targetRepo := task.TargetRepo
+			if targetRepo == "" {
+				targetRepo = "-"
+			}
+			_, _ = fmt.Fprintf(w, "#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "Token 快照:")
+	if tokenSummary.Runs == 0 {
+		_, _ = fmt.Fprintln(out, "  未检测到 token 使用记录")
+	} else {
+		_, _ = fmt.Fprintf(out, "  累计执行: %d runs / %d sessions\n", tokenSummary.Runs, tokenSummary.Sessions)
+		_, _ = fmt.Fprintf(out, "  累计 tokens: input=%d output=%d cache_create=%d cache_read=%d\n", tokenSummary.InputTokens, tokenSummary.OutputTokens, tokenSummary.CacheCreate, tokenSummary.CacheRead)
+		_, _ = fmt.Fprintf(out, "  累计成本(USD): %.4f\n", tokenSummary.CostUSD)
+		if !tokenSummary.LastUsedAt.IsZero() {
+			_, _ = fmt.Fprintf(out, "  最近记录: %s\n", tokenSummary.LastUsedAt.Format(time.RFC3339))
+		}
+		if rtkComparison.RTKRuns > 0 || rtkComparison.PlainRuns > 0 {
+			_, _ = fmt.Fprintf(out, "  RTK 对比样本: rtk=%d plain=%d\n", rtkComparison.RTKRuns, rtkComparison.PlainRuns)
+			if rtkComparison.RTKRuns > 0 && rtkComparison.PlainRuns > 0 {
+				_, _ = fmt.Fprintf(out, "  RTK 估算节省: %.2f%%\n", rtkComparison.SavingsPercent)
+			}
+		}
+		_, _ = fmt.Fprintln(out, "  详情请执行: ccclaw stats --rtk-comparison")
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "最近异常:")
+	alerts := rt.filterStatusAlerts(recentEvents, tasks)
+	if len(alerts) == 0 {
+		_, _ = fmt.Fprintln(out, "  最近 7 天无失败/超时告警")
+		return nil
+	}
+	for _, alert := range alerts {
+		_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", alert.CreatedAt.Format(time.RFC3339), alert.IssueRef, alert.EventType, alert.Detail)
+	}
+	return nil
+}
+
+type statusSessionItem struct {
+	IssueNumber int
+	SessionName string
+	Age         string
+	Health      string
+	Title       string
+}
+
+type statusSessionSnapshot struct {
+	RunningTasks     int
+	TotalSessions    int
+	HealthySessions  int
+	WarningSessions  int
+	TimeoutSessions  int
+	DeadSessions     int
+	MissingSessions  int
+	OrphanedSessions int
+	Error            string
+	Items            []statusSessionItem
+}
+
+type statusAlert struct {
+	IssueRef  string
+	EventType core.EventType
+	Detail    string
+	CreatedAt time.Time
+}
+
+func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapshot {
+	snapshot := statusSessionSnapshot{}
+	runningTasks := make([]*core.Task, 0)
+	for _, task := range tasks {
+		if task.State == core.StateRunning {
+			runningTasks = append(runningTasks, task)
+		}
+	}
+	snapshot.RunningTasks = len(runningTasks)
+	if !tmux.Available("tmux") {
+		snapshot.Error = "未检测到 tmux CLI，当前无法汇报会话健康"
+		return snapshot
+	}
+	manager, err := tmux.New("tmux")
+	if err != nil {
+		snapshot.Error = fmt.Sprintf("初始化 tmux 失败: %v", err)
+		return snapshot
+	}
+	sessions, err := manager.List("ccclaw-")
+	if err != nil {
+		snapshot.Error = fmt.Sprintf("读取 tmux 会话失败: %v", err)
+		return snapshot
+	}
+	snapshot.TotalSessions = len(sessions)
+	timeout, _ := time.ParseDuration(rt.cfg.Executor.Timeout)
+	now := time.Now()
+	sessionMap := make(map[string]tmux.SessionStatus, len(sessions))
+	for _, session := range sessions {
+		sessionMap[session.Name] = session
+	}
+	taskSessions := make(map[string]struct{}, len(runningTasks))
+	for _, task := range runningTasks {
+		sessionName := executor.SessionName(task.TaskID)
+		taskSessions[sessionName] = struct{}{}
+		item := statusSessionItem{
+			IssueNumber: task.IssueNumber,
+			SessionName: sessionName,
+			Age:         "-",
+			Health:      "missing",
+			Title:       trimStatusText(task.IssueTitle, 40),
+		}
+		status, exists := sessionMap[sessionName]
+		switch {
+		case !exists:
+			snapshot.MissingSessions++
+		case status.PaneDead:
+			snapshot.DeadSessions++
+			item.Age = now.Sub(status.CreatedAt).Round(time.Second).String()
+			item.Health = fmt.Sprintf("dead(exit=%d)", status.ExitCode)
+		default:
+			age := now.Sub(status.CreatedAt)
+			item.Age = age.Round(time.Second).String()
+			item.Health = "ok"
+			if timeout > 0 && age >= timeout {
+				snapshot.TimeoutSessions++
+				item.Health = "timeout"
+			} else if timeout > 0 && age >= timeout*8/10 {
+				snapshot.WarningSessions++
+				item.Health = "warning"
+			} else {
+				snapshot.HealthySessions++
+			}
+		}
+		snapshot.Items = append(snapshot.Items, item)
+	}
+	for _, session := range sessions {
+		if _, exists := taskSessions[session.Name]; !exists {
+			snapshot.OrphanedSessions++
+		}
+	}
+	return snapshot
+}
+
+func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*core.Task) []statusAlert {
+	taskRefs := make(map[string]string, len(tasks))
+	for _, task := range tasks {
+		taskRefs[task.TaskID] = fmt.Sprintf("#%d", task.IssueNumber)
+	}
+	cutoff := time.Now().Add(-7 * 24 * time.Hour)
+	alerts := make([]statusAlert, 0, 5)
+	for _, item := range events {
+		if item.CreatedAt.Before(cutoff) {
+			continue
+		}
+		if item.EventType != core.EventFailed && item.EventType != core.EventDead && item.EventType != core.EventWarning {
+			continue
+		}
+		issueRef := taskRefs[item.TaskID]
+		if issueRef == "" {
+			issueRef = item.TaskID
+		}
+		alerts = append(alerts, statusAlert{
+			IssueRef:  issueRef,
+			EventType: item.EventType,
+			Detail:    trimStatusText(strings.ReplaceAll(item.Detail, "\n", " "), 88),
+			CreatedAt: item.CreatedAt,
+		})
+		if len(alerts) == 5 {
+			break
+		}
+	}
+	return alerts
+}
+
+func trimStatusText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+	return value[:limit-3] + "..."
 }
 
 func (rt *Runtime) ShowConfig(out io.Writer) error {
