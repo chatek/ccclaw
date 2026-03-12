@@ -21,6 +21,20 @@
 - 当底层 L1 更新时，检查对应 L2 是否要同步修订
 - 长期稳定的 L2 可以再沉淀到 `designs/` 或根 `summary.md` 作为标准作业路径
 - 过时流程保留最小历史记录，并标注失效时间与替代方案
+
+## sevolver 自动维护字段
+
+目录内工作流 Skill 若声明 YAML frontmatter，应允许 `ccclaw-sevolver` 自动维护以下字段并在升级时保留：
+
+```yaml
+last_used: YYYY-MM-DD
+use_count: 0
+status: active
+gap_signals: []
+```
+
+- `status: dormant` 表示超过 14 天未命中
+- `status: deprecated` 表示已移入 `kb/skills/deprecated/`，不再参与默认加载
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

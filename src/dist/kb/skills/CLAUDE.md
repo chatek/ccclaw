@@ -26,6 +26,20 @@
 - 每次复用成功后，补充适用条件、前置依赖、失败信号与退出条件
 - 当多个 L1 技巧稳定组合后，抽升到 L2，并在 L1 中回链
 - 废弃技巧要显式标注失效原因与替代方案
+
+## sevolver 自动维护字段
+
+以下字段由 `ccclaw-sevolver` 自动维护，升级时需要保留原值，不得手工回填默认值：
+
+```yaml
+last_used: YYYY-MM-DD
+use_count: 0
+status: active
+gap_signals: []
+```
+
+- `status: dormant` 表示超过 14 天未命中
+- `status: deprecated` 表示已移入 `kb/skills/deprecated/`，默认不再加载
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

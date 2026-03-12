@@ -555,6 +555,153 @@ render_template_with_user_block() {
   ' "$template" > "$output"
 }
 
+has_yaml_frontmatter() {
+  local file="$1" first_line
+  [[ -f "$file" ]] || return 1
+  first_line="$(head -n 1 "$file" 2>/dev/null || true)"
+  [[ "$first_line" == "---" ]]
+}
+
+is_skill_markdown_path() {
+  local path="$1"
+  [[ "$path" == */kb/skills/* && "$path" == *.md ]]
+}
+
+extract_frontmatter_field() {
+  local file="$1" field="$2"
+  awk -v field="$field" '
+    BEGIN {
+      frontmatter=0
+      capture=0
+      field_pattern="^" field ":[[:space:]]*"
+      top_key_pattern="^[A-Za-z0-9_-]+:[[:space:]]*"
+    }
+    {
+      if ($0 == "---") {
+        if (frontmatter == 0) {
+          frontmatter=1
+          next
+        }
+        if (frontmatter == 1) {
+          exit
+        }
+      }
+      if (frontmatter != 1) {
+        next
+      }
+      if (capture) {
+        if ($0 ~ top_key_pattern) {
+          exit
+        }
+        print
+        next
+      }
+      if ($0 ~ field_pattern) {
+        print
+        capture=1
+      }
+    }
+  ' "$file"
+}
+
+remove_frontmatter_field() {
+  local file="$1" field="$2" tmp_file
+  tmp_file="$(mktemp)"
+  awk -v field="$field" '
+    BEGIN {
+      frontmatter=0
+      skip=0
+      field_pattern="^" field ":[[:space:]]*"
+      top_key_pattern="^[A-Za-z0-9_-]+:[[:space:]]*"
+    }
+    {
+      if ($0 == "---") {
+        if (frontmatter == 0) {
+          frontmatter=1
+          print
+          next
+        }
+        if (frontmatter == 1) {
+          frontmatter=2
+          print
+          next
+        }
+      }
+      if (frontmatter != 1) {
+        print
+        next
+      }
+      if (skip) {
+        if ($0 ~ top_key_pattern) {
+          skip=0
+        } else {
+          next
+        }
+      }
+      if ($0 ~ field_pattern) {
+        skip=1
+        next
+      }
+      print
+    }
+  ' "$file" > "$tmp_file"
+  cat "$tmp_file" > "$file"
+  rm -f "$tmp_file"
+}
+
+append_frontmatter_blocks() {
+  local file="$1" blocks_file="$2" tmp_file
+  tmp_file="$(mktemp)"
+  awk -v blocks_file="$blocks_file" '
+    BEGIN { frontmatter=0; inserted=0 }
+    /^---$/ {
+      if (frontmatter == 0) {
+        frontmatter=1
+        print
+        next
+      }
+      if (frontmatter == 1) {
+        if (!inserted) {
+          while ((getline line < blocks_file) > 0) {
+            print line
+          }
+          close(blocks_file)
+          inserted=1
+        }
+        frontmatter=2
+        print
+        next
+      }
+    }
+    { print }
+  ' "$file" > "$tmp_file"
+  cat "$tmp_file" > "$file"
+  rm -f "$tmp_file"
+}
+
+preserve_skill_meta_fields() {
+  local old_file="$1" new_file="$2" path_hint="${3:-$new_file}" field blocks_file field_block
+  is_skill_markdown_path "$path_hint" || return 0
+  has_yaml_frontmatter "$old_file" || return 0
+  has_yaml_frontmatter "$new_file" || return 0
+
+  blocks_file="$(mktemp)"
+  for field in last_used use_count status gap_signals; do
+    field_block="$(mktemp)"
+    extract_frontmatter_field "$old_file" "$field" > "$field_block"
+    if [[ -s "$field_block" ]]; then
+      remove_frontmatter_field "$new_file" "$field"
+      cat "$field_block" >> "$blocks_file"
+    fi
+    rm -f "$field_block"
+  done
+
+  if [[ -s "$blocks_file" ]]; then
+    append_frontmatter_blocks "$new_file" "$blocks_file"
+  fi
+  rm -f "$blocks_file"
+}
+
 merge_managed_markdown() {
   local template="$1" target="$2" tmp_file user_block_file
   if [[ "$SIMULATE" -eq 1 ]]; then
@@ -579,6 +726,7 @@ merge_managed_markdown() {
   fi
 
   render_template_with_user_block "$template" "$user_block_file" "$tmp_file"
+  preserve_skill_meta_fields "$target" "$tmp_file" "$target"
   if ! cmp -s "$tmp_file" "$target"; then
     cat "$tmp_file" > "$target"
   fi
@@ -1997,5 +2145,9 @@ main() {
   bind_task_repo
   print_summary
 }
+
+if [[ "${CCCLAW_INSTALL_LIB_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 main "$@"

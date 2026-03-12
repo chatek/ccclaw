@@ -541,6 +541,78 @@ test_systemd_install_auto_enable_and_restart() {
   assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
 }
 
+test_merge_managed_markdown_preserves_skill_meta_fields() {
+  local sandbox template target
+  sandbox="$(setup_sandbox skill-meta-preserve)"
+  template="$sandbox/dist/kb/skills/L1/demo/CLAUDE.md"
+  target="$sandbox/home-repo/kb/skills/L1/demo/CLAUDE.md"
+
+  mkdir -p "$(dirname "$template")" "$(dirname "$target")"
+  cat > "$template" <<'EOF'
+---
+name: demo-skill
+description: 新版说明
+keywords:
+  - demo
+status: active
+gap_signals: []
+---
+
+<!-- ccclaw:managed:start -->
+新版受管区
+<!-- ccclaw:managed:end -->
+
+<!-- ccclaw:user:start -->
+<!-- 默认用户区 -->
+<!-- ccclaw:user:end -->
+EOF
+
+  cat > "$target" <<'EOF'
+---
+name: demo-skill
+description: 旧版说明
+keywords:
+  - demo
+last_used: 2026-03-10
+use_count: 7
+status: dormant
+gap_signals:
+  - gap-2026-03-10
+---
+
+<!-- ccclaw:managed:start -->
+旧版受管区
+<!-- ccclaw:managed:end -->
+
+<!-- ccclaw:user:start -->
+本机补充
+<!-- ccclaw:user:end -->
+EOF
+
+  env \
+    CCCLAW_INSTALL_LIB_ONLY=1 \
+    bash -c 'set -euo pipefail; install_script="$1"; template_file="$2"; target_file="$3"; set --; source "$install_script"; merge_managed_markdown "$template_file" "$target_file"' \
+      _ \
+      "$INSTALL_SCRIPT" \
+      "$template" \
+      "$target"
+
+  assert_contains "$target" 'description: 新版说明'
+  assert_contains "$target" '新版受管区'
+  assert_contains "$target" '本机补充'
+  assert_contains "$target" 'last_used: 2026-03-10'
+  assert_contains "$target" 'use_count: 7'
+  assert_contains "$target" 'status: dormant'
+  assert_contains "$target" 'gap_signals:'
+  assert_contains "$target" '  - gap-2026-03-10'
+  assert_not_contains "$target" 'status: active'
+  assert_not_contains "$target" 'gap_signals: []'
+  assert_eq "1" "$(grep -c '^last_used:' "$target")" "last_used 不应重复"
+  assert_eq "1" "$(grep -c '^use_count:' "$target")" "use_count 不应重复"
+  assert_eq "1" "$(grep -c '^status:' "$target")" "status 不应重复"
+  assert_eq "1" "$(grep -c '^gap_signals:' "$target")" "gap_signals 不应重复"
+}
+
 test_interactive_mode_accepts_short_words() {
   local sandbox task_repo log input
   sandbox="$(setup_sandbox interactive-short)"
@@ -979,6 +1051,8 @@ main() {
   log "已通过: systemd 无 user bus 仍允许部署"
   test_systemd_install_auto_enable_and_restart
   log "已通过: systemd 安装自动启用与重装重启"
+  test_merge_managed_markdown_preserves_skill_meta_fields
+  log "已通过: Skill frontmatter sevolver 字段升级保留"
   test_interactive_mode_accepts_short_words
   log "已通过: 交互模式接受单字母输入"
   test_interactive_mode_accepts_full_words
