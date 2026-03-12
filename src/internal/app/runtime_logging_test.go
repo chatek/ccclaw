@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/41490/ccclaw/internal/logging"
 )
 
 func TestIngestLogsRespectRuntimeLevel(t *testing.T) {
@@ -102,6 +104,76 @@ func TestJournalLogsRespectRuntimeLevel(t *testing.T) {
 	})
 	if strings.Contains(warningLogs, "日报已生成") {
 		t.Fatalf("warning level should suppress journal info log: %q", warningLogs)
+	}
+}
+
+func TestStatusLogsRespectRuntimeLevel(t *testing.T) {
+	infoLogs := runRuntimeLoggingEntry(t, "info", func(rt *Runtime, out *bytes.Buffer) error {
+		return rt.Status(out)
+	})
+	if !strings.Contains(infoLogs, "开始生成运行态快照") {
+		t.Fatalf("expected status info log, got %q", infoLogs)
+	}
+	if !strings.Contains(infoLogs, "entry=status") {
+		t.Fatalf("expected status entry field, got %q", infoLogs)
+	}
+
+	warningLogs := runRuntimeLoggingEntry(t, "warning", func(rt *Runtime, out *bytes.Buffer) error {
+		return rt.Status(out)
+	})
+	if strings.Contains(warningLogs, "开始生成运行态快照") {
+		t.Fatalf("warning level should suppress status info log: %q", warningLogs)
+	}
+}
+
+func TestConfigLogsRespectRuntimeLevel(t *testing.T) {
+	infoLogs := runRuntimeLoggingEntry(t, "info", func(rt *Runtime, out *bytes.Buffer) error {
+		return rt.ShowConfig(out)
+	})
+	if !strings.Contains(infoLogs, "开始导出配置快照") {
+		t.Fatalf("expected config info log, got %q", infoLogs)
+	}
+	if !strings.Contains(infoLogs, "配置快照已输出") {
+		t.Fatalf("expected config completion log, got %q", infoLogs)
+	}
+
+	warningLogs := runRuntimeLoggingEntry(t, "warning", func(rt *Runtime, out *bytes.Buffer) error {
+		return rt.ShowConfig(out)
+	})
+	if strings.Contains(warningLogs, "开始导出配置快照") {
+		t.Fatalf("warning level should suppress config info log: %q", warningLogs)
+	}
+}
+
+func TestRuntimeLogsNormalizeFixedFieldOrder(t *testing.T) {
+	logs := new(bytes.Buffer)
+	logger, level, err := logging.New(logs, "debug")
+	if err != nil {
+		t.Fatalf("创建 logger 失败: %v", err)
+	}
+
+	rt := &Runtime{log: logger, logLevel: level}
+	rt.logInfo("run", "固定字段顺序", "session_id", "sess-24", "retry", 2, "target_repo", "41490/ccclaw", "issue", "41490/ccclaw#24", "task_id", "task-24")
+
+	text := logs.String()
+	order := []string{
+		"entry=run",
+		"task_id=task-24",
+		"issue=41490/ccclaw#24",
+		"target_repo=41490/ccclaw",
+		"session_id=sess-24",
+		"retry=2",
+	}
+	last := -1
+	for _, want := range order {
+		pos := strings.Index(text, want)
+		if pos < 0 {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+		if pos < last {
+			t.Fatalf("expected fixed fields keep stable order, got %q", text)
+		}
+		last = pos
 	}
 }
 

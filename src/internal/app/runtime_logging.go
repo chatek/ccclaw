@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 type RuntimeOptions struct {
 	LogWriter        io.Writer
 	LogLevelOverride string
+}
+
+var runtimeLogFixedKeys = []string{
+	"entry",
+	"task_id",
+	"issue",
+	"target_repo",
+	"session_id",
 }
 
 func NewRuntimeWithOptions(configPath, envFile string, options RuntimeOptions) (*Runtime, error) {
@@ -102,11 +111,7 @@ func (rt *Runtime) logWithLevel(level, entry, msg string, args ...any) {
 	if rt == nil || rt.log == nil {
 		return
 	}
-	fields := make([]any, 0, len(args)+2)
-	if strings.TrimSpace(entry) != "" {
-		fields = append(fields, "entry", entry)
-	}
-	fields = append(fields, args...)
+	fields := normalizeRuntimeLogFields(entry, args...)
 	switch level {
 	case logging.LevelDebug:
 		rt.log.Debug(msg, fields...)
@@ -117,6 +122,42 @@ func (rt *Runtime) logWithLevel(level, entry, msg string, args ...any) {
 	default:
 		rt.log.Info(msg, fields...)
 	}
+}
+
+func normalizeRuntimeLogFields(entry string, args ...any) []any {
+	fixed := map[string]any{}
+	if trimmed := strings.TrimSpace(entry); trimmed != "" {
+		fixed["entry"] = trimmed
+	}
+
+	extras := make([]any, 0, len(args))
+	for idx := 0; idx < len(args); idx++ {
+		key, ok := args[idx].(string)
+		if !ok || idx+1 >= len(args) {
+			extras = append(extras, args[idx])
+			continue
+		}
+
+		normalizedKey := strings.TrimSpace(strings.ToLower(key))
+		value := args[idx+1]
+		if slices.Contains(runtimeLogFixedKeys, normalizedKey) {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				fixed[normalizedKey] = value
+			}
+		} else {
+			extras = append(extras, key, value)
+		}
+		idx++
+	}
+
+	fields := make([]any, 0, len(fixed)*2+len(extras))
+	for _, key := range runtimeLogFixedKeys {
+		if value, ok := fixed[key]; ok {
+			fields = append(fields, key, value)
+		}
+	}
+	fields = append(fields, extras...)
+	return fields
 }
 
 func (rt *Runtime) issueRef(repo string, number int) string {

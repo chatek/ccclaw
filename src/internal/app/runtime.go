@@ -561,8 +561,10 @@ func limitDailyRTKComparisons(items []storage.DailyRTKComparison, limit int) ([]
 
 func (rt *Runtime) Status(out io.Writer) error {
 	defer rt.store.Close()
+	rt.logInfo("status", "开始生成运行态快照", "log_level", rt.runtimeLogLevel())
 	tasks, err := rt.store.ListTasks()
 	if err != nil {
+		rt.logError("status", "读取任务列表失败", "error", err)
 		return err
 	}
 	counts := map[core.State]int{}
@@ -574,15 +576,42 @@ func (rt *Runtime) Status(out io.Writer) error {
 	sessionSnapshot := rt.collectStatusSessions(tasks)
 	tokenSummary, err := rt.store.TokenStats()
 	if err != nil {
+		rt.logError("status", "读取 token 统计失败", "error", err)
 		return err
 	}
 	rtkComparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
 	if err != nil {
+		rt.logError("status", "读取 RTK 对比失败", "error", err)
 		return err
 	}
 	recentEvents, err := rt.store.ListTaskEvents(20)
 	if err != nil {
+		rt.logError("status", "读取最近事件失败", "error", err)
 		return err
+	}
+	if sessionSnapshot.Error != "" {
+		rt.logDebug("status", "tmux 会话快照不可用", "reason", sessionSnapshot.Error, "running_tasks", sessionSnapshot.RunningTasks)
+	} else {
+		rt.logDebug(
+			"status",
+			"tmux 会话快照已采集",
+			"running_tasks",
+			sessionSnapshot.RunningTasks,
+			"total_sessions",
+			sessionSnapshot.TotalSessions,
+			"healthy_sessions",
+			sessionSnapshot.HealthySessions,
+			"warning_sessions",
+			sessionSnapshot.WarningSessions,
+			"timeout_sessions",
+			sessionSnapshot.TimeoutSessions,
+			"dead_sessions",
+			sessionSnapshot.DeadSessions,
+			"missing_sessions",
+			sessionSnapshot.MissingSessions,
+			"orphaned_sessions",
+			sessionSnapshot.OrphanedSessions,
+		)
 	}
 
 	_, _ = fmt.Fprintln(out, "当前快照")
@@ -676,11 +705,13 @@ func (rt *Runtime) Status(out io.Writer) error {
 	alerts := rt.filterStatusAlerts(recentEvents, tasks)
 	if len(alerts) == 0 {
 		_, _ = fmt.Fprintln(out, "  最近 7 天无失败/超时告警")
+		rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", 0, "scheduler_effective", diagnosis.Effective)
 		return nil
 	}
 	for _, alert := range alerts {
 		_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", alert.CreatedAt.Format(time.RFC3339), alert.IssueRef, alert.EventType, alert.Detail)
 	}
+	rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", len(alerts), "scheduler_effective", diagnosis.Effective)
 	return nil
 }
 
@@ -831,6 +862,11 @@ func trimStatusText(value string, limit int) string {
 
 func (rt *Runtime) ShowConfig(out io.Writer) error {
 	defer rt.store.Close()
+	rt.logInfo("config", "开始导出配置快照", "targets", len(rt.cfg.Targets), "log_level", rt.runtimeLogLevel())
+	secretCount := 0
+	if rt.secrets != nil {
+		secretCount = len(rt.secrets.Values)
+	}
 	targets := make([]map[string]string, 0, len(rt.cfg.Targets))
 	for _, target := range rt.cfg.Targets {
 		item := map[string]string{
@@ -858,10 +894,15 @@ func (rt *Runtime) ShowConfig(out io.Writer) error {
 	}
 	encoded, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
+		rt.logError("config", "序列化配置快照失败", "error", err)
 		return err
 	}
-	_, err = fmt.Fprintln(out, string(encoded))
-	return err
+	if _, err = fmt.Fprintln(out, string(encoded)); err != nil {
+		rt.logError("config", "输出配置快照失败", "error", err)
+		return err
+	}
+	rt.logInfo("config", "配置快照已输出", "targets", len(rt.cfg.Targets), "enabled_targets", len(rt.cfg.EnabledTargets()), "secret_keys", secretCount)
+	return nil
 }
 
 func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
@@ -895,9 +936,11 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	}
 	var failed []string
 	for _, check := range checks {
+		rt.logDebug("doctor", "开始检查诊断项", "check", check.name)
 		detail, err := check.run()
 		if err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", check.name, err))
+			rt.logWarning("doctor", "诊断项失败", "check", check.name, "detail", detail, "error", err)
 			if detail != "" {
 				_, _ = fmt.Fprintf(out, "[FAIL] %s: %v (%s)\n", check.name, err, detail)
 			} else {
@@ -905,6 +948,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 			}
 			continue
 		}
+		rt.logDebug("doctor", "诊断项通过", "check", check.name, "detail", detail)
 		if detail != "" {
 			_, _ = fmt.Fprintf(out, "[ OK ] %s: %s\n", check.name, detail)
 		} else {
@@ -912,8 +956,10 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		}
 	}
 	if len(failed) > 0 {
+		rt.logWarning("doctor", "环境诊断完成，存在失败项", "failed", len(failed), "checks", len(checks))
 		return fmt.Errorf("doctor 失败，共 %d 项异常", len(failed))
 	}
+	rt.logInfo("doctor", "环境诊断完成", "failed", 0, "checks", len(checks))
 	return nil
 }
 
