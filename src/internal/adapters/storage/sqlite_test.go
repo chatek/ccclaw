@@ -229,6 +229,66 @@ func TestStoreSupportsRTKComparisonAndJournalQueries(t *testing.T) {
 	}
 }
 
+func TestListRunnableExcludesBlockedTasks(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	tasks := []*core.Task{
+		{
+			TaskID:         "30#new",
+			IdempotencyKey: "30#new",
+			ControlRepo:    "41490/ccclaw",
+			IssueRepo:      "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    30,
+			IssueTitle:     "new",
+			State:          core.StateNew,
+		},
+		{
+			TaskID:         "31#failed",
+			IdempotencyKey: "31#failed",
+			ControlRepo:    "41490/ccclaw",
+			IssueRepo:      "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    31,
+			IssueTitle:     "failed",
+			State:          core.StateFailed,
+		},
+		{
+			TaskID:         "32#blocked",
+			IdempotencyKey: "32#blocked",
+			ControlRepo:    "41490/ccclaw",
+			IssueRepo:      "41490/ccclaw",
+			TargetRepo:     "41490/ccclaw",
+			IssueNumber:    32,
+			IssueTitle:     "blocked",
+			State:          core.StateBlocked,
+		},
+	}
+	for _, task := range tasks {
+		if err := store.UpsertTask(task); err != nil {
+			t.Fatalf("写入任务失败: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	runnable, err := store.ListRunnable(10)
+	if err != nil {
+		t.Fatalf("读取待执行任务失败: %v", err)
+	}
+	if len(runnable) != 2 {
+		t.Fatalf("预期只有 NEW/FAILED 可执行，实际=%d", len(runnable))
+	}
+	for _, task := range runnable {
+		if task.State == core.StateBlocked {
+			t.Fatalf("BLOCKED 任务不应进入待执行集合: %#v", task)
+		}
+	}
+}
+
 func TestStoreSupportsStatsDateRangeAndDailyAggregation(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

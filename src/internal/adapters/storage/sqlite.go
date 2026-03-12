@@ -619,7 +619,7 @@ func (s *Store) ListRunnable(limit int) ([]*core.Task, error) {
 		issue_author, issue_author_permission, labels, intent, risk_level, approved, approval_command,
 		approval_actor, approval_comment_id, state, retry_count, error_msg, report_path, created_at, updated_at
 		FROM tasks
-		WHERE state IN ('NEW', 'FAILED', 'BLOCKED')
+		WHERE state IN ('NEW', 'FAILED')
 		ORDER BY updated_at ASC, issue_number ASC
 		LIMIT ?
 	`, limit)
