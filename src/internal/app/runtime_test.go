@@ -1040,13 +1040,32 @@ func TestJournalWritesDailyFile(t *testing.T) {
 
 	rt := &Runtime{
 		cfg: &config.Config{
+			GitHub: config.GitHubConfig{
+				ControlRepo: "41490/ccclaw",
+			},
 			Paths: config.PathsConfig{
 				HomeRepo: tmpDir,
 				StateDB:  stateDB,
 				KBDir:    filepath.Join(tmpDir, "kb"),
 			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: filepath.Join(tmpDir, "target"),
+			}},
 		},
 		store: store,
+		syncRepo: func(repoPath, message string, paths []string, maxRetry int) error {
+			if repoPath != tmpDir {
+				t.Fatalf("unexpected sync repo path: %s", repoPath)
+			}
+			if !strings.Contains(message, "journal: 2026-03-10") {
+				t.Fatalf("unexpected sync message: %s", message)
+			}
+			if len(paths) != 4 {
+				t.Fatalf("unexpected sync paths: %#v", paths)
+			}
+			return nil
+		},
 	}
 
 	var out bytes.Buffer
@@ -1056,13 +1075,13 @@ func TestJournalWritesDailyFile(t *testing.T) {
 	if !strings.Contains(out.String(), "journal 已生成:") {
 		t.Fatalf("unexpected journal output: %q", out.String())
 	}
-	path := filepath.Join(tmpDir, "kb", "journal", "2026", "03", "2026.03.10."+journalUserName()+".ccclaw_log.md")
+	path := filepath.Join(tmpDir, "kb", "journal", "2026", "03", "2026.03.10."+journalUserName()+".41490-ccclaw.ccclaw_log.md")
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读取 journal 文件失败: %v", err)
 	}
 	text := string(payload)
-	for _, want := range []string{"# ccclaw journal 2026-03-10", "任务触达数", "巡查事件"} {
+	for _, want := range []string{"# ccclaw journal 2026-03-10 [41490/ccclaw]", "任务触达数", "巡查事件"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}

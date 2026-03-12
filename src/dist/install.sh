@@ -598,6 +598,14 @@ sync_app_readme() {
   merge_managed_markdown "$DIST_DIR/ops/examples/app-readme.md" "$APP_DIR/README.md"
 }
 
+sync_jj_quickref() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] install $DIST_DIR/jj.md -> $APP_DIR/jj.md"
+    return 0
+  fi
+  install_release_file 644 "$DIST_DIR/jj.md" "$APP_DIR/jj.md"
+}
+
 normalize_repo_slug() {
   local repo="$1"
   repo="${repo%.git}"
@@ -1112,6 +1120,37 @@ ensure_system_packages() {
       log "已发现可选工具: $tool"
     fi
   done
+  if have jj; then
+    log "已发现 jj: $(jj --version 2>/dev/null || echo unknown)"
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] install jj prebuilt binary into /usr/local/bin/jj"
+    return 0
+  fi
+  local arch archive_url tmp_dir archive_file binary_path
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) fail "当前架构暂不支持自动安装 jj: $(uname -m)" ;;
+  esac
+  archive_url="https://github.com/jj-vcs/jj/releases/latest/download/jj-${arch}-unknown-linux-musl.tar.gz"
+  tmp_dir="$(mktemp -d)"
+  archive_file="$tmp_dir/jj.tar.gz"
+  if have curl; then
+    curl -fsSL "$archive_url" -o "$archive_file"
+  elif have wget; then
+    wget -qO "$archive_file" "$archive_url"
+  else
+    fail "缺少 curl/wget，无法自动安装 jj"
+  fi
+  tar -xzf "$archive_file" -C "$tmp_dir"
+  binary_path="$(find "$tmp_dir" -type f -name jj | head -n 1)"
+  [[ -n "$binary_path" ]] || fail "jj 安装包解压后未找到可执行文件"
+  sudo install -m 755 "$binary_path" /usr/local/bin/jj
+  rm -rf "$tmp_dir"
+  have jj || fail "jj 安装后仍不可用"
+  log "已安装 jj: $(jj --version 2>/dev/null || echo unknown)"
 }
 
 claude_install_channel_reachable() {
@@ -1617,6 +1656,7 @@ create_app_layout() {
   install_release_scripts
   copy_ops_tree
   sync_app_readme
+  sync_jj_quickref
   create_claude_wrapper
   create_env_file
   create_config_file
@@ -1679,6 +1719,19 @@ commit_home_repo_seed() {
   git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m 'seed ccclaw home repo'
 }
 
+init_jj_colocate_repo() {
+  local repo_path="$1"
+  [[ -n "$repo_path" ]] || return 0
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] jj git init --colocate $repo_path"
+    return 0
+  fi
+  [[ -d "$repo_path/.git" ]] || return 0
+  [[ ! -d "$repo_path/.jj" ]] || return 0
+  log "初始化 jj colocated 仓库: $repo_path"
+  jj git init --colocate "$repo_path"
+}
+
 init_or_attach_home_repo() {
   case "$HOME_REPO_MODE" in
     init)
@@ -1722,6 +1775,7 @@ init_or_attach_home_repo() {
   fi
   seed_home_repo_tree
   commit_home_repo_seed
+  init_jj_colocate_repo "$HOME_REPO"
 }
 
 prepare_task_clone_root() {
@@ -1772,6 +1826,7 @@ bind_task_repo() {
     log "[simulate] $APP_DIR/bin/ccclaw ${target_args[*]}"
     return 0
   fi
+  init_jj_colocate_repo "$TASK_REPO_PATH"
   "$APP_DIR/bin/ccclaw" "${target_args[@]}"
 }
 

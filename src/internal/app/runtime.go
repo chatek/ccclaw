@@ -26,6 +26,7 @@ import (
 	"github.com/41490/ccclaw/internal/memory"
 	"github.com/41490/ccclaw/internal/scheduler"
 	"github.com/41490/ccclaw/internal/tmux"
+	"github.com/41490/ccclaw/internal/vcs"
 )
 
 type Runtime struct {
@@ -37,6 +38,7 @@ type Runtime struct {
 	memRoot  string
 	memCache map[string]*memory.Index
 	ghCache  map[string]*github.Client
+	syncRepo func(repoPath, message string, paths []string, maxRetry int) error
 }
 
 const (
@@ -96,6 +98,7 @@ func NewRuntime(configPath, envFile string) (*Runtime, error) {
 		memRoot:  cfg.Paths.KBDir,
 		memCache: map[string]*memory.Index{cfg.Paths.KBDir: mem},
 		ghCache:  map[string]*github.Client{},
+		syncRepo: vcs.SyncRepo,
 	}
 	rt.rep = reporter.New(rt.clientForRepo)
 	return rt, nil
@@ -116,6 +119,13 @@ func (rt *Runtime) clientForRepo(repo string) *github.Client {
 	client := github.NewClient(repo, values)
 	rt.ghCache[repo] = client
 	return client
+}
+
+func (rt *Runtime) repoSync(repoPath, message string, paths []string, maxRetry int) error {
+	if rt != nil && rt.syncRepo != nil {
+		return rt.syncRepo(repoPath, message, paths, maxRetry)
+	}
+	return vcs.SyncRepo(repoPath, message, paths, maxRetry)
 }
 
 func (rt *Runtime) issueSourceRepos() []string {
@@ -340,6 +350,7 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 		orphaned++
 	}
 
+	rt.syncReposAfterPatrol(out)
 	_, _ = fmt.Fprintf(out, "巡查完成: completed=%d timeout=%d warning=%d orphaned=%d running=%d\n", completed, timedOut, warnings, orphaned, len(runningTasks))
 	_ = ctx
 	return nil
@@ -1203,6 +1214,9 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 	if result != nil {
 		rt.reportSuccess(task, result.Duration, result.LogFile)
 	}
+	if err := rt.syncTaskTargetRepo(task); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1794,39 +1808,59 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 	if day.IsZero() {
 		day = time.Now()
 	}
-	summary, err := rt.store.JournalDaySummary(day)
+	targetRepos := rt.journalTargetRepos()
+	writtenPaths := make([]string, 0, len(targetRepos)+3)
+	for _, targetRepo := range targetRepos {
+		summary, err := rt.store.JournalDaySummaryByTarget(day, targetRepo)
+		if err != nil {
+			return err
+		}
+		comparison, err := rt.store.RTKComparisonBetweenByTarget(dayStart(day), dayEnd(day), targetRepo)
+		if err != nil {
+			return err
+		}
+		tasks, err := rt.store.JournalTaskSummariesByTarget(day, targetRepo)
+		if err != nil {
+			return err
+		}
+		events, err := rt.store.ListTaskEventsBetweenByTarget(dayStart(day), dayEnd(day), 100, targetRepo)
+		if err != nil {
+			return err
+		}
+		path := rt.journalFilePath(day, targetRepo)
+		if len(targetRepos) == 1 {
+			if err := rt.migrateLegacyJournalFile(day, targetRepo, path); err != nil {
+				return err
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("创建 journal 目录失败: %w", err)
+		}
+		content := rt.renderJournal(day, targetRepo, summary, comparison, tasks, events)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return fmt.Errorf("写入 journal 失败: %w", err)
+		}
+		writtenPaths = append(writtenPaths, path)
+		_, _ = fmt.Fprintf(out, "journal 已生成: %s\n", path)
+	}
+	summaryPaths, err := rt.refreshJournalSummaries(day)
 	if err != nil {
 		return err
 	}
-	comparison, err := rt.store.RTKComparisonBetween(dayStart(day), dayEnd(day))
-	if err != nil {
-		return err
+	writtenPaths = append(writtenPaths, summaryPaths...)
+	if homeRepo := strings.TrimSpace(rt.cfg.Paths.HomeRepo); homeRepo != "" && len(writtenPaths) > 0 {
+		if err := rt.repoSync(homeRepo, fmt.Sprintf("journal: %s", day.Format("2006-01-02")), writtenPaths, 3); err != nil {
+			_, _ = fmt.Fprintf(out, "警告: 知识仓库同步失败: %v\n", err)
+		}
 	}
-	tasks, err := rt.store.JournalTaskSummaries(day)
-	if err != nil {
-		return err
-	}
-	events, err := rt.store.ListTaskEventsBetween(dayStart(day), dayEnd(day), 100)
-	if err != nil {
-		return err
-	}
-	path := rt.journalFilePath(day)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("创建 journal 目录失败: %w", err)
-	}
-	content := rt.renderJournal(day, summary, comparison, tasks, events)
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("写入 journal 失败: %w", err)
-	}
-	if err := rt.refreshJournalSummaries(day); err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(out, "journal 已生成: %s\n", path)
 	return nil
 }
 
-func (rt *Runtime) journalFilePath(day time.Time) string {
-	return filepath.Join(rt.journalMonthDir(day), fmt.Sprintf("%s.%s.ccclaw_log.md", day.Format("2006.01.02"), journalUserName()))
+func (rt *Runtime) journalFilePath(day time.Time, targetRepo string) string {
+	return filepath.Join(
+		rt.journalMonthDir(day),
+		fmt.Sprintf("%s.%s.%s.ccclaw_log.md", day.Format("2006.01.02"), journalUserName(), journalRepoFileSlug(targetRepo)),
+	)
 }
 
 func (rt *Runtime) journalRootDir() string {
@@ -1843,33 +1877,36 @@ func (rt *Runtime) journalMonthDir(day time.Time) string {
 	return filepath.Join(rt.journalRootDir(), year, month)
 }
 
-func (rt *Runtime) refreshJournalSummaries(day time.Time) error {
-	if err := rt.writeJournalMonthSummary(day); err != nil {
-		return err
+func (rt *Runtime) refreshJournalSummaries(day time.Time) ([]string, error) {
+	monthPath, err := rt.writeJournalMonthSummary(day)
+	if err != nil {
+		return nil, err
 	}
-	if err := rt.writeJournalYearSummary(day); err != nil {
-		return err
+	yearPath, err := rt.writeJournalYearSummary(day)
+	if err != nil {
+		return nil, err
 	}
-	if err := rt.writeJournalRootSummary(); err != nil {
-		return err
+	rootPath, err := rt.writeJournalRootSummary()
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return []string{monthPath, yearPath, rootPath}, nil
 }
 
-func (rt *Runtime) writeJournalMonthSummary(day time.Time) error {
+func (rt *Runtime) writeJournalMonthSummary(day time.Time) (string, error) {
 	monthStart := time.Date(day.Year(), day.Month(), 1, 0, 0, 0, 0, day.Location())
 	monthEnd := monthStart.AddDate(0, 1, 0)
 	summary, err := rt.store.JournalSummaryBetween(monthStart, monthEnd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	comparison, err := rt.store.RTKComparisonBetween(monthStart, monthEnd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	files, err := collectJournalFiles(rt.journalMonthDir(day), ".ccclaw_log.md")
 	if err != nil {
-		return err
+		return "", err
 	}
 	var body strings.Builder
 	body.WriteString(fmt.Sprintf("## 范围\n\n- 月份: %s\n- 日志文件数: %d\n", monthStart.Format("2006-01"), len(files)))
@@ -1883,27 +1920,28 @@ func (rt *Runtime) writeJournalMonthSummary(day time.Time) error {
 			body.WriteString(fmt.Sprintf("- [%s](./%s)\n", dayLabel, name))
 		}
 	}
-	return writeManagedJournalFile(
-		filepath.Join(rt.journalMonthDir(day), "summary.md"),
+	path := filepath.Join(rt.journalMonthDir(day), "summary.md")
+	return path, writeManagedJournalFile(
+		path,
 		fmt.Sprintf("# ccclaw journal 月汇总 %s", monthStart.Format("2006-01")),
 		body.String(),
 	)
 }
 
-func (rt *Runtime) writeJournalYearSummary(day time.Time) error {
+func (rt *Runtime) writeJournalYearSummary(day time.Time) (string, error) {
 	yearStart := time.Date(day.Year(), 1, 1, 0, 0, 0, 0, day.Location())
 	yearEnd := yearStart.AddDate(1, 0, 0)
 	summary, err := rt.store.JournalSummaryBetween(yearStart, yearEnd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	comparison, err := rt.store.RTKComparisonBetween(yearStart, yearEnd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	monthDirs, err := collectJournalSubdirs(rt.journalYearDir(day))
 	if err != nil {
-		return err
+		return "", err
 	}
 	var body strings.Builder
 	body.WriteString(fmt.Sprintf("## 范围\n\n- 年度: %s\n- 月目录数: %d\n", yearStart.Format("2006"), len(monthDirs)))
@@ -1916,25 +1954,26 @@ func (rt *Runtime) writeJournalYearSummary(day time.Time) error {
 			body.WriteString(fmt.Sprintf("- [%s](./%s/summary.md)\n", month, month))
 		}
 	}
-	return writeManagedJournalFile(
-		filepath.Join(rt.journalYearDir(day), "summary.md"),
+	path := filepath.Join(rt.journalYearDir(day), "summary.md")
+	return path, writeManagedJournalFile(
+		path,
 		fmt.Sprintf("# ccclaw journal 年汇总 %s", yearStart.Format("2006")),
 		body.String(),
 	)
 }
 
-func (rt *Runtime) writeJournalRootSummary() error {
+func (rt *Runtime) writeJournalRootSummary() (string, error) {
 	summary, err := rt.store.JournalSummaryBetween(time.Time{}, time.Time{})
 	if err != nil {
-		return err
+		return "", err
 	}
 	comparison, err := rt.store.RTKComparisonBetween(time.Time{}, time.Time{})
 	if err != nil {
-		return err
+		return "", err
 	}
 	yearDirs, err := collectJournalSubdirs(rt.journalRootDir())
 	if err != nil {
-		return err
+		return "", err
 	}
 	var body strings.Builder
 	body.WriteString(fmt.Sprintf("## 范围\n\n- 年度目录数: %d\n", len(yearDirs)))
@@ -1947,8 +1986,9 @@ func (rt *Runtime) writeJournalRootSummary() error {
 			body.WriteString(fmt.Sprintf("- [%s](./%s/summary.md)\n", year, year))
 		}
 	}
-	return writeManagedJournalFile(
-		filepath.Join(rt.journalRootDir(), "summary.md"),
+	path := filepath.Join(rt.journalRootDir(), "summary.md")
+	return path, writeManagedJournalFile(
+		path,
 		"# ccclaw journal 总览",
 		body.String(),
 	)
@@ -2075,9 +2115,13 @@ func buildManagedJournalFile(title, managedBody, userBody string) string {
 	return sb.String()
 }
 
-func (rt *Runtime) renderJournal(day time.Time, summary *storage.JournalDaySummary, comparison *storage.RTKComparison, tasks []storage.JournalTaskSummary, events []storage.EventRecord) string {
+func (rt *Runtime) renderJournal(day time.Time, targetRepo string, summary *storage.JournalDaySummary, comparison *storage.RTKComparison, tasks []storage.JournalTaskSummary, events []storage.EventRecord) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# ccclaw journal %s\n\n", day.Format("2006-01-02")))
+	title := fmt.Sprintf("# ccclaw journal %s", day.Format("2006-01-02"))
+	if strings.TrimSpace(targetRepo) != "" {
+		title += fmt.Sprintf(" [%s]", targetRepo)
+	}
+	sb.WriteString(title + "\n\n")
 	sb.WriteString("## 日汇总\n\n")
 	sb.WriteString(fmt.Sprintf("- 任务触达数: %d\n", summary.TasksTouched))
 	sb.WriteString(fmt.Sprintf("- 启动任务数: %d\n", summary.Started))
@@ -2142,6 +2186,82 @@ func filterPatrolEvents(events []storage.EventRecord) []storage.EventRecord {
 	return filtered
 }
 
+func (rt *Runtime) syncTaskTargetRepo(task *core.Task) error {
+	if task == nil || rt.cfg == nil || strings.TrimSpace(task.TargetRepo) == "" {
+		return nil
+	}
+	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
+	if err != nil || target == nil {
+		return nil
+	}
+	if err := rt.repoSync(target.LocalPath, fmt.Sprintf("task done: %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3); err != nil {
+		_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("任务仓库同步失败: %v", err))
+	}
+	return nil
+}
+
+func (rt *Runtime) syncReposAfterPatrol(out io.Writer) {
+	if rt == nil || rt.cfg == nil {
+		return
+	}
+	for _, target := range rt.cfg.EnabledTargets() {
+		if err := rt.repoSync(target.LocalPath, "patrol: sync", nil, 3); err != nil {
+			_, _ = fmt.Fprintf(out, "警告: %s 同步失败: %v\n", target.Repo, err)
+		}
+	}
+	if homeRepo := strings.TrimSpace(rt.cfg.Paths.HomeRepo); homeRepo != "" {
+		if err := rt.repoSync(homeRepo, "patrol: sync home", nil, 3); err != nil {
+			_, _ = fmt.Fprintf(out, "警告: 知识仓库同步失败: %v\n", err)
+		}
+	}
+}
+
+func (rt *Runtime) journalTargetRepos() []string {
+	if rt == nil || rt.cfg == nil {
+		return nil
+	}
+	targets := rt.cfg.EnabledTargets()
+	if len(targets) == 0 {
+		repo := strings.TrimSpace(rt.cfg.GitHub.ControlRepo)
+		if repo == "" {
+			return nil
+		}
+		return []string{repo}
+	}
+	repos := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if repo := strings.TrimSpace(target.Repo); repo != "" {
+			repos = append(repos, repo)
+		}
+	}
+	return repos
+}
+
+func (rt *Runtime) migrateLegacyJournalFile(day time.Time, targetRepo, targetPath string) error {
+	if strings.TrimSpace(targetRepo) == "" || strings.TrimSpace(targetPath) == "" {
+		return nil
+	}
+	legacyPath := filepath.Join(rt.journalMonthDir(day), fmt.Sprintf("%s.%s.ccclaw_log.md", day.Format("2006.01.02"), journalUserName()))
+	if legacyPath == targetPath {
+		return nil
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取旧版 journal 文件失败: %w", err)
+	}
+	if _, err := os.Stat(targetPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取目标 journal 文件失败: %w", err)
+	}
+	if err := os.Rename(legacyPath, targetPath); err != nil {
+		return fmt.Errorf("迁移旧版 journal 文件失败: %w", err)
+	}
+	return nil
+}
+
 func journalUserName() string {
 	for _, key := range []string{"USER", "LOGNAME", "USERNAME"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -2149,6 +2269,14 @@ func journalUserName() string {
 		}
 	}
 	return "unknown"
+}
+
+func journalRepoFileSlug(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return "unknown-repo"
+	}
+	return strings.NewReplacer("/", "-", "\\", "-").Replace(repo)
 }
 
 func formatJournalTime(ts time.Time) string {

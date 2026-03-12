@@ -107,7 +107,7 @@ func TestStoreSupportsRTKComparisonAndJournalQueries(t *testing.T) {
 			TaskID:         "11#body",
 			IdempotencyKey: "11#body",
 			ControlRepo:    "41490/ccclaw",
-			TargetRepo:     "41490/ccclaw",
+			TargetRepo:     "41490/other",
 			IssueNumber:    11,
 			IssueTitle:     "rtk off",
 			Labels:         []string{"ccclaw"},
@@ -188,12 +188,44 @@ func TestStoreSupportsRTKComparisonAndJournalQueries(t *testing.T) {
 		t.Fatalf("unexpected journal task count: %d", len(items))
 	}
 
+	targetSummary, err := store.JournalDaySummaryByTarget(day, "41490/ccclaw")
+	if err != nil {
+		t.Fatalf("读取目标仓库 journal 汇总失败: %v", err)
+	}
+	if targetSummary.TasksTouched != 1 || targetSummary.Done != 1 || targetSummary.Dead != 0 {
+		t.Fatalf("unexpected target journal summary: %#v", targetSummary)
+	}
+
+	targetItems, err := store.JournalTaskSummariesByTarget(day, "41490/ccclaw")
+	if err != nil {
+		t.Fatalf("读取目标仓库 journal 任务汇总失败: %v", err)
+	}
+	if len(targetItems) != 1 || targetItems[0].IssueNumber != 10 {
+		t.Fatalf("unexpected target journal tasks: %#v", targetItems)
+	}
+
+	targetComparison, err := store.RTKComparisonBetweenByTarget(day.Add(-time.Hour), day.Add(time.Hour), "41490/ccclaw")
+	if err != nil {
+		t.Fatalf("读取目标仓库 rtk 对比失败: %v", err)
+	}
+	if targetComparison.RTKRuns != 1 || targetComparison.PlainRuns != 0 {
+		t.Fatalf("unexpected target comparison: %#v", targetComparison)
+	}
+
 	events, err := store.ListTaskEventsBetween(day.Add(-24*time.Hour), day.Add(24*time.Hour), 10)
 	if err != nil {
 		t.Fatalf("读取事件失败: %v", err)
 	}
 	if len(events) < 3 {
 		t.Fatalf("unexpected event count: %d", len(events))
+	}
+
+	targetEvents, err := store.ListTaskEventsBetweenByTarget(day.Add(-24*time.Hour), day.Add(24*time.Hour), 10, "41490/ccclaw")
+	if err != nil {
+		t.Fatalf("读取目标仓库事件失败: %v", err)
+	}
+	if len(targetEvents) != 2 {
+		t.Fatalf("unexpected target event count: %d", len(targetEvents))
 	}
 }
 

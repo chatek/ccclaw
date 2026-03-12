@@ -675,6 +675,58 @@ func (s *Store) JournalDaySummary(day time.Time) (*JournalDaySummary, error) {
 	return s.JournalSummaryBetween(start, end)
 }
 
+func (s *Store) JournalDaySummaryByTarget(day time.Time, targetRepo string) (*JournalDaySummary, error) {
+	start, end := dayBounds(day)
+	targetRepo = strings.TrimSpace(targetRepo)
+	if targetRepo == "" {
+		return s.JournalDaySummary(day)
+	}
+	tokenRow := s.db.QueryRow(`
+		SELECT
+			COALESCE(SUM(u.input_tokens), 0),
+			COALESCE(SUM(u.output_tokens), 0),
+			COALESCE(SUM(u.cache_create), 0),
+			COALESCE(SUM(u.cache_read), 0),
+			COALESCE(SUM(u.cost_usd), 0)
+		FROM token_usage u
+		JOIN tasks t ON t.task_id = u.task_id
+		WHERE t.target_repo = ? AND u.created_at >= ? AND u.created_at < ?
+	`, targetRepo, start, end)
+	summary := &JournalDaySummary{}
+	if err := tokenRow.Scan(
+		&summary.InputTokens,
+		&summary.OutputTokens,
+		&summary.CacheCreate,
+		&summary.CacheRead,
+		&summary.CostUSD,
+	); err != nil {
+		return nil, fmt.Errorf("读取目标仓库 journal token 汇总失败: %w", err)
+	}
+	row := s.db.QueryRow(`
+		SELECT
+			COUNT(DISTINCT task_id),
+			COUNT(DISTINCT CASE WHEN event_type = 'STARTED' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'DONE' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'FAILED' THEN task_id END),
+			COUNT(DISTINCT CASE WHEN event_type = 'DEAD' THEN task_id END)
+		FROM (
+			SELECT e.task_id, e.event_type
+			FROM task_events e
+			JOIN tasks t ON t.task_id = e.task_id
+			WHERE t.target_repo = ? AND e.created_at >= ? AND e.created_at < ?
+			UNION ALL
+			SELECT u.task_id, '' AS event_type
+			FROM token_usage u
+			JOIN tasks t ON t.task_id = u.task_id
+			WHERE t.target_repo = ? AND u.created_at >= ? AND u.created_at < ?
+		)
+	`, targetRepo, start, end, targetRepo, start, end)
+	if err := row.Scan(&summary.TasksTouched, &summary.Started, &summary.Done, &summary.Failed, &summary.Dead); err != nil {
+		return nil, fmt.Errorf("读取目标仓库 journal 日汇总失败: %w", err)
+	}
+	return summary, nil
+}
+
 func (s *Store) JournalSummaryBetween(start, end time.Time) (*JournalDaySummary, error) {
 	tokenSummary, err := s.TokenStatsBetween(start, end)
 	if err != nil {
@@ -780,6 +832,91 @@ func (s *Store) JournalTaskSummaries(day time.Time) ([]JournalTaskSummary, error
 	return items, nil
 }
 
+func (s *Store) JournalTaskSummariesByTarget(day time.Time, targetRepo string) ([]JournalTaskSummary, error) {
+	start, end := dayBounds(day)
+	targetRepo = strings.TrimSpace(targetRepo)
+	if targetRepo == "" {
+		return s.JournalTaskSummaries(day)
+	}
+	rows, err := s.db.Query(`
+		SELECT
+			t.task_id,
+			t.issue_repo,
+			t.issue_number,
+			t.issue_title,
+			t.state,
+			COALESCE(COUNT(u.id), 0),
+			COALESCE(SUM(u.input_tokens), 0),
+			COALESCE(SUM(u.output_tokens), 0),
+			COALESCE(SUM(u.cache_create), 0),
+			COALESCE(SUM(u.cache_read), 0),
+			COALESCE(SUM(u.cost_usd), 0),
+			COALESCE(MAX(t.updated_at), '')
+		FROM tasks t
+		LEFT JOIN token_usage u
+			ON t.task_id = u.task_id
+			AND u.created_at >= ? AND u.created_at < ?
+		WHERE t.target_repo = ?
+			AND t.task_id IN (
+				SELECT e.task_id
+				FROM task_events e
+				JOIN tasks te ON te.task_id = e.task_id
+				WHERE te.target_repo = ? AND e.created_at >= ? AND e.created_at < ?
+				UNION
+				SELECT u.task_id
+				FROM token_usage u
+				JOIN tasks tu ON tu.task_id = u.task_id
+				WHERE tu.target_repo = ? AND u.created_at >= ? AND u.created_at < ?
+				UNION
+				SELECT task_id FROM tasks WHERE target_repo = ? AND updated_at >= ? AND updated_at < ?
+			)
+		GROUP BY t.task_id, t.issue_repo, t.issue_number, t.issue_title, t.state
+		ORDER BY MAX(t.updated_at) DESC, t.issue_number DESC
+	`, start, end, targetRepo, targetRepo, start, end, targetRepo, start, end, targetRepo, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("读取目标仓库 journal 任务汇总失败: %w", err)
+	}
+	defer rows.Close()
+
+	var items []JournalTaskSummary
+	for rows.Next() {
+		var (
+			item      JournalTaskSummary
+			state     string
+			updatedAt string
+		)
+		if err := rows.Scan(
+			&item.TaskID,
+			&item.IssueRepo,
+			&item.IssueNumber,
+			&item.IssueTitle,
+			&state,
+			&item.Runs,
+			&item.InputTokens,
+			&item.OutputTokens,
+			&item.CacheCreate,
+			&item.CacheRead,
+			&item.CostUSD,
+			&updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("扫描目标仓库 journal 任务汇总失败: %w", err)
+		}
+		item.State = core.State(state)
+		if updatedAt != "" {
+			parsed, err := parseSQLiteTime(updatedAt)
+			if err != nil {
+				return nil, err
+			}
+			item.UpdatedAt = parsed
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历目标仓库 journal 任务汇总失败: %w", err)
+	}
+	return items, nil
+}
+
 func (s *Store) ListTaskEventsBetween(start, end time.Time, limit int) ([]EventRecord, error) {
 	if limit <= 0 {
 		limit = 50
@@ -818,6 +955,99 @@ func (s *Store) ListTaskEventsBetween(start, end time.Time, limit int) ([]EventR
 		return nil, fmt.Errorf("遍历任务事件失败: %w", err)
 	}
 	return items, nil
+}
+
+func (s *Store) ListTaskEventsBetweenByTarget(start, end time.Time, limit int, targetRepo string) ([]EventRecord, error) {
+	targetRepo = strings.TrimSpace(targetRepo)
+	if targetRepo == "" {
+		return s.ListTaskEventsBetween(start, end, limit)
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT e.task_id, e.event_type, e.detail, e.created_at
+		FROM task_events e
+		JOIN tasks t ON t.task_id = e.task_id
+		WHERE t.target_repo = ? AND e.created_at >= ? AND e.created_at < ?
+		ORDER BY e.created_at DESC, e.id DESC
+		LIMIT ?
+	`, targetRepo, start, end, limit)
+	if err != nil {
+		return nil, fmt.Errorf("读取目标仓库任务事件失败: %w", err)
+	}
+	defer rows.Close()
+
+	var items []EventRecord
+	for rows.Next() {
+		var (
+			item      EventRecord
+			eventType string
+			createdAt string
+		)
+		if err := rows.Scan(&item.TaskID, &eventType, &item.Detail, &createdAt); err != nil {
+			return nil, fmt.Errorf("扫描目标仓库任务事件失败: %w", err)
+		}
+		item.EventType = core.EventType(eventType)
+		parsed, err := parseSQLiteTime(createdAt)
+		if err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parsed
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历目标仓库任务事件失败: %w", err)
+	}
+	return items, nil
+}
+
+func (s *Store) RTKComparisonBetweenByTarget(start, end time.Time, targetRepo string) (*RTKComparison, error) {
+	targetRepo = strings.TrimSpace(targetRepo)
+	if targetRepo == "" {
+		return s.RTKComparisonBetween(start, end)
+	}
+	row := s.db.QueryRow(`
+		SELECT
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 1 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 1 THEN u.cost_usd ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 0 THEN u.cost_usd ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 1 THEN u.input_tokens + u.output_tokens + u.cache_create + u.cache_read ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN u.rtk_enabled = 0 THEN u.input_tokens + u.output_tokens + u.cache_create + u.cache_read ELSE 0 END), 0)
+		FROM token_usage u
+		JOIN tasks t ON t.task_id = u.task_id
+		WHERE t.target_repo = ? AND u.created_at >= ? AND u.created_at < ?
+	`, targetRepo, start, end)
+	var (
+		item             RTKComparison
+		rtkTotalCost     float64
+		plainTotalCost   float64
+		rtkTotalTokens   int
+		plainTotalTokens int
+	)
+	if err := row.Scan(
+		&item.RTKRuns,
+		&item.PlainRuns,
+		&rtkTotalCost,
+		&plainTotalCost,
+		&rtkTotalTokens,
+		&plainTotalTokens,
+	); err != nil {
+		return nil, fmt.Errorf("读取目标仓库 rtk 对比统计失败: %w", err)
+	}
+	if item.RTKRuns > 0 {
+		item.RTKAvgCostUSD = rtkTotalCost / float64(item.RTKRuns)
+		item.RTKAvgTokens = float64(rtkTotalTokens) / float64(item.RTKRuns)
+	}
+	if item.PlainRuns > 0 {
+		item.PlainAvgCostUSD = plainTotalCost / float64(item.PlainRuns)
+		item.PlainAvgTokens = float64(plainTotalTokens) / float64(item.PlainRuns)
+	}
+	if item.RTKRuns > 0 && item.PlainRuns > 0 && item.PlainAvgCostUSD > 0 {
+		item.SavingsPercent = (item.PlainAvgCostUSD - item.RTKAvgCostUSD) / item.PlainAvgCostUSD * 100
+	}
+	return &item, nil
 }
 
 func (s *Store) ListTaskEvents(limit int) ([]EventRecord, error) {
