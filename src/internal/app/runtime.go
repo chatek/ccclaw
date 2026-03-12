@@ -1711,25 +1711,27 @@ func summarizeUnavailableScheduler(requested, systemdReason, cronReason string) 
 }
 
 func systemdRepairHint(reason string, installed bool) string {
+	timers := strings.Join(scheduler.ManagedSystemdTimers(), " ")
+	services := strings.Join(managedSystemdServiceUnits(), " -u ")
 	switch {
 	case strings.TrimSpace(reason) == "":
 		if installed {
-			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
 	case strings.Contains(reason, "未找到 systemctl"):
 		return "当前环境缺少 systemctl；请安装 systemd 组件，或改用 cron/none"
 	case isUserBusUnavailable(reason):
-		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer；若仍失败，请先确认 user bus 已建立"
+		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers + "；若仍失败，请先确认 user bus 已建立"
 	case strings.Contains(reason, "is-enabled"), strings.Contains(reason, "disabled"), strings.Contains(reason, "not-found"):
-		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
 	case strings.Contains(reason, "is-active"), strings.Contains(reason, "inactive"), strings.Contains(reason, "failed"):
-		return "请执行 systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer，并检查 journalctl --user -u ccclaw-ingest.service -u ccclaw-run.service -u ccclaw-patrol.service -u ccclaw-journal.service"
+		return "请执行 systemctl --user restart " + timers + "，并检查 journalctl --user -u " + services
 	default:
 		if installed {
 			return "请检查 user systemd 状态后重新执行 daemon-reload / enable --now"
 		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
 	}
 }
 
@@ -1787,6 +1789,10 @@ func (rt *Runtime) hasSystemdUnitFiles(unitDir string) bool {
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.service",
 		"ccclaw-journal.timer",
+		"ccclaw-archive.service",
+		"ccclaw-archive.timer",
+		"ccclaw-sevolver.service",
+		"ccclaw-sevolver.timer",
 	}
 	for _, name := range required {
 		if _, err := os.Stat(filepath.Join(unitDir, name)); err != nil {
@@ -1800,7 +1806,7 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 	if err := requireCommand("systemctl"); err != nil {
 		return false, err.Error()
 	}
-	units := []string{"ccclaw-ingest.timer", "ccclaw-run.timer", "ccclaw-patrol.timer", "ccclaw-journal.timer"}
+	units := scheduler.ManagedSystemdTimers()
 	for _, unit := range units {
 		if _, err := systemctlUser("is-enabled", unit); err != nil {
 			return false, err.Error()
@@ -1809,7 +1815,15 @@ func (rt *Runtime) detectSystemdTimers() (bool, string) {
 			return false, err.Error()
 		}
 	}
-	return true, "ccclaw-ingest.timer, ccclaw-run.timer, ccclaw-patrol.timer, ccclaw-journal.timer 已启用且运行中"
+	return true, strings.Join(units, ", ") + " 已启用且运行中"
+}
+
+func managedSystemdServiceUnits() []string {
+	services := make([]string, 0, len(scheduler.ManagedSystemdTimers()))
+	for _, timer := range scheduler.ManagedSystemdTimers() {
+		services = append(services, strings.TrimSuffix(timer, ".timer")+".service")
+	}
+	return services
 }
 
 func (rt *Runtime) detectCronEntries() (bool, string) {

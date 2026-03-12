@@ -40,7 +40,8 @@ bash install.sh
 - 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
 - 受控 `cron` 会写入 `ingest/run/patrol/journal` 四类周期任务
 - `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
-- `systemd --user` 额外托管 `ccclaw-archive.timer`，每周导出历史周 JSONL 为 Parquet
+- `systemd --user` 额外托管 `ccclaw-archive.timer` 与 `ccclaw-sevolver.timer`
+- `ccclaw-archive.timer` 每周导出历史周 JSONL 为 Parquet，`ccclaw-sevolver.timer` 每晚维护 Skill 生命周期与缺口信号
 - 推荐优先通过 `ccclaw scheduler use systemd|cron|none` 切换后端，而不是手工混改配置和调度器
 - 如需清理受控块，可执行：
 

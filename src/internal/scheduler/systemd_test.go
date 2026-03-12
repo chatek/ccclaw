@@ -51,6 +51,12 @@ func TestGenerateSystemdUnitContentsIncludesCalendarTimezone(t *testing.T) {
 	if !strings.Contains(units["ccclaw-journal.timer"], "OnCalendar=*-*-* 01:01:42 Asia/Shanghai") {
 		t.Fatalf("unexpected journal timer unit: %q", units["ccclaw-journal.timer"])
 	}
+	if !strings.Contains(units["ccclaw-archive.timer"], "OnCalendar=Mon 02:00:00 Asia/Shanghai") {
+		t.Fatalf("unexpected archive timer unit: %q", units["ccclaw-archive.timer"])
+	}
+	if !strings.Contains(units["ccclaw-sevolver.timer"], "OnCalendar=*-*-* 22:00:00 Asia/Shanghai") {
+		t.Fatalf("unexpected sevolver timer unit: %q", units["ccclaw-sevolver.timer"])
+	}
 }
 
 func TestStreamLogsBuildsExpectedJournalctlArgs(t *testing.T) {

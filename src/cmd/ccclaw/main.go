@@ -57,6 +57,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&envFile, "env-file", defaultEnvFilePath(), "固定 .env 隐私配置文件路径")
 	rootCmd.PersistentFlags().StringVar(&runtimeLogLevel, "log-level", "", "临时覆盖运行态日志级别: debug|info|warning|error")
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
+	addArchiveCommand(rootCmd, &configPath)
+	addSevolverCommand(rootCmd, &configPath)
 
 	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
 		return app.NewRuntimeWithOptions(configPath, envFile, app.RuntimeOptions{
@@ -342,7 +344,7 @@ func newRootCmd() *cobra.Command {
 		},
 	})
 	schedulerLogsCmd := &cobra.Command{
-		Use:   "logs [all|ingest|run|patrol|journal]",
+		Use:   "logs [all|ingest|run|patrol|journal|archive|sevolver]",
 		Short: "查看或追随 ccclaw user systemd 服务日志",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

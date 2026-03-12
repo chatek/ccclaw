@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/41490/ccclaw/internal/adapters/storage"
 	"github.com/41490/ccclaw/internal/config"
+	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/scheduler"
 )
 
@@ -372,6 +374,69 @@ func TestSchedulerLogsCommandAcceptsErrorAlias(t *testing.T) {
 	}
 }
 
+func TestArchiveCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	duckdbLog := filepath.Join(dir, "duckdb.log")
+	appDir := filepath.Join(dir, "app")
+	stateDB := filepath.Join(appDir, "var", "state.db")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeDuckDB(t, filepath.Join(fakeBin, "duckdb"), duckdbLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_DUCKDB_LOG", duckdbLog)
+
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().AddDate(0, 0, -10).UTC()
+	if err := store.AppendEventAt("task-archive", core.EventCreated, "{}", oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     "task-archive",
+		SessionID:  "sess-archive",
+		Usage:      core.TokenUsage{InputTokens: 10, OutputTokens: 2},
+		CostUSD:    0.1,
+		RecordedAt: oldTime,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "archive"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 archive 失败: %v", err)
+	}
+	if !strings.Contains(out.String(), "archive complete") {
+		t.Fatalf("unexpected archive output: %q", out.String())
+	}
+	archiveDir := filepath.Join(appDir, "var", "archive")
+	for _, name := range []string{"events", "token"} {
+		matches, err := filepath.Glob(filepath.Join(archiveDir, name+"-*.parquet"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 1 {
+			t.Fatalf("expected one parquet for %s, got %d", name, len(matches))
+		}
+	}
+}
+
 func TestRunCommandLogLevelOverride(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -542,6 +607,8 @@ func TestSchedulerUseSystemdCommand(t *testing.T) {
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.service",
 		"ccclaw-journal.timer",
+		"ccclaw-archive.service",
+		"ccclaw-archive.timer",
 	} {
 		if err := os.WriteFile(filepath.Join(sourceDir, name), []byte("[Unit]\nDescription=test\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -749,6 +816,37 @@ log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
 printf '%s\n' "$*" >> "$log_file"
 printf 'disabled\n' >&2
 exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeDuckDB(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_DUCKDB_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+sql=""
+while (($#)); do
+  case "$1" in
+    -c)
+      shift
+      sql="${1:-}"
+      ;;
+  esac
+  shift || true
+done
+if [[ "$sql" =~ TO\ \'([^\']+)\' ]]; then
+  target="${BASH_REMATCH[1]}"
+  mkdir -p "$(dirname "$target")"
+  printf 'parquet\n' > "$target"
+fi
+printf 'ok\n'
 `
 	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
 		t.Fatal(err)

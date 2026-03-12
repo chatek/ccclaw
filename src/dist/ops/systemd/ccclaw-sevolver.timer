@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ccclaw sevolver on schedule (user)
+
+[Timer]
+OnCalendar=*-*-* 22:00:00 Asia/Shanghai
+Persistent=true
+Unit=ccclaw-sevolver.service
+
+[Install]
+WantedBy=timers.target

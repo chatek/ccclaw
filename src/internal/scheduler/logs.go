@@ -380,6 +380,8 @@ func managedLogUnits(scope string) ([]string, error) {
 			"ccclaw-run.service",
 			"ccclaw-patrol.service",
 			"ccclaw-journal.service",
+			"ccclaw-archive.service",
+			"ccclaw-sevolver.service",
 		}, nil
 	case "ingest":
 		return []string{"ccclaw-ingest.service"}, nil
@@ -389,7 +391,11 @@ func managedLogUnits(scope string) ([]string, error) {
 		return []string{"ccclaw-patrol.service"}, nil
 	case "journal":
 		return []string{"ccclaw-journal.service"}, nil
+	case "archive":
+		return []string{"ccclaw-archive.service"}, nil
+	case "sevolver":
+		return []string{"ccclaw-sevolver.service"}, nil
 	default:
-		return nil, fmt.Errorf("未知日志范围: %s (允许值: all|ingest|run|patrol|journal)", scope)
+		return nil, fmt.Errorf("未知日志范围: %s (允许值: all|ingest|run|patrol|journal|archive|sevolver)", scope)
 	}
 }

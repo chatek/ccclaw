@@ -23,12 +23,14 @@
   - `ccclaw-run.timer`
   - `ccclaw-patrol.timer`
   - `ccclaw-journal.timer`
+  - `ccclaw-archive.timer`
+  - `ccclaw-sevolver.timer`
 - 若当前会话可直连 user bus，安装与升级会自动执行 `daemon-reload` 并启用/重启这些 timer
 - 若当前会话无法直连 user bus，请在登录会话中手工执行：
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
 ```
 
 ## 日志观察

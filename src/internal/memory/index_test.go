@@ -79,3 +79,46 @@ func TestBuildFallsBackToBodySummaryWithoutFrontmatter(t *testing.T) {
 		t.Fatalf("unexpected summary: %#v", matches[0])
 	}
 }
+
+func TestBuildExcludesDeprecatedSkills(t *testing.T) {
+	root := t.TempDir()
+	activePath := filepath.Join(root, "skills", "L1", "foo", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(activePath), 0o755); err != nil {
+		t.Fatalf("创建活动 skill 目录失败: %v", err)
+	}
+	if err := os.WriteFile(activePath, []byte(`---
+name: foo
+description: 活动 skill
+keywords: [foo]
+---
+# foo
+`), 0o644); err != nil {
+		t.Fatalf("写入活动 skill 失败: %v", err)
+	}
+
+	deprecatedPath := filepath.Join(root, "skills", "deprecated", "L1", "old", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(deprecatedPath), 0o755); err != nil {
+		t.Fatalf("创建 deprecated skill 目录失败: %v", err)
+	}
+	if err := os.WriteFile(deprecatedPath, []byte(`---
+name: old
+description: 已废弃 skill
+keywords: [old]
+---
+# old
+`), 0o644); err != nil {
+		t.Fatalf("写入 deprecated skill 失败: %v", err)
+	}
+
+	idx, err := Build(root)
+	if err != nil {
+		t.Fatalf("构建索引失败: %v", err)
+	}
+
+	if hits := idx.Match([]string{"foo"}, 10); len(hits) != 1 {
+		t.Fatalf("expected active skill to remain indexed, got %#v", hits)
+	}
+	if hits := idx.Match([]string{"old"}, 10); len(hits) != 0 {
+		t.Fatalf("deprecated skills should be excluded, got %#v", hits)
+	}
+}

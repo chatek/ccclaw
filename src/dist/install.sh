@@ -1765,16 +1765,16 @@ activate_user_systemd_timers() {
     SYSTEMD_ACTIVATION_STATUS="planned:auto"
     SYSTEMD_ACTIVATION_REASON="模拟模式：将自动执行 daemon-reload + enable --now"
     log "[simulate] systemctl --user daemon-reload"
-    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
+    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
     if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
+      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
     fi
     return 0
   fi
   systemctl --user daemon-reload
-  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer
+  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
   if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer
+    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
     SYSTEMD_ACTIVATION_STATUS="restarted"
     SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit"
     return 0
@@ -2038,7 +2038,7 @@ print_summary() {
       else
         scheduler_step_6="6. 当前会话未直连 user bus；请在登录会话中手工启用用户定时器:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       fi
       scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
@@ -2051,7 +2051,7 @@ print_summary() {
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       ;;
     none|*)
       scheduler_step_6="6. 当前调度模式为 none；如需受控 cron，可执行:
@@ -2059,7 +2059,7 @@ print_summary() {
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       ;;
   esac
   cat <<MSG

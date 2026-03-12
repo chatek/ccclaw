@@ -57,6 +57,15 @@ assert_eq() {
   [[ "$expected" == "$actual" ]] || fail "$message: expected=$expected actual=$actual"
 }
 
+assert_cmd_eq() {
+  local expected="$1"
+  local message="$2"
+  shift 2
+  local actual
+  actual="$("$@")"
+  [[ "$expected" == "$actual" ]] || fail "$message: expected=$expected actual=$actual"
+}
+
 run_case() {
   local logfile="$1"
   shift
@@ -137,6 +146,14 @@ printf 'unexpected fake claude args: %s\n' "$*" >&2
 exit 99
 SCRIPT
   chmod 755 "$dir/claude"
+}
+
+test_version_script_timezone() {
+  local expected
+  expected="$(TZ=Asia/Shanghai date '+%y.%m.%d.%H%M')"
+  assert_cmd_eq "$expected" "版本号脚本应固定使用北京时间" env TZ=UTC "$ROOT_DIR/ops/scripts/version.sh"
+  assert_cmd_eq "$expected" "dist 同步后的版本号脚本应固定使用北京时间" env TZ=America/New_York "$ROOT_DIR/dist/ops/scripts/version.sh"
+  log "已通过: 版本号脚本固定使用北京时间"
 }
 
 create_fake_gh() {
@@ -359,6 +376,10 @@ test_first_install_and_idempotent_reinstall() {
   assert_file_missing "$xdg/systemd/user/ccclaw-patrol.timer"
   assert_file_missing "$xdg/systemd/user/ccclaw-journal.service"
   assert_file_missing "$xdg/systemd/user/ccclaw-journal.timer"
+  assert_file_missing "$xdg/systemd/user/ccclaw-archive.service"
+  assert_file_missing "$xdg/systemd/user/ccclaw-archive.timer"
+  assert_file_missing "$xdg/systemd/user/ccclaw-sevolver.service"
+  assert_file_missing "$xdg/systemd/user/ccclaw-sevolver.timer"
   assert_contains "$config_file" 'repo = "41490/task-local"'
   assert_contains "$config_file" "local_path = \"$task_repo\""
   assert_contains "$config_file" 'default_target = "41490/task-local"'
@@ -518,7 +539,7 @@ test_systemd_install_auto_enable_and_restart() {
   assert_contains "$config_file" '[scheduler.timers]'
   assert_contains "$config_file" '[scheduler.logs]'
   assert_contains "$systemctl_log" '--user daemon-reload'
-  assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
+  assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 
   run_case "$log2" \
     env \
@@ -538,7 +559,7 @@ test_systemd_install_auto_enable_and_restart() {
       --task-repo "41490/task-local" \
       --scheduler systemd
 
-  assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer'
+  assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 }
 
 test_merge_managed_markdown_preserves_skill_meta_fields() {
@@ -1040,6 +1061,7 @@ EOF
 
 main() {
   prepare_dist
+  test_version_script_timezone
   log "开始执行 install.sh 回归测试"
   test_first_install_and_idempotent_reinstall
   log "已通过: 首装 + 幂等重装"

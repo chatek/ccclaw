@@ -47,13 +47,7 @@ func VerifyChain(path string) error {
 	}
 	defer file.Close()
 
-	expectedGenesis := ""
-	if matches := weeklyFilePattern.FindStringSubmatch(filepath.Base(path)); len(matches) == 3 {
-		var year, week int
-		if _, err := fmt.Sscanf(matches[0], "-%d-W%d.jsonl", &year, &week); err == nil {
-			expectedGenesis = GenesisHash(year, week)
-		}
-	}
+	expectedGenesis, _ := genesisFromWeeklyFile(path)
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -100,4 +94,68 @@ func VerifyChain(path string) error {
 		return fmt.Errorf("读取事件流失败: %w", err)
 	}
 	return nil
+}
+
+func VerifyTokenChain(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("打开 token 流失败: %w", err)
+	}
+	defer file.Close()
+
+	expectedGenesis, _ := genesisFromWeeklyFile(path)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var prevHash string
+	var lastSeq int64
+	for scanner.Scan() {
+		if len(scanner.Bytes()) == 0 {
+			continue
+		}
+		var record tokenJSONRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return fmt.Errorf("解析 token 记录失败: %w", err)
+		}
+		if record.Seq <= 0 {
+			return fmt.Errorf("token 序号无效: %d", record.Seq)
+		}
+		if lastSeq > 0 && record.Seq <= lastSeq {
+			return fmt.Errorf("token 序号未递增: %d <= %d", record.Seq, lastSeq)
+		}
+		wantPrev := prevHash
+		if wantPrev == "" && expectedGenesis != "" {
+			wantPrev = expectedGenesis
+		}
+		if wantPrev != "" && record.PrevHash != wantPrev {
+			return fmt.Errorf("token 链前向哈希不匹配: seq=%d got=%q want=%q", record.Seq, record.PrevHash, wantPrev)
+		}
+		hash, err := ComputeTokenHash(record, record.PrevHash)
+		if err != nil {
+			return err
+		}
+		if record.Hash != hash {
+			return fmt.Errorf("token 链哈希不匹配: seq=%d", record.Seq)
+		}
+		prevHash = record.Hash
+		lastSeq = record.Seq
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("读取 token 流失败: %w", err)
+	}
+	return nil
+}
+
+func genesisFromWeeklyFile(path string) (string, bool) {
+	matches := weeklyFilePattern.FindStringSubmatch(filepath.Base(path))
+	if len(matches) != 3 {
+		return "", false
+	}
+	var year, week int
+	if _, err := fmt.Sscanf(matches[1], "%d", &year); err != nil {
+		return "", false
+	}
+	if _, err := fmt.Sscanf(matches[2], "%d", &week); err != nil {
+		return "", false
+	}
+	return GenesisHash(year, week), true
 }

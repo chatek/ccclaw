@@ -18,6 +18,8 @@ func ManagedSystemdTimers() []string {
 		"ccclaw-run.timer",
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.timer",
+		"ccclaw-archive.timer",
+		"ccclaw-sevolver.timer",
 	}
 }
 
@@ -31,6 +33,10 @@ func managedSystemdUnits() []string {
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.service",
 		"ccclaw-journal.timer",
+		"ccclaw-archive.service",
+		"ccclaw-archive.timer",
+		"ccclaw-sevolver.service",
+		"ccclaw-sevolver.timer",
 	}
 }
 

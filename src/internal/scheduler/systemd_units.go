@@ -19,6 +19,11 @@ type TimerDefinition struct {
 	CalendarWithTZ string
 }
 
+const (
+	archiveCalendar  = "Mon 02:00:00"
+	sevolverCalendar = "*-*-* 22:00:00"
+)
+
 func ManagedTimerDefinitions(cfg *config.Config) ([]TimerDefinition, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("配置不能为空")
@@ -64,6 +69,24 @@ func ManagedTimerDefinitions(cfg *config.Config) ([]TimerDefinition, error) {
 			ServiceDesc:    "ccclaw journal service",
 			TimerDesc:      "Run ccclaw journal on schedule",
 			Calendar:       timers.Journal,
+		},
+		{
+			Key:            "archive",
+			TimerUnit:      "ccclaw-archive.timer",
+			ServiceUnit:    "ccclaw-archive.service",
+			ServiceCommand: "archive",
+			ServiceDesc:    "ccclaw archive service",
+			TimerDesc:      "Run ccclaw weekly archive on schedule",
+			Calendar:       archiveCalendar,
+		},
+		{
+			Key:            "sevolver",
+			TimerUnit:      "ccclaw-sevolver.timer",
+			ServiceUnit:    "ccclaw-sevolver.service",
+			ServiceCommand: "sevolver",
+			ServiceDesc:    "ccclaw sevolver service",
+			TimerDesc:      "Run ccclaw daily sevolver on schedule",
+			Calendar:       sevolverCalendar,
 		},
 	}
 	for idx := range defs {
