@@ -157,6 +157,52 @@ minimum_permission = "maintain"
 	if got, want := cfg.Scheduler.Logs.ArchiveDir, "/tmp/ccclaw-app/log/scheduler"; got != want {
 		t.Fatalf("unexpected scheduler archive dir: got=%q want=%q", got, want)
 	}
+	if got, want := cfg.Scheduler.Logs.RetentionDays, defaultSchedulerLogRetentionDays; got != want {
+		t.Fatalf("unexpected scheduler retention days: got=%d want=%d", got, want)
+	}
+	if got, want := cfg.Scheduler.Logs.MaxFiles, defaultSchedulerLogMaxFiles; got != want {
+		t.Fatalf("unexpected scheduler max files: got=%d want=%d", got, want)
+	}
+	if got, want := cfg.Scheduler.Logs.Compress, defaultSchedulerLogCompress; got != want {
+		t.Fatalf("unexpected scheduler compress default: got=%t want=%t", got, want)
+	}
+}
+
+func TestLoadConfigPreservesExplicitSchedulerLogCompressFalse(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[scheduler.logs]
+compress = false
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scheduler.Logs.Compress {
+		t.Fatal("expected explicit compress=false to be preserved")
+	}
 }
 
 func TestLoadConfigRejectsLegacyApprovalCommandField(t *testing.T) {
@@ -253,6 +299,9 @@ kb_path = "/opt/data/9527/kb"
 		`[scheduler.timers]`,
 		`[scheduler.logs]`,
 		`archive_dir = "/tmp/ccclaw-app/log/scheduler"`,
+		`retention_days = 30`,
+		`max_files = 200`,
+		`compress = true`,
 		`minimum_permission = "admin"`,
 		`reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]`,
 	} {
@@ -313,8 +362,11 @@ func TestMigrateNoopForCurrentConfig(t *testing.T) {
 				Journal: "*-*-* 23:50:00",
 			},
 			Logs: SchedulerLogsConfig{
-				Level:      "info",
-				ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+				Level:         "info",
+				ArchiveDir:    "/tmp/ccclaw-app/log/scheduler",
+				RetentionDays: defaultSchedulerLogRetentionDays,
+				MaxFiles:      defaultSchedulerLogMaxFiles,
+				Compress:      defaultSchedulerLogCompress,
 			},
 		},
 		Approval: ApprovalConfig{
@@ -432,8 +484,11 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 				Journal: "*-*-* 23:50:00",
 			},
 			Logs: SchedulerLogsConfig{
-				Level:      "info",
-				ArchiveDir: "/tmp/app/log/scheduler",
+				Level:         "info",
+				ArchiveDir:    "/tmp/app/log/scheduler",
+				RetentionDays: defaultSchedulerLogRetentionDays,
+				MaxFiles:      defaultSchedulerLogMaxFiles,
+				Compress:      defaultSchedulerLogCompress,
 			},
 		},
 		Approval: ApprovalConfig{
@@ -490,8 +545,11 @@ reject_words = ["reject"]
 			Journal: "*-*-* 01:01:42",
 		},
 		Logs: SchedulerLogsConfig{
-			Level:      "warning",
-			ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+			Level:         "warning",
+			ArchiveDir:    "/tmp/ccclaw-app/log/scheduler",
+			RetentionDays: defaultSchedulerLogRetentionDays,
+			MaxFiles:      defaultSchedulerLogMaxFiles,
+			Compress:      defaultSchedulerLogCompress,
 		},
 	})
 	if err != nil {
@@ -512,6 +570,9 @@ reject_words = ["reject"]
 		`[scheduler.logs]`,
 		`level = "warning"`,
 		`archive_dir = "/tmp/ccclaw-app/log/scheduler"`,
+		`retention_days = 30`,
+		`max_files = 200`,
+		`compress = true`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)

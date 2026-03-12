@@ -72,6 +72,7 @@ bash install.sh --remove-cron
 
 - `[scheduler.logs].level` 会同时影响 `ingest/run/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤
 - 手工排障时可用 `--log-level debug` 临时放大本次命令日志，不改写配置
+- `[scheduler.logs].retention_days`、`max_files`、`compress` 只治理带 ccclaw 归档头的受管文件，不影响归档目录里的人工文件
 
 ## Shell 集成
 

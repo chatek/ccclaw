@@ -54,6 +54,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 
 - 归档目录默认读取 `scheduler.logs.archive_dir`
 - 默认级别读取 `scheduler.logs.level`
+- 默认保留策略读取 `scheduler.logs.retention_days`、`max_files`、`compress`
 
 ## 配置说明
 
@@ -62,7 +63,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 - `github.control_repo` 固定为官方控制仓库 `41490/ccclaw`
 - `github.limit` 表示 ingest 每轮拉取匹配标签的 open issues 上限，不是并发数
 - `scheduler.calendar_timezone` 与 `[scheduler.timers]` 只影响 systemd timer 生成
-- `[scheduler.logs]` 控制 `scheduler logs` 的默认级别过滤与归档目录
+- `[scheduler.logs]` 控制 `scheduler logs` 的默认级别过滤、归档目录与受管保留策略
 
 ## 升级约定
 

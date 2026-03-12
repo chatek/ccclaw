@@ -369,6 +369,11 @@ func newRootCmd() *cobra.Command {
 				Lines:       schedulerLogsLines,
 				Level:       level,
 				ArchivePath: archivePath,
+				ArchivePolicy: scheduler.LogArchivePolicy{
+					RetentionDays: cfg.Scheduler.Logs.RetentionDays,
+					MaxFiles:      cfg.Scheduler.Logs.MaxFiles,
+					Compress:      cfg.Scheduler.Logs.Compress,
+				},
 			}, cmd.OutOrStdout(), cmd.ErrOrStderr()); err != nil {
 				return err
 			}

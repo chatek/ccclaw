@@ -450,6 +450,7 @@ func TestSchedulerDoctorCommand(t *testing.T) {
 	}
 	text := out.String()
 	if !strings.Contains(text, "[ OK ] 调度配置:") ||
+		!strings.Contains(text, "[ OK ] 日志归档策略:") ||
 		!strings.Contains(text, "[ OK ] user bus:") ||
 		!strings.Contains(text, "[ OK ] 托管 timers:") {
 		t.Fatalf("unexpected output: %q", text)
@@ -680,8 +681,11 @@ func (f *schedulerConfigFixture) toConfig() *config.Config {
 			Mode:           f.Mode,
 			SystemdUserDir: f.SystemdDir,
 			Logs: config.SchedulerLogsConfig{
-				Level:      "info",
-				ArchiveDir: filepath.Join(f.AppDir, "log", "scheduler"),
+				Level:         "info",
+				ArchiveDir:    filepath.Join(f.AppDir, "log", "scheduler"),
+				RetentionDays: 30,
+				MaxFiles:      200,
+				Compress:      true,
 			},
 		},
 		Approval: config.ApprovalConfig{

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/41490/ccclaw/internal/config"
 )
@@ -32,8 +33,11 @@ func testSystemdConfig() *config.Config {
 				Journal: "*-*-* 01:01:42",
 			},
 			Logs: config.SchedulerLogsConfig{
-				Level:      "info",
-				ArchiveDir: "/tmp/ccclaw-app/log/scheduler",
+				Level:         "info",
+				ArchiveDir:    "/tmp/ccclaw-app/log/scheduler",
+				RetentionDays: 30,
+				MaxFiles:      200,
+				Compress:      true,
 			},
 		},
 	}
@@ -128,5 +132,79 @@ printf 'line-1\nline-2\n'
 	text := string(archivePayload)
 	if !strings.Contains(text, "# ccclaw scheduler logs archive") || !strings.Contains(text, "line-1") {
 		t.Fatalf("unexpected archive payload: %q", text)
+	}
+}
+
+func TestApplyLogArchivePolicyCompressesAndTrimsManagedFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	currentPath := BuildLogArchivePath(dir, "run", now)
+	createManagedArchiveFixture(t, currentPath, now, "current\n")
+	keepPath := filepath.Join(dir, "260311_010203_run.log")
+	createManagedArchiveFixture(t, keepPath, now.Add(-24*time.Hour), "keep\n")
+	trimPath := filepath.Join(dir, "260310_010203_run.log")
+	createManagedArchiveFixture(t, trimPath, now.Add(-48*time.Hour), "trim\n")
+	expiredPath := filepath.Join(dir, "260101_010203_run.log")
+	createManagedArchiveFixture(t, expiredPath, now.Add(-40*24*time.Hour), "expired\n")
+	manualPath := filepath.Join(dir, "260309_010203_run.log")
+	if err := os.WriteFile(manualPath, []byte("manual\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyLogArchivePolicy(dir, currentPath, LogArchivePolicy{
+		RetentionDays: 30,
+		MaxFiles:      2,
+		Compress:      true,
+	}); err != nil {
+		t.Fatalf("apply archive policy failed: %v", err)
+	}
+	if _, err := os.Stat(currentPath); err != nil {
+		t.Fatalf("expected current archive to stay uncompressed: %v", err)
+	}
+	if _, err := os.Stat(keepPath + ".gz"); err != nil {
+		t.Fatalf("expected keep archive to be compressed: %v", err)
+	}
+	if _, err := os.Stat(trimPath); !os.IsNotExist(err) {
+		t.Fatalf("expected trimmed archive to be deleted, got err=%v", err)
+	}
+	if _, err := os.Stat(trimPath + ".gz"); !os.IsNotExist(err) {
+		t.Fatalf("expected trimmed compressed archive to be deleted, got err=%v", err)
+	}
+	if _, err := os.Stat(expiredPath); !os.IsNotExist(err) {
+		t.Fatalf("expected expired archive to be deleted, got err=%v", err)
+	}
+	if _, err := os.Stat(expiredPath + ".gz"); !os.IsNotExist(err) {
+		t.Fatalf("expected expired compressed archive to be deleted, got err=%v", err)
+	}
+	if _, err := os.Stat(manualPath); err != nil {
+		t.Fatalf("expected manual file to stay untouched: %v", err)
+	}
+	files, err := listManagedArchiveFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 managed archives after trimming, got %d", len(files))
+	}
+}
+
+func createManagedArchiveFixture(t *testing.T, path string, modTime time.Time, body string) {
+	t.Helper()
+
+	handle, err := openLogArchive(LogsOptions{
+		Scope:       "run",
+		ArchivePath: path,
+	})
+	if err != nil {
+		t.Fatalf("create archive fixture failed: %v", err)
+	}
+	if _, err := handle.WriteString(body); err != nil {
+		_ = handle.Close()
+		t.Fatalf("write archive fixture failed: %v", err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("close archive fixture failed: %v", err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("set archive fixture time failed: %v", err)
 	}
 }

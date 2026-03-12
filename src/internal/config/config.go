@@ -18,6 +18,13 @@ const OfficialControlRepo = "41490/ccclaw"
 
 const legacyApprovalMigrationHint = "检测到废弃配置 approval.command；请执行 `ccclaw config migrate`，或兼容使用 `ccclaw config migrate-approval`"
 
+const (
+	defaultSchedulerLogLevel         = "info"
+	defaultSchedulerLogRetentionDays = 30
+	defaultSchedulerLogMaxFiles      = 200
+	defaultSchedulerLogCompress      = true
+)
+
 type Config struct {
 	DefaultTarget string          `mapstructure:"default_target" toml:"default_target"`
 	GitHub        GitHubConfig    `mapstructure:"github" toml:"github"`
@@ -66,8 +73,11 @@ type SchedulerTimersConfig struct {
 }
 
 type SchedulerLogsConfig struct {
-	Level      string `mapstructure:"level" toml:"level"`
-	ArchiveDir string `mapstructure:"archive_dir" toml:"archive_dir"`
+	Level         string `mapstructure:"level" toml:"level"`
+	ArchiveDir    string `mapstructure:"archive_dir" toml:"archive_dir"`
+	RetentionDays int    `mapstructure:"retention_days" toml:"retention_days"`
+	MaxFiles      int    `mapstructure:"max_files" toml:"max_files"`
+	Compress      bool   `mapstructure:"compress" toml:"compress"`
 }
 
 type ApprovalConfig struct {
@@ -114,7 +124,10 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("scheduler.timers.run", defaultSchedulerTimers().Run)
 	v.SetDefault("scheduler.timers.patrol", defaultSchedulerTimers().Patrol)
 	v.SetDefault("scheduler.timers.journal", defaultSchedulerTimers().Journal)
-	v.SetDefault("scheduler.logs.level", "info")
+	v.SetDefault("scheduler.logs.level", defaultSchedulerLogLevel)
+	v.SetDefault("scheduler.logs.retention_days", defaultSchedulerLogRetentionDays)
+	v.SetDefault("scheduler.logs.max_files", defaultSchedulerLogMaxFiles)
+	v.SetDefault("scheduler.logs.compress", defaultSchedulerLogCompress)
 	v.SetDefault("approval.words", defaultApprovalWords())
 	v.SetDefault("approval.reject_words", defaultRejectWords())
 	v.SetDefault("approval.minimum_permission", "maintain")
@@ -127,6 +140,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+	if !v.IsSet("scheduler.logs.compress") {
+		cfg.Scheduler.Logs.Compress = defaultSchedulerLogCompress
 	}
 	cfg.NormalizePaths()
 
@@ -218,6 +234,12 @@ func (cfg *Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Scheduler.Logs.ArchiveDir) == "" {
 		return errors.New("scheduler.logs.archive_dir 不能为空")
+	}
+	if cfg.Scheduler.Logs.RetentionDays <= 0 {
+		return errors.New("scheduler.logs.retention_days 必须大于 0")
+	}
+	if cfg.Scheduler.Logs.MaxFiles <= 0 {
+		return errors.New("scheduler.logs.max_files 必须大于 0")
 	}
 	if len(normalizeApprovalWords(cfg.Approval.Words)) == 0 {
 		return errors.New("approval.words 至少需要一个批准词")
@@ -606,7 +628,7 @@ func normalizeSchedulerLogs(logs *SchedulerLogsConfig, defaultArchiveRoot string
 	}
 	logs.Level = strings.ToLower(strings.TrimSpace(logs.Level))
 	if logs.Level == "" {
-		logs.Level = "info"
+		logs.Level = defaultSchedulerLogLevel
 	}
 	logs.ArchiveDir = ExpandPath(strings.TrimSpace(logs.ArchiveDir))
 	if logs.ArchiveDir == "" {
@@ -615,6 +637,12 @@ func normalizeSchedulerLogs(logs *SchedulerLogsConfig, defaultArchiveRoot string
 			base = ExpandPath("~/.ccclaw/log")
 		}
 		logs.ArchiveDir = filepath.Join(base, "scheduler")
+	}
+	if logs.RetentionDays <= 0 {
+		logs.RetentionDays = defaultSchedulerLogRetentionDays
+	}
+	if logs.MaxFiles <= 0 {
+		logs.MaxFiles = defaultSchedulerLogMaxFiles
 	}
 }
 
@@ -673,6 +701,12 @@ func validateSchedulerConfig(scheduler SchedulerConfig) error {
 	}
 	if strings.TrimSpace(scheduler.Logs.ArchiveDir) == "" {
 		return errors.New("scheduler.logs.archive_dir 不能为空")
+	}
+	if scheduler.Logs.RetentionDays <= 0 {
+		return errors.New("scheduler.logs.retention_days 必须大于 0")
+	}
+	if scheduler.Logs.MaxFiles <= 0 {
+		return errors.New("scheduler.logs.max_files 必须大于 0")
 	}
 	return nil
 }
@@ -862,9 +896,15 @@ func renderSchedulerSection(scheduler SchedulerConfig) []string {
 		"# - 运行态统一归一为 debug|info|warning|error；兼容历史别名 emerg|alert|crit|err|notice",
 		"# - `error` 在 journalctl 查询时会自动映射为 `err`",
 		"# - archive_dir: `ccclaw scheduler logs --archive` 默认归档目录",
+		"# - retention_days: 只清理带 ccclaw 归档头的受管文件；超过 N 天的旧归档会删除",
+		"# - max_files: 只统计受管归档文件；超过上限时删除最旧文件，不影响人工文件",
+		"# - compress: 新归档保留明文，历史受管 `.log` 自动压缩为 `.log.gz`",
 		"[scheduler.logs]",
 		fmt.Sprintf("level = %q", scheduler.Logs.Level),
 		fmt.Sprintf("archive_dir = %q", scheduler.Logs.ArchiveDir),
+		fmt.Sprintf("retention_days = %d", scheduler.Logs.RetentionDays),
+		fmt.Sprintf("max_files = %d", scheduler.Logs.MaxFiles),
+		fmt.Sprintf("compress = %t", scheduler.Logs.Compress),
 		"",
 	}
 }

@@ -718,7 +718,7 @@ CLI 约定：
 - 知识仓库
 - 路径拓扑
 - 执行器命令
-- 运行态日志级别与调度日志归档目录
+- 运行态日志级别与调度日志归档策略
 - 审批门禁
 - `default_target`
 - `targets`
@@ -728,6 +728,8 @@ CLI 约定：
 - `[scheduler.logs].level` 同时控制 `ingest/run/patrol/journal` 四类入口写入 `stderr`/journald 的日志阈值，也是 `ccclaw scheduler logs` 的默认查看过滤
 - 运行态统一按 `debug|info|warning|error` 四级收口；历史别名 `notice|err|crit|alert|emerg` 继续兼容，内部会归一到四级语义
 - `ccclaw scheduler logs --level ...` 是查看过滤；`ccclaw --log-level ... <command>` 是本次命令的临时运行态覆盖，不会改写配置文件
+- `[scheduler.logs].retention_days` 与 `max_files` 只作用于带 ccclaw 归档头的受管文件，不会清理归档目录中的人工文件
+- `[scheduler.logs].compress = true` 时，最新一次归档保留明文，历史受管 `.log` 会自动压缩为 `.log.gz`
 
 ## 日常使用流程
 

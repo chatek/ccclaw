@@ -93,6 +93,12 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		Detail: archiveDetail,
 		Err:    archiveErr,
 	})
+	archivePolicyDetail, archivePolicyErr := inspectArchivePolicy(cfg.Scheduler.Logs)
+	checks = append(checks, doctorCheck{
+		Name:   "日志归档策略",
+		Detail: archivePolicyDetail,
+		Err:    archivePolicyErr,
+	})
 
 	if needsSystemdDoctor(probe) {
 		checks = append(checks, doctorCheck{
@@ -177,6 +183,26 @@ func inspectArchiveDir(path string) (string, error) {
 	default:
 		return path, fmt.Errorf("读取 archive_dir 失败: %w", err)
 	}
+}
+
+func inspectArchivePolicy(logs config.SchedulerLogsConfig) (string, error) {
+	detail := fmt.Sprintf(
+		"retention_days=%d max_files=%d compress=%t",
+		logs.RetentionDays,
+		logs.MaxFiles,
+		logs.Compress,
+	)
+	files, err := listManagedArchiveFiles(logs.ArchiveDir)
+	if err != nil {
+		return detail, fmt.Errorf("扫描受管归档失败: %w", err)
+	}
+	compressed := 0
+	for _, file := range files {
+		if file.Compressed {
+			compressed++
+		}
+	}
+	return fmt.Sprintf("%s managed_files=%d compressed=%d", detail, len(files), compressed), nil
 }
 
 func inspectUserBus(ctx context.Context, cfg *config.Config) doctorCheck {
