@@ -664,6 +664,10 @@ ccclaw journal --date 2026-03-10
 # 调度器
 ccclaw scheduler status         # 查看调度后端状态
 ccclaw scheduler doctor         # 查看调度与日志运维诊断
+ccclaw scheduler timers         # 默认窄视图，只保留关键列
+ccclaw scheduler timers --wide  # 完整视图，显示 CAL_RAW/CAL_CFG 与双时区时间
+ccclaw scheduler timers --raw   # 原始字段视图，便于人工排障
+ccclaw scheduler timers --json  # 结构化输出，便于脚本消费
 ccclaw scheduler logs run       # 查看 run service 日志
 ccclaw scheduler logs run --level error  # 仅查看 error/err 级别日志
 ccclaw scheduler enable-cron    # 启用受控 cron
@@ -683,6 +687,13 @@ CLI 约定：
 - 无参数：输出帮助
 - `-h | --help`：输出帮助
 - `-V | --version`：输出版本
+
+调度排障建议路径：
+
+1. 先看 `ccclaw scheduler status`，确认请求模式与当前生效模式是否一致
+2. 再看 `ccclaw scheduler doctor`，确认 linger、user bus、unit 漂移、timer/service 最近状态
+3. 最后按需要选择 `ccclaw scheduler timers --wide|--raw|--json`
+4. 若 doctor 提示 service 异常，再执行 `ccclaw scheduler logs <scope>` 或 `journalctl --user -u <service>`
 
 ## 配置文件
 

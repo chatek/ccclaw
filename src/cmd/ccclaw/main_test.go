@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -275,11 +276,135 @@ func TestSchedulerTimersCommand(t *testing.T) {
 		t.Fatalf("执行 scheduler timers 失败: %v", err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "配置时区: Asia/Shanghai") ||
+	if !strings.Contains(text, "视图: human") ||
+		!strings.Contains(text, "配置时区: Asia/Shanghai") ||
+		!strings.Contains(text, "TASK") ||
+		!strings.Contains(text, "ingest") {
+		t.Fatalf("unexpected output: %q", text)
+	}
+	if strings.Contains(text, "CAL_RAW") || strings.Contains(text, "ccclaw-ingest.timer") {
+		t.Fatalf("default view should stay concise: %q", text)
+	}
+}
+
+func TestSchedulerTimersWideCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctlTimers(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "timers", "--wide"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler timers --wide 失败: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "视图: wide") ||
 		!strings.Contains(text, "CAL_RAW") ||
 		!strings.Contains(text, "*:0/5") ||
 		!strings.Contains(text, "ccclaw-ingest.timer") {
 		t.Fatalf("unexpected output: %q", text)
+	}
+}
+
+func TestSchedulerTimersRawCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctlTimers(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "timers", "--raw"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler timers --raw 失败: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "视图: raw") ||
+		!strings.Contains(text, "[ingest]") ||
+		!strings.Contains(text, "calendar_raw=*:0/5") ||
+		!strings.Contains(text, "timer_unit=ccclaw-ingest.timer") {
+		t.Fatalf("unexpected output: %q", text)
+	}
+}
+
+func TestSchedulerTimersJSONCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSystemctlTimers(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "timers", "--json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler timers --json 失败: %v", err)
+	}
+	var payload struct {
+		View  string `json:"view"`
+		Items []struct {
+			Task        string `json:"task"`
+			TimerUnit   string `json:"timer_unit"`
+			CalendarRaw string `json:"calendar_raw"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.View != "json" || len(payload.Items) == 0 || payload.Items[0].Task == "" {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if payload.Items[0].TimerUnit == "" || payload.Items[0].CalendarRaw == "" {
+		t.Fatalf("unexpected payload: %+v", payload.Items[0])
 	}
 }
 
@@ -498,10 +623,19 @@ func TestSchedulerDoctorCommand(t *testing.T) {
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if err := writeManagedUnitFixture(cfg); err != nil {
+		t.Fatalf("写入 managed unit fixture 失败: %v", err)
+	}
 	writeFakeSystemctlDoctor(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	writeFakeLoginctl(t, filepath.Join(fakeBin, "loginctl"), filepath.Join(dir, "loginctl.log"))
 	writeFakeJournalctl(t, filepath.Join(fakeBin, "journalctl"), filepath.Join(dir, "journalctl.log"))
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+	t.Setenv("CCCLAW_FAKE_LOGINCTL_LOG", filepath.Join(dir, "loginctl.log"))
 	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", filepath.Join(dir, "journalctl.log"))
 
 	cmd := newRootCmd()
@@ -515,9 +649,12 @@ func TestSchedulerDoctorCommand(t *testing.T) {
 	}
 	text := out.String()
 	if !strings.Contains(text, "[ OK ] 调度配置:") ||
+		!strings.Contains(text, "[ OK ] linger:") ||
+		!strings.Contains(text, "[ OK ] unit 漂移:") ||
 		!strings.Contains(text, "[ OK ] 日志归档策略:") ||
 		!strings.Contains(text, "[ OK ] user bus:") ||
-		!strings.Contains(text, "[ OK ] 托管 timers:") {
+		!strings.Contains(text, "[ OK ] 托管 timers:") ||
+		!strings.Contains(text, "[ OK ] 托管 services:") {
 		t.Fatalf("unexpected output: %q", text)
 	}
 }
@@ -906,6 +1043,18 @@ if [[ "${1:-}" == "--user" && "${2:-}" == "is-active" ]]; then
 fi
 if [[ "${1:-}" == "--user" && "${2:-}" == "show" ]]; then
   unit="${3:-}"
+  if [[ "$unit" == *.service ]]; then
+    cat <<EOF
+Id=${unit}
+ActiveState=inactive
+SubState=dead
+UnitFileState=static
+Result=success
+ExecMainCode=exited
+ExecMainStatus=0
+EOF
+    exit 0
+  fi
   cat <<EOF
 Id=${unit}
 ActiveState=active
@@ -918,6 +1067,30 @@ EOF
   exit 0
 fi
 printf 'unsupported systemctl args: %s\n' "$*" >&2
+exit 1
+`
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeLoginctl(t *testing.T, scriptPath, logPath string) {
+	t.Helper()
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_LOGINCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+if [[ "${1:-}" == "show-user" ]]; then
+  cat <<EOF
+Linger=yes
+State=active
+EOF
+  exit 0
+fi
+printf 'unsupported loginctl args: %s\n' "$*" >&2
 exit 1
 `
 	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
@@ -942,6 +1115,22 @@ printf 'ok\n'
 	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeManagedUnitFixture(cfg *config.Config) error {
+	if err := os.MkdirAll(cfg.Scheduler.SystemdUserDir, 0o755); err != nil {
+		return err
+	}
+	units, err := scheduler.GenerateSystemdUnitContents(cfg)
+	if err != nil {
+		return err
+	}
+	for name, content := range units {
+		if err := os.WriteFile(filepath.Join(cfg.Scheduler.SystemdUserDir, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TestParseStatsOptionsRejectsInvalidRange(t *testing.T) {

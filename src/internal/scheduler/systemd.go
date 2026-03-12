@@ -147,6 +147,8 @@ type TimerStatus struct {
 	NextConfigTZ   string
 	LastLocal      string
 	LastConfigTZ   string
+	HasNext        bool
+	HasLast        bool
 }
 
 func ListManagedTimers(ctx context.Context, cfg *config.Config) ([]TimerStatus, error) {
@@ -185,26 +187,43 @@ func ListManagedTimers(ctx context.Context, cfg *config.Config) ([]TimerStatus, 
 			NextConfigTZ:   formatTimerStamp(nextTime, location),
 			LastLocal:      formatTimerStamp(lastTime, time.Local),
 			LastConfigTZ:   formatTimerStamp(lastTime, location),
+			HasNext:        !nextTime.IsZero(),
+			HasLast:        !lastTime.IsZero(),
 		})
 	}
 	return items, nil
 }
 
 func ShowTimerProperties(ctx context.Context, timer string) (map[string]string, error) {
-	args := []string{"show", timer, "-p", "Id", "-p", "ActiveState", "-p", "UnitFileState", "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec", "-p", "Result", "-p", "Triggers"}
+	return showUnitProperties(ctx, timer,
+		"Id",
+		"ActiveState",
+		"UnitFileState",
+		"NextElapseUSecRealtime",
+		"LastTriggerUSec",
+		"Result",
+		"Triggers",
+	)
+}
+
+func showUnitProperties(ctx context.Context, unit string, propertyNames ...string) (map[string]string, error) {
+	args := []string{"show", unit}
+	for _, property := range propertyNames {
+		args = append(args, "-p", property)
+	}
 	output, err := runSystemctlUser(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
-	properties := map[string]string{}
+	props := map[string]string{}
 	for _, line := range strings.Split(output, "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		properties[parts[0]] = strings.TrimSpace(parts[1])
+		props[parts[0]] = strings.TrimSpace(parts[1])
 	}
-	return properties, nil
+	return props, nil
 }
 
 func parseSystemdTimestamp(value string) (time.Time, error) {

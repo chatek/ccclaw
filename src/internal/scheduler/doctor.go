@@ -17,6 +17,7 @@ import (
 type doctorCheck struct {
 	Name   string
 	Detail string
+	Repair string
 	Err    error
 }
 
@@ -26,23 +27,36 @@ func Doctor(ctx context.Context, cfg *config.Config, out io.Writer) error {
 	for _, check := range checks {
 		if check.Err != nil {
 			failed++
-			if check.Detail != "" {
-				_, _ = fmt.Fprintf(out, "[FAIL] %s: %v (%s)\n", check.Name, check.Err, check.Detail)
-			} else {
-				_, _ = fmt.Fprintf(out, "[FAIL] %s: %v\n", check.Name, check.Err)
+			_, _ = fmt.Fprintf(out, "[FAIL] %s: %v", check.Name, check.Err)
+			if rendered := renderDoctorCheckExtra(check); rendered != "" {
+				_, _ = fmt.Fprintf(out, " (%s)", rendered)
 			}
+			_, _ = fmt.Fprintln(out)
 			continue
 		}
-		if check.Detail != "" {
-			_, _ = fmt.Fprintf(out, "[ OK ] %s: %s\n", check.Name, check.Detail)
-		} else {
-			_, _ = fmt.Fprintf(out, "[ OK ] %s\n", check.Name)
+		_, _ = fmt.Fprintf(out, "[ OK ] %s", check.Name)
+		if rendered := renderDoctorCheckExtra(check); rendered != "" {
+			_, _ = fmt.Fprintf(out, ": %s", rendered)
 		}
+		_, _ = fmt.Fprintln(out)
 	}
 	if failed > 0 {
 		return fmt.Errorf("scheduler doctor 失败，共 %d 项异常", failed)
 	}
 	return nil
+}
+
+func renderDoctorCheckExtra(check doctorCheck) string {
+	switch {
+	case check.Detail != "" && check.Repair != "":
+		return fmt.Sprintf("%s; 修复=%s", check.Detail, check.Repair)
+	case check.Detail != "":
+		return check.Detail
+	case check.Repair != "":
+		return "修复=" + check.Repair
+	default:
+		return ""
+	}
 }
 
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
@@ -106,8 +120,16 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 			Detail: lookPathDetail("systemctl"),
 			Err:    lookPathErr("systemctl"),
 		})
+		checks = append(checks, doctorCheck{
+			Name:   "loginctl",
+			Detail: lookPathDetail("loginctl"),
+			Err:    lookPathErr("loginctl"),
+		})
+		checks = append(checks, inspectLinger(ctx))
 		checks = append(checks, inspectUserBus(ctx, cfg))
+		checks = append(checks, inspectUnitDrift(cfg))
 		checks = append(checks, inspectManagedTimers(ctx, cfg))
+		checks = append(checks, inspectManagedServices(ctx, cfg))
 	}
 
 	if needsCronDoctor(probe) {
@@ -234,9 +256,14 @@ func inspectManagedTimers(ctx context.Context, cfg *config.Config) doctorCheck {
 		}
 	}
 	unhealthy := make([]string, 0, len(items))
+	pendingFirstRun := make([]string, 0, len(items))
 	for _, item := range items {
 		if strings.TrimSpace(item.ActiveState) != "active" || strings.TrimSpace(item.UnitFileState) != "enabled" {
 			unhealthy = append(unhealthy, fmt.Sprintf("%s(active=%s enabled=%s)", item.TimerUnit, item.ActiveState, item.UnitFileState))
+			continue
+		}
+		if !item.HasLast {
+			pendingFirstRun = append(pendingFirstRun, item.Key)
 		}
 	}
 	if len(unhealthy) > 0 {
@@ -245,22 +272,149 @@ func inspectManagedTimers(ctx context.Context, cfg *config.Config) doctorCheck {
 			Detail: fmt.Sprintf(
 				"主机时区=%s 配置时区=%s 异常=%s",
 				time.Local.String(),
-				cfg.Scheduler.CalendarTimezone,
+				effectiveSchedulerTimezone(cfg),
 				strings.Join(unhealthy, ", "),
 			),
-			Err: fmt.Errorf("存在未启用或未运行的 timer"),
+			Repair: "请先执行 `ccclaw scheduler timers --wide` 核对日程，再运行 `systemctl --user daemon-reload && systemctl --user enable --now " + strings.Join(ManagedSystemdTimers(), " ") + "`",
+			Err:    fmt.Errorf("存在未启用或未运行的 timer"),
+		}
+	}
+	detail := fmt.Sprintf(
+		"%d/%d 已启用且运行中；主机时区=%s 配置时区=%s",
+		len(items),
+		len(items),
+		time.Local.String(),
+		effectiveSchedulerTimezone(cfg),
+	)
+	if len(pendingFirstRun) > 0 {
+		detail += "；待首次触发=" + strings.Join(pendingFirstRun, ", ")
+	}
+	return doctorCheck{
+		Name:   "托管 timers",
+		Detail: detail,
+	}
+}
+
+func inspectLinger(ctx context.Context) doctorCheck {
+	status, err := InspectLingerStatus(ctx)
+	if err != nil {
+		return doctorCheck{
+			Name:   "linger",
+			Detail: "无法读取 loginctl linger 状态",
+			Repair: "请确认 `loginctl` 可用，并执行 `loginctl enable-linger " + status.User + "`",
+			Err:    err,
+		}
+	}
+	detail := fmt.Sprintf("user=%s state=%s linger=%t", status.User, status.State, status.Enabled)
+	if status.Enabled {
+		return doctorCheck{
+			Name:   "linger",
+			Detail: detail,
 		}
 	}
 	return doctorCheck{
-		Name: "托管 timers",
-		Detail: fmt.Sprintf(
-			"%d/%d 已启用且运行中；主机时区=%s 配置时区=%s",
-			len(items),
-			len(items),
-			time.Local.String(),
-			cfg.Scheduler.CalendarTimezone,
-		),
+		Name:   "linger",
+		Detail: detail,
+		Repair: "请执行 `loginctl enable-linger " + status.User + "`，避免用户退出登录后 timer 停止",
+		Err:    fmt.Errorf("linger 未启用"),
 	}
+}
+
+func inspectUnitDrift(cfg *config.Config) doctorCheck {
+	status, err := DetectManagedUnitDrift(cfg)
+	if err != nil {
+		return doctorCheck{
+			Name:   "unit 漂移",
+			Detail: fmt.Sprintf("dir=%s", strings.TrimSpace(status.UnitDir)),
+			Repair: "请重新执行 `ccclaw scheduler use systemd`，随后执行 `systemctl --user daemon-reload`",
+			Err:    err,
+		}
+	}
+	detail := fmt.Sprintf("dir=%s matched=%d/%d", status.UnitDir, status.Matched, status.Expected)
+	if len(status.Missing) == 0 && len(status.Drifted) == 0 {
+		return doctorCheck{
+			Name:   "unit 漂移",
+			Detail: detail,
+		}
+	}
+	parts := []string{detail}
+	if len(status.Missing) > 0 {
+		parts = append(parts, "missing="+strings.Join(status.Missing, ","))
+	}
+	if len(status.Drifted) > 0 {
+		parts = append(parts, "drift="+strings.Join(status.Drifted, ","))
+	}
+	return doctorCheck{
+		Name:   "unit 漂移",
+		Detail: strings.Join(parts, " "),
+		Repair: "请重新执行 `ccclaw scheduler use systemd` 让 unit 与当前配置重新对齐",
+		Err:    fmt.Errorf("检测到 user systemd 单元与当前配置漂移"),
+	}
+}
+
+func inspectManagedServices(ctx context.Context, cfg *config.Config) doctorCheck {
+	items, err := ListManagedServices(ctx, cfg)
+	if err != nil {
+		return doctorCheck{
+			Name:   "托管 services",
+			Detail: "无法枚举托管 service 状态",
+			Err:    err,
+		}
+	}
+	abnormal := make([]string, 0, len(items))
+	units := make([]string, 0, len(items))
+	for _, item := range items {
+		if !serviceLooksHealthy(item) {
+			abnormal = append(abnormal, fmt.Sprintf("%s(active=%s sub=%s result=%s status=%s)", item.ServiceUnit, item.ActiveState, item.SubState, item.Result, item.ExecMainStatus))
+			units = append(units, item.ServiceUnit)
+		}
+	}
+	if len(abnormal) == 0 {
+		return doctorCheck{
+			Name:   "托管 services",
+			Detail: fmt.Sprintf("%d/%d 最近执行状态正常", len(items), len(items)),
+		}
+	}
+	return doctorCheck{
+		Name:   "托管 services",
+		Detail: "最近异常=" + strings.Join(abnormal, ", "),
+		Repair: buildServiceRepairHint(units),
+		Err:    fmt.Errorf("存在最近失败或异常退出的 service"),
+	}
+}
+
+func serviceLooksHealthy(item ServiceStatus) bool {
+	if strings.EqualFold(strings.TrimSpace(item.ActiveState), "failed") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(item.SubState), "failed") {
+		return false
+	}
+	result := strings.ToLower(strings.TrimSpace(item.Result))
+	if result != "" && result != "-" && result != "success" {
+		return false
+	}
+	status := strings.TrimSpace(item.ExecMainStatus)
+	if status != "" && status != "-" && status != "0" && result != "success" {
+		return false
+	}
+	return true
+}
+
+func buildServiceRepairHint(units []string) string {
+	if len(units) == 0 {
+		return "请先执行 `systemctl --user status` 与 `journalctl --user` 复核异常 service"
+	}
+	seen := map[string]struct{}{}
+	ordered := make([]string, 0, len(units))
+	for _, unit := range units {
+		if _, ok := seen[unit]; ok {
+			continue
+		}
+		seen[unit] = struct{}{}
+		ordered = append(ordered, unit)
+	}
+	return "请先执行 `systemctl --user status " + strings.Join(ordered, " ") + "` 与 `journalctl --user -u " + strings.Join(ordered, " -u ") + " -n 50 --no-pager` 定位失败原因，再按需重启 timer/service"
 }
 
 func nearestExistingParent(path string) string {

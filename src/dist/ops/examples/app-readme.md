@@ -10,6 +10,9 @@
 - 调度状态：`~/.ccclaw/bin/ccclaw scheduler status`
 - 调度专用体检：`~/.ccclaw/bin/ccclaw scheduler doctor`
 - 定时器列表：`~/.ccclaw/bin/ccclaw scheduler timers`
+- 定时器完整视图：`~/.ccclaw/bin/ccclaw scheduler timers --wide`
+- 定时器原始字段：`~/.ccclaw/bin/ccclaw scheduler timers --raw`
+- 定时器 JSON：`~/.ccclaw/bin/ccclaw scheduler timers --json`
 - 追随全部调度日志：`~/.ccclaw/bin/ccclaw scheduler logs -f`
 - 只看 ingest 日志：`~/.ccclaw/bin/ccclaw scheduler logs ingest --lines 100`
 - 归档 warning 及以上日志：`~/.ccclaw/bin/ccclaw scheduler logs all --level warning --archive`
@@ -32,6 +35,11 @@
 systemctl --user daemon-reload
 systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
 ```
+
+- 推荐排障顺序：
+  - 先看 `scheduler status`
+  - 再看 `scheduler doctor`
+  - 再按需切到 `scheduler timers --wide|--raw|--json`
 
 ## 日志观察
 

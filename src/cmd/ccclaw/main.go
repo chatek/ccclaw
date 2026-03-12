@@ -37,6 +37,9 @@ func newRootCmd() *cobra.Command {
 	var schedulerLogsLines int
 	var schedulerLogsLevel string
 	var schedulerLogsArchive bool
+	var schedulerTimersWide bool
+	var schedulerTimersRaw bool
+	var schedulerTimersJSON bool
 	var runtimeLogLevel string
 
 	rootCmd := &cobra.Command{
@@ -299,7 +302,7 @@ func newRootCmd() *cobra.Command {
 			return scheduler.Doctor(cmd.Context(), cfg, cmd.OutOrStdout())
 		},
 	})
-	schedulerCmd.AddCommand(&cobra.Command{
+	schedulerTimersCmd := &cobra.Command{
 		Use:   "timers",
 		Short: "查看 ccclaw user systemd timers 状态与下一次触发时间",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -307,42 +310,17 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			items, err := scheduler.ListManagedTimers(cmd.Context(), cfg)
+			view, err := scheduler.ResolveTimersView(schedulerTimersWide, schedulerTimersRaw, schedulerTimersJSON)
 			if err != nil {
 				return err
 			}
-			location := cfg.Scheduler.CalendarTimezone
-			if location == "" {
-				location = "Local"
-			}
-			hostTimezone := time.Now().Location().String()
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "主机时区: %s\n", hostTimezone)
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "配置时区: %s\n", location)
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "说明: CAL_RAW 为配置原文，CAL_CFG 为追加配置时区后的生效表达式")
-			_, _ = fmt.Fprintln(cmd.OutOrStdout())
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintf(w, "TIMER\tACTIVE\tENABLED\tCAL_RAW\tCAL_CFG\tNEXT[%s]\tNEXT[%s]\tLAST[%s]\tLAST[%s]\n",
-				hostTimezone,
-				location,
-				hostTimezone,
-				location,
-			)
-			for _, item := range items {
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-					item.TimerUnit,
-					item.ActiveState,
-					item.UnitFileState,
-					item.Calendar,
-					item.CalendarWithTZ,
-					item.NextLocal,
-					item.NextConfigTZ,
-					item.LastLocal,
-					item.LastConfigTZ,
-				)
-			}
-			return w.Flush()
+			return scheduler.RenderManagedTimers(cmd.Context(), cfg, cmd.OutOrStdout(), scheduler.TimersRenderOptions{View: view})
 		},
-	})
+	}
+	schedulerTimersCmd.Flags().BoolVar(&schedulerTimersWide, "wide", false, "显示完整宽表，包含原始日程与双时区触发时间")
+	schedulerTimersCmd.Flags().BoolVar(&schedulerTimersRaw, "raw", false, "显示原始字段名的 key=value 视图")
+	schedulerTimersCmd.Flags().BoolVar(&schedulerTimersJSON, "json", false, "输出结构化 JSON，便于脚本消费")
+	schedulerCmd.AddCommand(schedulerTimersCmd)
 	schedulerLogsCmd := &cobra.Command{
 		Use:   "logs [all|ingest|run|patrol|journal|archive|sevolver]",
 		Short: "查看或追随 ccclaw user systemd 服务日志",
