@@ -12,6 +12,7 @@ bash install.sh
 - `upgrade.sh`：程序发布树升级入口，固定下载 `41490/ccclaw` 最新官方 release 并校验 `SHA256SUMS`
 - `bin/ccclaw`：主二进制
 - `ops/`：配置样板、systemd 单元、release notes 模板与运维脚本
+- `ops/scripts/ccclaude`：Claude 执行包装器源，安装时复制到 `~/.ccclaw/bin/ccclaude`
 - `kb/`：本体仓库初始化目录树
 - `kb/**/CLAUDE.md`：记忆记录与整理规约模板，升级时无损合并
 - `SHA256SUMS`：release 资产校验文件
@@ -39,6 +40,7 @@ bash install.sh
 - 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
 - 受控 `cron` 会写入 `ingest/run/patrol/journal` 四类周期任务
 - `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
+- `systemd --user` 额外托管 `ccclaw-archive.timer`，每周导出历史周 JSONL 为 Parquet
 - 推荐优先通过 `ccclaw scheduler use systemd|cron|none` 切换后端，而不是手工混改配置和调度器
 - 如需清理受控块，可执行：
 

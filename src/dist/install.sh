@@ -1360,38 +1360,10 @@ install_rtk() {
 
 create_claude_wrapper() {
   if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] write $CLAUDE_WRAPPER"
+    log "[simulate] install $DIST_DIR/ops/scripts/ccclaude -> $CLAUDE_WRAPPER"
     return 0
   fi
-  cat > "$CLAUDE_WRAPPER" <<'WRAP'
-#!/usr/bin/env bash
-set -euo pipefail
-claude_bin="${CCCLAW_CLAUDE_BIN:-}"
-rtk_bin="${CCCLAW_RTK_BIN:-}"
-
-if [[ -z "$claude_bin" ]]; then
-  claude_bin="$(command -v claude || true)"
-fi
-if [[ -z "$rtk_bin" ]]; then
-  rtk_bin="$(command -v rtk || true)"
-fi
-
-if [[ -n "$rtk_bin" && -x "$rtk_bin" ]]; then
-  if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
-    printf '1\n' > "$CCCLAW_RTK_MARKER_FILE"
-  fi
-  exec "$rtk_bin" proxy claude "$@"
-fi
-if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
-  printf '0\n' > "$CCCLAW_RTK_MARKER_FILE"
-fi
-if [[ -n "$claude_bin" && -x "$claude_bin" ]]; then
-  exec "$claude_bin" "$@"
-fi
-printf 'ccclaude: 未找到 Claude 可执行文件，请设置 CCCLAW_CLAUDE_BIN 或确保 claude 在 PATH 中\n' >&2
-exit 127
-WRAP
-  chmod 755 "$CLAUDE_WRAPPER"
+  install_release_file 755 "$DIST_DIR/ops/scripts/ccclaude" "$CLAUDE_WRAPPER"
 }
 
 ensure_env_key() {
@@ -1607,7 +1579,9 @@ create_user_systemd_units() {
   local patrol_timer="$SYSTEMD_USER_DIR/ccclaw-patrol.timer"
   local journal_service="$SYSTEMD_USER_DIR/ccclaw-journal.service"
   local journal_timer="$SYSTEMD_USER_DIR/ccclaw-journal.timer"
-  local ingest_calendar run_calendar patrol_calendar journal_calendar
+  local archive_service="$SYSTEMD_USER_DIR/ccclaw-archive.service"
+  local archive_timer="$SYSTEMD_USER_DIR/ccclaw-archive.timer"
+  local ingest_calendar run_calendar patrol_calendar journal_calendar archive_calendar
   if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
     log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
     return 0
@@ -1621,6 +1595,7 @@ create_user_systemd_units() {
   run_calendar="$(calendar_with_timezone "$RUN_CALENDAR")"
   patrol_calendar="$(calendar_with_timezone "$PATROL_CALENDAR")"
   journal_calendar="$(calendar_with_timezone "$JOURNAL_CALENDAR")"
+  archive_calendar="$(calendar_with_timezone "Mon 02:00:00")"
   cat > "$ingest_service" <<UNIT
 [Unit]
 Description=ccclaw ingest service
@@ -1709,6 +1684,28 @@ Unit=ccclaw-journal.service
 [Install]
 WantedBy=timers.target
 UNIT
+  cat > "$archive_service" <<UNIT
+[Unit]
+Description=ccclaw archive service
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/bin/ccclaw archive --config $CONFIG_FILE --env-file $ENV_FILE
+UNIT
+  cat > "$archive_timer" <<UNIT
+[Unit]
+Description=Run ccclaw weekly archive on schedule
+
+[Timer]
+OnCalendar=$archive_calendar
+Persistent=true
+Unit=ccclaw-archive.service
+
+[Install]
+WantedBy=timers.target
+UNIT
 }
 
 reconcile_managed_crontab() {
@@ -1768,16 +1765,16 @@ activate_user_systemd_timers() {
     SYSTEMD_ACTIVATION_STATUS="planned:auto"
     SYSTEMD_ACTIVATION_REASON="模拟模式：将自动执行 daemon-reload + enable --now"
     log "[simulate] systemctl --user daemon-reload"
-    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
     if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
     fi
     return 0
   fi
   systemctl --user daemon-reload
-  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer
   if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer
+    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer
     SYSTEMD_ACTIVATION_STATUS="restarted"
     SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit"
     return 0
@@ -2041,7 +2038,7 @@ print_summary() {
       else
         scheduler_step_6="6. 当前会话未直连 user bus；请在登录会话中手工启用用户定时器:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
       fi
       scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
@@ -2054,7 +2051,7 @@ print_summary() {
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
       ;;
     none|*)
       scheduler_step_6="6. 当前调度模式为 none；如需受控 cron，可执行:
@@ -2062,7 +2059,7 @@ print_summary() {
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer"
       ;;
   esac
   cat <<MSG
@@ -2098,6 +2095,8 @@ $result_title
   - ccclaw-patrol.timer
   - ccclaw-journal.service
   - ccclaw-journal.timer
+  - ccclaw-archive.service
+  - ccclaw-archive.timer
 - 受控 crontab: $cron_summary
 
 建议下一步

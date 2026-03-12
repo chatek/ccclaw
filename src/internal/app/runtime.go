@@ -574,6 +574,7 @@ func (rt *Runtime) Status(out io.Writer) error {
 	probe := rt.inspectScheduler()
 	diagnosis := diagnoseScheduler(probe, probe.Requested)
 	sessionSnapshot := rt.collectStatusSessions(tasks)
+	execSnapshot := rt.executorSnapshot()
 	tokenSummary, err := rt.store.TokenStats()
 	if err != nil {
 		rt.logError("status", "读取 token 统计失败", "error", err)
@@ -624,6 +625,13 @@ func (rt *Runtime) Status(out io.Writer) error {
 	if diagnosis.Repair != "" {
 		_, _ = fmt.Fprintf(out, "  修复建议: %s\n", diagnosis.Repair)
 	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "执行器快照:")
+	_, _ = fmt.Fprintf(out, "  入口配置: %s\n", execSnapshot.LauncherRequested)
+	_, _ = fmt.Fprintf(out, "  入口解析: %s\n", formatResolvedBinary(execSnapshot.LauncherRequested, execSnapshot.LauncherResolved, execSnapshot.LauncherError))
+	_, _ = fmt.Fprintf(out, "  Claude 解析: %s\n", formatResolvedBinary(execSnapshot.ClaudeRequested, execSnapshot.ClaudeResolved, execSnapshot.ClaudeError))
+	_, _ = fmt.Fprintf(out, "  RTK 解析: %s\n", formatResolvedBinary(execSnapshot.RTKRequested, execSnapshot.RTKResolved, execSnapshot.RTKError))
 	_, _ = fmt.Fprintln(out)
 
 	_, _ = fmt.Fprintln(out, "会话快照:")
@@ -744,6 +752,18 @@ type statusAlert struct {
 	CreatedAt time.Time
 }
 
+type executorSnapshot struct {
+	LauncherRequested string
+	LauncherResolved  string
+	LauncherError     string
+	ClaudeRequested   string
+	ClaudeResolved    string
+	ClaudeError       string
+	RTKRequested      string
+	RTKResolved       string
+	RTKError          string
+}
+
 func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{}
 	runningTasks := make([]*core.Task, 0)
@@ -860,6 +880,67 @@ func trimStatusText(value string, limit int) string {
 	return value[:limit-3] + "..."
 }
 
+func (rt *Runtime) executorSnapshot() executorSnapshot {
+	values := map[string]string{}
+	if rt.secrets != nil {
+		values = rt.secrets.Values
+	}
+	launcherRequested := strings.TrimSpace(rt.cfg.Executor.Binary)
+	if len(rt.cfg.Executor.Command) > 0 && strings.TrimSpace(rt.cfg.Executor.Command[0]) != "" {
+		launcherRequested = strings.TrimSpace(rt.cfg.Executor.Command[0])
+	}
+	if launcherRequested == "" {
+		launcherRequested = "claude"
+	}
+	claudeRequested := strings.TrimSpace(values["CCCLAW_CLAUDE_BIN"])
+	if claudeRequested == "" {
+		claudeRequested = "claude"
+	}
+	rtkRequested := strings.TrimSpace(values["CCCLAW_RTK_BIN"])
+	if rtkRequested == "" {
+		rtkRequested = "rtk"
+	}
+	return executorSnapshot{
+		LauncherRequested: launcherRequested,
+		LauncherResolved:  resolvedBinaryOrEmpty(launcherRequested),
+		LauncherError:     unresolvedBinaryError(launcherRequested),
+		ClaudeRequested:   claudeRequested,
+		ClaudeResolved:    resolvedBinaryOrEmpty(claudeRequested),
+		ClaudeError:       unresolvedBinaryError(claudeRequested),
+		RTKRequested:      rtkRequested,
+		RTKResolved:       resolvedBinaryOrEmpty(rtkRequested),
+		RTKError:          unresolvedBinaryError(rtkRequested),
+	}
+}
+
+func resolvedBinaryOrEmpty(name string) string {
+	resolved, err := executor.ResolveBinaryPath(name)
+	if err != nil {
+		return ""
+	}
+	return resolved
+}
+
+func unresolvedBinaryError(name string) string {
+	if _, err := executor.ResolveBinaryPath(name); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func formatResolvedBinary(requested, resolved, errText string) string {
+	if strings.TrimSpace(resolved) != "" {
+		if requested == resolved {
+			return resolved
+		}
+		return fmt.Sprintf("%s (requested=%s)", resolved, requested)
+	}
+	if strings.TrimSpace(errText) == "" {
+		return fmt.Sprintf("未找到 (requested=%s)", requested)
+	}
+	return fmt.Sprintf("未找到 (requested=%s, error=%s)", requested, errText)
+}
+
 func (rt *Runtime) ShowConfig(out io.Writer) error {
 	defer rt.store.Close()
 	rt.logInfo("config", "开始导出配置快照", "targets", len(rt.cfg.Targets), "log_level", rt.runtimeLogLevel())
@@ -914,14 +995,15 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	}{
 		{name: "配置文件", run: func() (string, error) { return rt.describeTargetRouting(), rt.cfg.Validate() }},
 		{name: ".env 权限", run: func() (string, error) { return rt.secrets.Path, config.ValidateEnvFile(rt.secrets.Path) }},
-		{name: "claude CLI", run: func() (string, error) {
+		{name: "执行器入口", run: func() (string, error) {
 			return rt.describeExecutor(), commandExists(rt.cfg.Executor.Command, rt.cfg.Executor.Binary)
 		}},
 		{name: "Claude 安装通道", run: func() (string, error) { return claudeInstallScriptURL, rt.checkClaudeInstallChannel(ctx) }},
 		{name: "Claude 运行态", run: func() (string, error) { return rt.detectClaudeState(ctx) }},
+		{name: "claude CLI", run: func() (string, error) { return rt.describeBinaryVersion("CCCLAW_CLAUDE_BIN", "claude", "version") }},
 		{name: "Go 工具链", run: func() (string, error) { return commandVersion("go", "version") }},
 		{name: "sudo 无口令", run: rt.checkPasswordlessSudo},
-		{name: "rtk CLI", run: func() (string, error) { return commandVersion("rtk", "--version") }},
+		{name: "rtk CLI", run: func() (string, error) { return rt.describeBinaryVersion("CCCLAW_RTK_BIN", "rtk", "--version") }},
 		{name: "tmux CLI", run: func() (string, error) { return commandVersion("tmux", "-V") }},
 		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
 		{name: "duckdb CLI", run: func() (string, error) { return commandVersion("duckdb", "--version") }},
@@ -1899,10 +1981,38 @@ func (rt *Runtime) describeTargetRouting() string {
 }
 
 func (rt *Runtime) describeExecutor() string {
-	if len(rt.cfg.Executor.Command) > 0 {
-		return strings.Join(rt.cfg.Executor.Command, " ")
+	snapshot := rt.executorSnapshot()
+	return fmt.Sprintf(
+		"configured=%s resolved=%s claude=%s rtk=%s",
+		snapshot.LauncherRequested,
+		formatResolvedBinary(snapshot.LauncherRequested, snapshot.LauncherResolved, snapshot.LauncherError),
+		formatResolvedBinary(snapshot.ClaudeRequested, snapshot.ClaudeResolved, snapshot.ClaudeError),
+		formatResolvedBinary(snapshot.RTKRequested, snapshot.RTKResolved, snapshot.RTKError),
+	)
+}
+
+func (rt *Runtime) describeBinaryVersion(envKey, fallback string, args ...string) (string, error) {
+	requested := ""
+	if rt.secrets != nil {
+		requested = strings.TrimSpace(rt.secrets.Values[envKey])
 	}
-	return rt.cfg.Executor.Binary
+	if requested == "" {
+		requested = fallback
+	}
+	resolved, err := executor.ResolveBinaryPath(requested)
+	if err != nil {
+		return fmt.Sprintf("requested=%s", requested), err
+	}
+	cmd := exec.Command(resolved, args...)
+	output, cmdErr := cmd.CombinedOutput()
+	if cmdErr != nil {
+		return fmt.Sprintf("requested=%s resolved=%s", requested, resolved), nil
+	}
+	line := strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
+	if line == "" {
+		line = resolved
+	}
+	return fmt.Sprintf("requested=%s resolved=%s version=%s", requested, resolved, line), nil
 }
 
 func (rt *Runtime) checkClaudeInstallChannel(ctx context.Context) error {

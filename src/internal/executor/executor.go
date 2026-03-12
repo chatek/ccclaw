@@ -65,7 +65,7 @@ func New(command []string, binary string, timeout time.Duration, logDir, resultD
 		}
 		resolved = []string{binary}
 	}
-	launcher, err := resolveBinaryPath(resolved[0])
+	launcher, err := ResolveBinaryPath(resolved[0])
 	if err != nil {
 		return nil, fmt.Errorf("找不到执行器命令 %q: %w", resolved[0], err)
 	}
@@ -504,14 +504,14 @@ func configuredOrDiscoveredBinary(secrets map[string]string, envKey, name string
 	if override := strings.TrimSpace(expandUserPath(secrets[envKey])); override != "" {
 		return override
 	}
-	path, err := resolveBinaryPath(name)
+	path, err := ResolveBinaryPath(name)
 	if err != nil {
 		return ""
 	}
 	return path
 }
 
-func resolveBinaryPath(name string) (string, error) {
+func ResolveBinaryPath(name string) (string, error) {
 	trimmed := strings.TrimSpace(expandUserPath(name))
 	if trimmed == "" {
 		return "", fmt.Errorf("命令名为空")

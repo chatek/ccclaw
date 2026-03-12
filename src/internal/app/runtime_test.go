@@ -809,6 +809,10 @@ exit 0
 	for _, want := range []string{
 		"当前快照",
 		"调度快照:",
+		"执行器快照:",
+		"入口配置: claude",
+		"Claude 解析:",
+		"RTK 解析:",
 		"会话快照:",
 		"会话健康: 正常=0 接近超时=1 超时=0 已退出=0 丢失=0 孤儿=1",
 		"#10",
@@ -862,10 +866,53 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 	for _, want := range []string{
 		"当前快照",
 		"任务总数: 0",
+		"执行器快照:",
+		"入口配置: claude",
 		"当前无任务",
 		"tmux 状态: 未检测到 tmux CLI，当前无法汇报会话健康",
 		"未检测到 token 使用记录",
 		"最近 7 天无失败/超时告警",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+}
+
+func TestDescribeExecutorIncludesResolvedBinaryPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	localBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatalf("创建 local bin 失败: %v", err)
+	}
+	for _, name := range []string{"claude", "rtk"} {
+		path := filepath.Join(localBin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("写入 fake %s 失败: %v", name, err)
+		}
+	}
+	wrapperPath := filepath.Join(tmpDir, "ccclaude")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入 wrapper 失败: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Executor: config.ExecutorConfig{
+				Command: []string{wrapperPath},
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+	}
+	text := rt.describeExecutor()
+	for _, want := range []string{
+		"configured=" + wrapperPath,
+		"resolved=" + wrapperPath,
+		"claude=" + filepath.Join(localBin, "claude"),
+		"rtk=" + filepath.Join(localBin, "rtk"),
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)

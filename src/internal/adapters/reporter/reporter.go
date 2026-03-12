@@ -42,7 +42,12 @@ func (r *Reporter) ReportFailure(task *core.Task) error {
 	if client == nil {
 		return nil
 	}
-	body := fmt.Sprintf("任务执行失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 重试次数: `%d/%d`\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, task.State, task.RetryCount, core.MaxRetry, strings.TrimSpace(task.ErrorMsg))
+	stage := classifyFailureStage(task)
+	errMsg, diagnostic := splitFailureMessage(task.ErrorMsg)
+	body := fmt.Sprintf("任务执行失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 阶段: `%s`\n- 重试次数: `%d/%d`\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, task.State, stage, task.RetryCount, core.MaxRetry, errMsg)
+	if diagnostic != "" {
+		body += fmt.Sprintf("\n- 诊断: `%s`", diagnostic)
+	}
 	return client.AddComment(task.IssueNumber, body)
 }
 
@@ -53,4 +58,64 @@ func (r *Reporter) ReportSuccess(task *core.Task, duration time.Duration, logFil
 	}
 	body := fmt.Sprintf("任务执行完成。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`", task.IssueRepo, task.IssueNumber, task.State, duration.Round(time.Second), task.ReportPath, logFile)
 	return client.AddComment(task.IssueNumber, body)
+}
+
+func splitFailureMessage(raw string) (string, string) {
+	message := strings.TrimSpace(raw)
+	if message == "" {
+		return "未知错误", ""
+	}
+	parts := strings.SplitN(message, "；诊断输出:", 2)
+	errMsg := strings.TrimSpace(parts[0])
+	if len(parts) == 1 {
+		return errMsg, ""
+	}
+	return errMsg, strings.TrimSpace(parts[1])
+}
+
+func classifyFailureStage(task *core.Task) string {
+	if task == nil {
+		return "执行阶段"
+	}
+	message, _ := splitFailureMessage(task.ErrorMsg)
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"启动 tmux 会话失败",
+		"找不到执行器命令",
+		"未找到 claude 可执行文件",
+		"not found",
+		"退出码=127",
+		"exit status 127",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return "启动阶段"
+		}
+	}
+	for _, marker := range []string{
+		"超过超时阈值",
+		"context deadline exceeded",
+		"claude 返回错误结果",
+		"error_max_turns",
+		"已运行",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return "执行阶段"
+		}
+	}
+	for _, marker := range []string{
+		"解析 claude json 输出失败",
+		"结果校验失败",
+		"读取结果文件失败",
+		"stdout 为空",
+		"未找到结果文件",
+		"解析执行元数据失败",
+		"读取执行元数据失败",
+		"结果文件",
+		"会话已丢失",
+	} {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return "收口阶段"
+		}
+	}
+	return "执行阶段"
 }
