@@ -109,3 +109,48 @@ func TestIssueURL(t *testing.T) {
 		t.Fatalf("unexpected issue url: %s", got)
 	}
 }
+
+func TestCreateIssuePassesLabelsAndParsesResponse(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$TEST_GH_ARGS"
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+cat <<'JSON'
+{"number":42,"title":"[sevolver] 能力缺口深度分析 2026-03-12","body":"demo","state":"open"}
+JSON
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	argsLog := filepath.Join(tmpDir, "args.log")
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TEST_GH_ARGS", argsLog)
+
+	client := NewClient("41490/ccclaw", map[string]string{})
+	issue, err := client.CreateIssue("demo", "body", []string{"ccclaw", "sevolver"})
+	if err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+	if issue == nil || issue.Number != 42 {
+		t.Fatalf("unexpected issue: %#v", issue)
+	}
+	args, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("读取 gh 参数失败: %v", err)
+	}
+	text := string(args)
+	if !strings.Contains(text, "labels[]=ccclaw") || !strings.Contains(text, "labels[]=sevolver") {
+		t.Fatalf("expected labels in args, got: %s", text)
+	}
+}

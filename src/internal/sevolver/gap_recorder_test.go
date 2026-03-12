@@ -55,4 +55,12 @@ func TestAppendGapSignalsPrunesAndPreservesUserBlock(t *testing.T) {
 	if !strings.Contains(text, "人工备注") {
 		t.Fatalf("user block should be preserved: %q", text)
 	}
+
+	loaded, err := LoadGapSignals(kbDir, time.Date(2026, 3, 12, 0, 0, 0, 0, time.Local))
+	if err != nil {
+		t.Fatalf("LoadGapSignals failed: %v", err)
+	}
+	if len(loaded) != 1 || loaded[0].ID != "gap-20260312-new" {
+		t.Fatalf("unexpected loaded gaps: %#v", loaded)
+	}
 }

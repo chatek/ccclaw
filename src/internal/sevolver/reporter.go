@@ -18,6 +18,18 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		fmt.Sprintf("- dormant 处理: %d", len(result.Dormant)),
 		fmt.Sprintf("- deprecated 归档: %d", len(result.Deprecated)),
 	}
+	if result.DeepAnalysis != nil {
+		switch {
+		case result.DeepAnalysis.Created:
+			lines = append(lines, fmt.Sprintf("- 深度分析: 已创建 %s", result.DeepAnalysis.IssueURL))
+		case result.DeepAnalysis.Existing:
+			lines = append(lines, fmt.Sprintf("- 深度分析: 复用已有 %s", result.DeepAnalysis.IssueURL))
+		case result.DeepAnalysis.Triggered:
+			lines = append(lines, fmt.Sprintf("- 深度分析: 已触发但未创建 issue (%s)", result.DeepAnalysis.Reason))
+		default:
+			lines = append(lines, fmt.Sprintf("- 深度分析: 未触发 (%s)", result.DeepAnalysis.Reason))
+		}
+	}
 	if len(result.Errors) > 0 {
 		lines = append(lines, fmt.Sprintf("- 非阻断告警: %d", len(result.Errors)))
 	}
@@ -44,6 +56,18 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		lines = append(lines, "", "## deprecated")
 		for _, item := range result.Deprecated {
 			lines = append(lines, "- "+filepath.ToSlash(item))
+		}
+	}
+	if result.DeepAnalysis != nil && result.DeepAnalysis.Triggered {
+		lines = append(lines, "", "## 深度分析")
+		lines = append(lines, fmt.Sprintf("- 原因: %s", result.DeepAnalysis.Reason))
+		lines = append(lines, fmt.Sprintf("- 指纹: `%s`", result.DeepAnalysis.Fingerprint))
+		lines = append(lines, fmt.Sprintf("- 未解决缺口总数: %d", result.DeepAnalysis.BacklogCount))
+		if len(result.DeepAnalysis.Keywords) > 0 {
+			lines = append(lines, fmt.Sprintf("- 关键词: %s", strings.Join(result.DeepAnalysis.Keywords, ", ")))
+		}
+		if result.DeepAnalysis.IssueURL != "" {
+			lines = append(lines, fmt.Sprintf("- Issue: %s", result.DeepAnalysis.IssueURL))
 		}
 	}
 	if len(result.Errors) > 0 {

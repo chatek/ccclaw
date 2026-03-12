@@ -12,22 +12,28 @@ import (
 const scanWindowDays = 7
 
 type Config struct {
-	KBDir      string
-	JournalDir string
-	ReportDir  string
-	Now        time.Time
+	KBDir       string
+	JournalDir  string
+	ReportDir   string
+	ControlRepo string
+	TargetRepo  string
+	IssueLabel  string
+	Secrets     map[string]string
+	IssueClient DeepAnalysisClient
+	Now         time.Time
 }
 
 type Result struct {
-	Now         time.Time
-	WindowStart time.Time
-	Hits        []SkillHit
-	Gaps        []GapSignal
-	Dormant     []string
-	Deprecated  []string
-	ReportPath  string
-	GapFilePath string
-	Errors      []string
+	Now          time.Time
+	WindowStart  time.Time
+	Hits         []SkillHit
+	Gaps         []GapSignal
+	Dormant      []string
+	Deprecated   []string
+	ReportPath   string
+	GapFilePath  string
+	DeepAnalysis *DeepAnalysisDecision
+	Errors       []string
 }
 
 func Run(cfg Config, out io.Writer) (*Result, error) {
@@ -98,6 +104,17 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	}
 	result.GapFilePath = gapFilePath
 
+	backlog, err := LoadGapSignals(cfg.KBDir, result.Now)
+	if err != nil {
+		return nil, err
+	}
+	deepAnalysis, err := MaybeTriggerDeepAnalysis(cfg, backlog)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("深度分析触发失败: %v", err))
+	} else {
+		result.DeepAnalysis = deepAnalysis
+	}
+
 	reportPath, err := WriteDailyReport(reportRoot, result.Now, *result)
 	if err != nil {
 		return nil, err
@@ -106,10 +123,24 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 
 	if out != nil {
 		_, _ = fmt.Fprintf(out, "sevolver: hits=%d gaps=%d dormant=%d deprecated=%d\n", len(result.Hits), len(result.Gaps), len(result.Dormant), len(result.Deprecated))
+		if result.DeepAnalysis != nil && result.DeepAnalysis.Triggered {
+			state := "reused"
+			if result.DeepAnalysis.Created {
+				state = "created"
+			}
+			_, _ = fmt.Fprintf(out, "sevolver: deep_analysis=%s fingerprint=%s issue=%s\n", state, result.DeepAnalysis.Fingerprint, result.DeepAnalysis.IssueURL)
+		}
 		if result.ReportPath != "" {
 			_, _ = fmt.Fprintf(out, "sevolver: report=%s\n", result.ReportPath)
 		}
 		_, _ = fmt.Fprintln(out, "sevolver: done")
 	}
 	return result, nil
+}
+
+func (cfg Config) deepAnalysisNow() time.Time {
+	if cfg.Now.IsZero() {
+		return time.Now()
+	}
+	return cfg.Now
 }

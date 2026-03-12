@@ -122,6 +122,33 @@ func (c *Client) AddComment(number int, body string) error {
 	return nil
 }
 
+func (c *Client) CreateIssue(title, body string, labels []string) (*Issue, error) {
+	args := []string{
+		"api",
+		fmt.Sprintf("repos/%s/issues", c.repo),
+		"--method", "POST",
+		"-f", "title=" + title,
+		"-f", "body=" + body,
+	}
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		args = append(args, "-f", "labels[]="+label)
+	}
+	out, err := c.runGH(context.Background(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("创建 issue 失败: %w", err)
+	}
+	var issue Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		return nil, fmt.Errorf("解析新建 issue 失败: %w", err)
+	}
+	issue.Repo = c.repo
+	return &issue, nil
+}
+
 func (c *Client) NetworkCheck(ctx context.Context) error {
 	_, err := c.runGH(ctx, "api", "rate_limit")
 	return err

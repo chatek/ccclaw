@@ -58,7 +58,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&runtimeLogLevel, "log-level", "", "临时覆盖运行态日志级别: debug|info|warning|error")
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
 	addArchiveCommand(rootCmd, &configPath)
-	addSevolverCommand(rootCmd, &configPath)
+	addSevolverCommand(rootCmd, &configPath, &envFile)
 
 	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
 		return app.NewRuntimeWithOptions(configPath, envFile, app.RuntimeOptions{

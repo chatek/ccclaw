@@ -35,6 +35,15 @@ func AppendGapSignals(kbDir string, gaps []GapSignal, now time.Time) (string, er
 	return path, nil
 }
 
+func LoadGapSignals(kbDir string, now time.Time) ([]GapSignal, error) {
+	path := filepath.Join(strings.TrimSpace(kbDir), "assay", "gap-signals.md")
+	existing, _, err := readManagedMarkdownFile(path, gapSignalsTitle)
+	if err != nil {
+		return nil, err
+	}
+	return pruneGapEntries(parseGapSignalEntries(existing), now), nil
+}
+
 func parseGapSignalEntries(body string) []GapSignal {
 	lines := strings.Split(body, "\n")
 	items := make([]GapSignal, 0)
