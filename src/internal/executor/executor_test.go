@@ -140,4 +140,77 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	if result.PromptFile == "" || result.MetaFile == "" {
 		t.Fatalf("预期返回 prompt/meta 路径，实际为 %#v", result)
 	}
+	if !strings.Contains(manager.spec.Command, "2>&1 | tee") {
+		t.Fatalf("预期 tmux 命令同时采集 stderr，实际为 %q", manager.spec.Command)
+	}
+}
+
+func TestExecutorRuntimeEnvDiscoversLocalBins(t *testing.T) {
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	localBin := filepath.Join(homeDir, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatalf("创建 local bin 失败: %v", err)
+	}
+	for _, name := range []string{"claude", "rtk"} {
+		path := filepath.Join(localBin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("写入 fake %s 失败: %v", name, err)
+		}
+	}
+	wrapperPath := filepath.Join(tmpDir, "ccclaude")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入 wrapper 失败: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", "/usr/bin:/bin")
+
+	execEngine, err := New([]string{wrapperPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	env := execEngine.runtimeEnv("")
+	if got, want := env["CCCLAW_CLAUDE_BIN"], filepath.Join(localBin, "claude"); got != want {
+		t.Fatalf("unexpected claude bin: got=%q want=%q", got, want)
+	}
+	if got, want := env["CCCLAW_RTK_BIN"], filepath.Join(localBin, "rtk"); got != want {
+		t.Fatalf("unexpected rtk bin: got=%q want=%q", got, want)
+	}
+}
+
+func TestLoadResultFallsBackToRawOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "claude", raw: "ccclaude: exec: claude: not found\n", want: "claude: not found"},
+		{name: "rtk", raw: "ccclaude: exec: /tmp/rtk: not found\n", want: "/tmp/rtk: not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+			if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatalf("写入脚本失败: %v", err)
+			}
+			execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+			if err != nil {
+				t.Fatalf("创建执行器失败: %v", err)
+			}
+
+			artifacts := execEngine.ArtifactPaths("10#body")
+			if err := os.WriteFile(artifacts.ResultFile, []byte(tc.raw), 0o644); err != nil {
+				t.Fatalf("写入结果文件失败: %v", err)
+			}
+
+			result, loadErr := execEngine.LoadResult("10#body")
+			if loadErr == nil {
+				t.Fatal("预期返回解析错误")
+			}
+			if result == nil || !strings.Contains(result.Output, tc.want) {
+				t.Fatalf("预期保留原始诊断输出，实际为 %#v", result)
+			}
+		})
+	}
 }

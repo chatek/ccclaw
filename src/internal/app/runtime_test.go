@@ -999,6 +999,227 @@ exit 0
 	}
 }
 
+func TestPatrolReportsRawDiagnosticWhenResultIsNotJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	fixtureDir := filepath.Join(tmpDir, "fixture")
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("创建 fixture 目录失败: %v", err)
+	}
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	tmuxBody := `#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="${TMUX_FIXTURE_DIR:?}"
+if [[ "${1:-}" == "list-panes" ]]; then
+  cat "$fixture_dir/list-panes.txt"
+  exit 0
+fi
+if [[ "${1:-}" == "kill-session" ]]; then
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(tmuxScript, []byte(tmuxBody), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+
+	task := &core.Task{
+		TaskID:         "34#body",
+		IdempotencyKey: "34#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    34,
+		IssueTitle:     "stderr raw output",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateRunning,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	sessionName := executor.SessionName(task.TaskID)
+	if err := os.WriteFile(filepath.Join(fixtureDir, "list-panes.txt"), []byte(sessionName+"\t"+strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)+"\t1\t127\t123\n"), 0o644); err != nil {
+		t.Fatalf("写入 list-panes fixture 失败: %v", err)
+	}
+
+	appDir := filepath.Join(tmpDir, "app")
+	resultDir := filepath.Join(appDir, "var", "results")
+	logDir := filepath.Join(appDir, "log")
+	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+		t.Fatalf("创建结果目录失败: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("创建日志目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "34_body.json"), []byte("ccclaude: exec: claude: not found\n"), 0o644); err != nil {
+		t.Fatalf("写入结果文件失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  appDir,
+				LogDir:  logDir,
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{"/bin/sh"},
+				Timeout: "30m",
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Patrol(context.Background(), &out); err != nil {
+		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+
+	store, err = storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("重新打开 store 失败: %v", err)
+	}
+	defer store.Close()
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateFailed {
+		t.Fatalf("预期任务进入 FAILED，实际为 %#v", loaded)
+	}
+	if !strings.Contains(loaded.ErrorMsg, "claude: not found") {
+		t.Fatalf("预期保留真实诊断输出，实际为 %q", loaded.ErrorMsg)
+	}
+}
+
+func TestPatrolUsesLogTailWhenMissingSessionResultIsEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	fixtureDir := filepath.Join(tmpDir, "fixture")
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("创建 fixture 目录失败: %v", err)
+	}
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	tmuxBody := `#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="${TMUX_FIXTURE_DIR:?}"
+if [[ "${1:-}" == "list-panes" ]]; then
+  cat "$fixture_dir/list-panes.txt"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(tmuxScript, []byte(tmuxBody), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+
+	task := &core.Task{
+		TaskID:         "35#body",
+		IdempotencyKey: "35#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    35,
+		IssueTitle:     "empty result",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateRunning,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fixtureDir, "list-panes.txt"), []byte(""), 0o644); err != nil {
+		t.Fatalf("写入 list-panes fixture 失败: %v", err)
+	}
+
+	appDir := filepath.Join(tmpDir, "app")
+	resultDir := filepath.Join(appDir, "var", "results")
+	logDir := filepath.Join(appDir, "log")
+	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+		t.Fatalf("创建结果目录失败: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("创建日志目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "35_body.json"), []byte(""), 0o644); err != nil {
+		t.Fatalf("写入空结果文件失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "35_body.log"), []byte("ccclaude: 未找到 Claude 可执行文件\n"), 0o644); err != nil {
+		t.Fatalf("写入日志失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  appDir,
+				LogDir:  logDir,
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{"/bin/sh"},
+				Timeout: "30m",
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Patrol(context.Background(), &out); err != nil {
+		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+
+	store, err = storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("重新打开 store 失败: %v", err)
+	}
+	defer store.Close()
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateFailed {
+		t.Fatalf("预期任务进入 FAILED，实际为 %#v", loaded)
+	}
+	if strings.Contains(loaded.ErrorMsg, "会话") && strings.Contains(loaded.ErrorMsg, "丢失") {
+		t.Fatalf("不应再退化成会话丢失，实际为 %q", loaded.ErrorMsg)
+	}
+	if !strings.Contains(loaded.ErrorMsg, "未找到 Claude 可执行文件") {
+		t.Fatalf("预期回退到日志尾部诊断，实际为 %q", loaded.ErrorMsg)
+	}
+}
+
 func TestJournalWritesDailyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	stateDB := filepath.Join(tmpDir, "state.db")

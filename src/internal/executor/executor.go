@@ -47,6 +47,8 @@ type Executor struct {
 	resultDir   string
 	promptDir   string
 	secrets     map[string]string
+	claudeBin   string
+	rtkBin      string
 	tmuxManager tmux.Manager
 }
 
@@ -63,9 +65,11 @@ func New(command []string, binary string, timeout time.Duration, logDir, resultD
 		}
 		resolved = []string{binary}
 	}
-	if _, err := exec.LookPath(resolved[0]); err != nil {
+	launcher, err := resolveBinaryPath(resolved[0])
+	if err != nil {
 		return nil, fmt.Errorf("找不到执行器命令 %q: %w", resolved[0], err)
 	}
+	resolved[0] = launcher
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建日志目录失败: %w", err)
 	}
@@ -83,6 +87,8 @@ func New(command []string, binary string, timeout time.Duration, logDir, resultD
 		resultDir:   resultDir,
 		promptDir:   promptDir,
 		secrets:     copyMap(secrets),
+		claudeBin:   configuredOrDiscoveredBinary(secrets, "CCCLAW_CLAUDE_BIN", "claude"),
+		rtkBin:      configuredOrDiscoveredBinary(secrets, "CCCLAW_RTK_BIN", "rtk"),
 		tmuxManager: tmuxManager,
 	}, nil
 }
@@ -118,6 +124,17 @@ func (e *Executor) LoadResult(taskID string) (*Result, error) {
 	if result != nil {
 		e.applyArtifactMetadata(result, artifacts, meta)
 	}
+	if parseErr == nil {
+		return result, nil
+	}
+	if result != nil {
+		return result, parseErr
+	}
+	fallback := fallbackResultFromRaw(payload, artifacts.LogFile, artifacts.ResultFile)
+	if fallback != nil {
+		e.applyArtifactMetadata(fallback, artifacts, meta)
+		return fallback, parseErr
+	}
 	return result, parseErr
 }
 
@@ -151,7 +168,7 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
 	}
-	launchCommand := e.buildTMuxCommand(opts, artifacts.ResultFile, meta.RTKMarkerFile)
+	launchCommand := e.buildTMuxCommand(opts, artifacts.ResultFile, artifacts.LogFile, meta.RTKMarkerFile)
 	if err := e.tmuxManager.Launch(tmux.SessionSpec{
 		Name:    artifacts.SessionName,
 		WorkDir: repoPath,
@@ -164,9 +181,9 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	return &artifacts, nil
 }
 
-func (e *Executor) buildTMuxCommand(opts RunOptions, resultFile, rtkMarkerFile string) string {
+func (e *Executor) buildTMuxCommand(opts RunOptions, resultFile, logFile, rtkMarkerFile string) string {
 	commandLine := shellJoin(e.commandWithEnv(opts, rtkMarkerFile))
-	script := fmt.Sprintf("set -o pipefail; %s | tee %s", commandLine, shellQuote(resultFile))
+	script := fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s %s", commandLine, shellQuote(resultFile), shellQuote(logFile))
 	return fmt.Sprintf("bash -lc %s", shellQuote(script))
 }
 
@@ -433,6 +450,12 @@ func (e *Executor) commandWithEnv(opts RunOptions, rtkMarkerFile string) []strin
 
 func (e *Executor) runtimeEnv(rtkMarkerFile string) map[string]string {
 	envMap := copyMap(e.secrets)
+	if strings.TrimSpace(envMap["CCCLAW_CLAUDE_BIN"]) == "" && strings.TrimSpace(e.claudeBin) != "" {
+		envMap["CCCLAW_CLAUDE_BIN"] = e.claudeBin
+	}
+	if strings.TrimSpace(envMap["CCCLAW_RTK_BIN"]) == "" && strings.TrimSpace(e.rtkBin) != "" {
+		envMap["CCCLAW_RTK_BIN"] = e.rtkBin
+	}
 	if strings.TrimSpace(rtkMarkerFile) != "" {
 		envMap["CCCLAW_RTK_MARKER_FILE"] = rtkMarkerFile
 	}
@@ -450,16 +473,114 @@ func (e *Executor) resolveRTKEnabled(meta runMetadata) bool {
 }
 
 func (e *Executor) inferRTKEnabled() bool {
+	if strings.TrimSpace(e.rtkBin) != "" {
+		return true
+	}
 	for _, part := range e.command {
 		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
 		if base == "rtk" {
 			return true
 		}
 		if strings.Contains(base, "ccclaude") {
-			return tmux.Available("rtk")
+			return strings.TrimSpace(configuredOrDiscoveredBinary(e.secrets, "CCCLAW_RTK_BIN", "rtk")) != ""
 		}
 	}
 	return false
+}
+
+func fallbackResultFromRaw(raw []byte, logFile, resultFile string) *Result {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return nil
+	}
+	return &Result{
+		Output:     text,
+		LogFile:    logFile,
+		ResultFile: resultFile,
+	}
+}
+
+func configuredOrDiscoveredBinary(secrets map[string]string, envKey, name string) string {
+	if override := strings.TrimSpace(expandUserPath(secrets[envKey])); override != "" {
+		return override
+	}
+	path, err := resolveBinaryPath(name)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+func resolveBinaryPath(name string) (string, error) {
+	trimmed := strings.TrimSpace(expandUserPath(name))
+	if trimmed == "" {
+		return "", fmt.Errorf("命令名为空")
+	}
+	if strings.Contains(trimmed, string(os.PathSeparator)) {
+		if isExecutableFile(trimmed) {
+			return trimmed, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	if path, err := exec.LookPath(trimmed); err == nil {
+		return path, nil
+	}
+	for _, dir := range candidateBinaryDirs() {
+		candidate := filepath.Join(dir, trimmed)
+		if isExecutableFile(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func candidateBinaryDirs() []string {
+	seen := map[string]struct{}{}
+	dirs := make([]string, 0, 8)
+	appendDir := func(path string) {
+		path = strings.TrimSpace(expandUserPath(path))
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		dirs = append(dirs, path)
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		appendDir(dir)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		appendDir(filepath.Join(home, ".local", "bin"))
+		appendDir(filepath.Join(home, "bin"))
+	}
+	return dirs
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+func expandUserPath(path string) string {
+	if path == "" || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	if len(path) > 1 && path[1] == os.PathSeparator {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
 
 func readRTKMarker(path string) (bool, bool) {

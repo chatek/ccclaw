@@ -924,13 +924,13 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "rtk CLI", run: func() (string, error) { return commandVersion("rtk", "--version") }},
 		{name: "tmux CLI", run: func() (string, error) { return commandVersion("tmux", "-V") }},
 		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
-		{name: "sqlite3 CLI", run: func() (string, error) { return commandVersion("sqlite3", "--version") }},
+		{name: "duckdb CLI", run: func() (string, error) { return commandVersion("duckdb", "--version") }},
 		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
 		{name: "gh CLI", run: func() (string, error) { return commandVersion("gh", "--version") }},
 		{name: "GitHub 网络", run: func() (string, error) {
 			return "rate_limit", rt.clientForRepo(rt.cfg.GitHub.ControlRepo).NetworkCheck(ctx)
 		}},
-		{name: "SQLite 读写", run: func() (string, error) { return rt.cfg.Paths.StateDB, rt.store.Ping() }},
+		{name: "状态存储读写", run: func() (string, error) { return filepath.Dir(rt.cfg.Paths.StateDB), rt.store.Ping() }},
 		{name: "调度器", run: rt.describeSchedulerStatus},
 		{name: "磁盘空间", run: func() (string, error) { return rt.cfg.Paths.LogDir, rt.checkDisk() }},
 	}
@@ -1270,7 +1270,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("恢复 session %s 失败，后续重试将降级为新执行", resumeSessionID))
 		}
 		task.RetryCount++
-		task.ErrorMsg = runErr.Error()
+		task.ErrorMsg = formatExecutionFailure(runErr, result)
 		task.State = core.StateFailed
 		eventType := core.EventFailed
 		if task.RetryCount >= core.MaxRetry {
@@ -1304,6 +1304,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 
 func (rt *Runtime) finalizePatrolSession(task *core.Task, execEngine *executor.Executor, status tmux.SessionStatus) error {
 	result, resultErr := execEngine.LoadResult(task.TaskID)
+	result = enrichDiagnosticResult(execEngine, task.TaskID, result)
 	if result != nil {
 		result.ExitCode = status.ExitCode
 	}
@@ -1315,6 +1316,7 @@ func (rt *Runtime) finalizePatrolSession(task *core.Task, execEngine *executor.E
 
 func (rt *Runtime) finalizeMissingSession(task *core.Task, execEngine *executor.Executor) (bool, error) {
 	result, resultErr := execEngine.LoadResult(task.TaskID)
+	result = enrichDiagnosticResult(execEngine, task.TaskID, result)
 	if result == nil && resultErr != nil {
 		return false, nil
 	}
@@ -1333,6 +1335,99 @@ func (rt *Runtime) markTaskDead(task *core.Task, reason, logFile string) error {
 	rt.reportFailure(task)
 	_ = logFile
 	return nil
+}
+
+func formatExecutionFailure(runErr error, result *executor.Result) string {
+	if runErr == nil {
+		return ""
+	}
+	message := strings.TrimSpace(runErr.Error())
+	diagnostic := ""
+	if result != nil {
+		diagnostic = summarizeDiagnosticOutput(result.Output)
+		if diagnostic == "" {
+			diagnostic = readDiagnosticTail(result.LogFile, 12)
+		}
+	}
+	if diagnostic == "" || strings.Contains(message, diagnostic) {
+		return message
+	}
+	return fmt.Sprintf("%s；诊断输出: %s", message, diagnostic)
+}
+
+func enrichDiagnosticResult(execEngine *executor.Executor, taskID string, result *executor.Result) *executor.Result {
+	if execEngine == nil {
+		return result
+	}
+	artifacts := execEngine.ArtifactPaths(taskID)
+	if result == nil {
+		diagnostic := readDiagnosticTail(artifacts.LogFile, 12)
+		if diagnostic == "" {
+			return nil
+		}
+		return &executor.Result{
+			Output:     diagnostic,
+			LogFile:    artifacts.LogFile,
+			ResultFile: artifacts.ResultFile,
+			MetaFile:   artifacts.MetaFile,
+		}
+	}
+	if strings.TrimSpace(result.Output) == "" {
+		result.Output = readDiagnosticTail(result.LogFile, 12)
+	}
+	return result
+}
+
+func readDiagnosticTail(path string, maxLines int) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(string(payload), "\r\n", "\n"), "\n")
+	trimmed := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		trimmed = append(trimmed, line)
+	}
+	if len(trimmed) == 0 {
+		return ""
+	}
+	if maxLines > 0 && len(trimmed) > maxLines {
+		trimmed = trimmed[len(trimmed)-maxLines:]
+	}
+	return summarizeDiagnosticOutput(strings.Join(trimmed, "\n"))
+}
+
+func summarizeDiagnosticOutput(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	summary := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		summary = append(summary, part)
+	}
+	if len(summary) == 0 {
+		return ""
+	}
+	text := strings.Join(summary, " | ")
+	if len(text) > 400 {
+		return strings.TrimSpace(text[:397]) + "..."
+	}
+	return text
 }
 
 func (rt *Runtime) reportBlocked(task *core.Task, reason string) {

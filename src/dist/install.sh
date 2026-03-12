@@ -1366,16 +1366,30 @@ create_claude_wrapper() {
   cat > "$CLAUDE_WRAPPER" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
-if command -v rtk >/dev/null 2>&1; then
+claude_bin="${CCCLAW_CLAUDE_BIN:-}"
+rtk_bin="${CCCLAW_RTK_BIN:-}"
+
+if [[ -z "$claude_bin" ]]; then
+  claude_bin="$(command -v claude || true)"
+fi
+if [[ -z "$rtk_bin" ]]; then
+  rtk_bin="$(command -v rtk || true)"
+fi
+
+if [[ -n "$rtk_bin" && -x "$rtk_bin" ]]; then
   if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
     printf '1\n' > "$CCCLAW_RTK_MARKER_FILE"
   fi
-  exec rtk proxy claude "$@"
+  exec "$rtk_bin" proxy claude "$@"
 fi
 if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
   printf '0\n' > "$CCCLAW_RTK_MARKER_FILE"
 fi
-exec claude "$@"
+if [[ -n "$claude_bin" && -x "$claude_bin" ]]; then
+  exec "$claude_bin" "$@"
+fi
+printf 'ccclaude: 未找到 Claude 可执行文件，请设置 CCCLAW_CLAUDE_BIN 或确保 claude 在 PATH 中\n' >&2
+exit 127
 WRAP
   chmod 755 "$CLAUDE_WRAPPER"
 }

@@ -66,22 +66,13 @@ func (m *ExecManager) Launch(spec SessionSpec) error {
 	if spec.Command == "" {
 		return errors.New("tmux command 不能为空")
 	}
-	if _, err := m.run("new-session", "-d", "-s", spec.Name, "-c", spec.WorkDir); err != nil {
+	if _, err := m.run("new-session", "-d", "-s", spec.Name, "-c", spec.WorkDir, spec.Command); err != nil {
 		return err
 	}
 	if _, err := m.run("set-option", "-t", spec.Name, "remain-on-exit", "on"); err != nil {
 		return err
 	}
 	if _, err := m.run("set-option", "-t", spec.Name, "history-limit", "50000"); err != nil {
-		return err
-	}
-	if strings.TrimSpace(spec.LogFile) != "" {
-		pipeCommand := fmt.Sprintf("cat >> %s", shellQuote(spec.LogFile))
-		if _, err := m.run("pipe-pane", "-t", spec.Name, "-o", pipeCommand); err != nil {
-			return err
-		}
-	}
-	if _, err := m.run("send-keys", "-t", spec.Name, spec.Command, "Enter"); err != nil {
 		return err
 	}
 	return nil
@@ -207,11 +198,4 @@ func isMissingSession(err error) bool {
 func isNoServer(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "no server running") || strings.Contains(text, "没有正在运行的 server")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
