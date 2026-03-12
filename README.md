@@ -60,6 +60,7 @@ O     O     O     |  oo o   o   o
 - 任务仓库模式：`none | remote | local`
 - 默认调度方式：`auto`，优先 `systemd --user`，降级到受控 `cron`
 - 版本命名：`yy.mm.dd.HHMM`
+- 版本时间基准：固定使用 `Asia/Shanghai`，不跟随发布机本地时区
 
 当前已落地的关键能力：
 

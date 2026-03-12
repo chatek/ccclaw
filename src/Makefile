@@ -1,4 +1,4 @@
-VERSION ?= $(shell date '+%y.%m.%d.%H%M')
+VERSION ?= $(shell $(CURDIR)/ops/scripts/version.sh)
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf 'unknown')
 FULL_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf 'unknown')
 GOOS ?= linux
