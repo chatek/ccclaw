@@ -1,0 +1,206 @@
+package storage
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"syscall"
+
+	"github.com/41490/ccclaw/internal/core"
+)
+
+type stateFile struct {
+	Tasks map[string]*core.Task `json:"tasks"`
+}
+
+type StateStore struct {
+	varDir string
+}
+
+func newStateStore(varDir string) *StateStore {
+	return &StateStore{varDir: varDir}
+}
+
+func (s *StateStore) GetByIdempotency(idempotencyKey string) (*core.Task, error) {
+	state, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	for _, task := range state.Tasks {
+		if task != nil && task.IdempotencyKey == idempotencyKey {
+			return cloneTask(task), nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *StateStore) UpsertTask(task *core.Task) error {
+	if task == nil {
+		return errors.New("task 不能为空")
+	}
+	return withFileLock(s.lockPath(), func() error {
+		state, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if state.Tasks == nil {
+			state.Tasks = map[string]*core.Task{}
+		}
+		state.Tasks[task.TaskID] = cloneTask(task)
+		return s.saveUnlocked(state)
+	})
+}
+
+func (s *StateStore) ListTasks() ([]*core.Task, error) {
+	state, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	tasks := make([]*core.Task, 0, len(state.Tasks))
+	for _, task := range state.Tasks {
+		if task != nil {
+			tasks = append(tasks, cloneTask(task))
+		}
+	}
+	return tasks, nil
+}
+
+func (s *StateStore) Snapshot() (map[string]*core.Task, error) {
+	state, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*core.Task, len(state.Tasks))
+	for key, task := range state.Tasks {
+		result[key] = cloneTask(task)
+	}
+	return result, nil
+}
+
+func (s *StateStore) load() (*stateFile, error) {
+	var state *stateFile
+	err := withFileLock(s.lockPath(), func() error {
+		loaded, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		state = loaded
+		return nil
+	})
+	return state, err
+}
+
+func (s *StateStore) loadUnlocked() (*stateFile, error) {
+	path := s.statePath()
+	payload := &stateFile{Tasks: map[string]*core.Task{}}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return payload, nil
+		}
+		return nil, fmt.Errorf("读取状态缓存失败: %w", err)
+	}
+	if len(data) == 0 {
+		return payload, nil
+	}
+	if err := json.Unmarshal(data, payload); err != nil {
+		return nil, fmt.Errorf("解析状态缓存失败: %w", err)
+	}
+	if payload.Tasks == nil {
+		payload.Tasks = map[string]*core.Task{}
+	}
+	return payload, nil
+}
+
+func (s *StateStore) saveUnlocked(state *stateFile) error {
+	if state == nil {
+		state = &stateFile{Tasks: map[string]*core.Task{}}
+	}
+	if state.Tasks == nil {
+		state.Tasks = map[string]*core.Task{}
+	}
+	if err := os.MkdirAll(s.varDir, 0o755); err != nil {
+		return fmt.Errorf("创建状态目录失败: %w", err)
+	}
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化状态缓存失败: %w", err)
+	}
+	tmp, err := os.CreateTemp(s.varDir, "state-*.json")
+	if err != nil {
+		return fmt.Errorf("创建状态临时文件失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(encoded); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("写入状态临时文件失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("关闭状态临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, s.statePath()); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("替换状态缓存失败: %w", err)
+	}
+	return nil
+}
+
+func (s *StateStore) statePath() string {
+	return filepath.Join(s.varDir, "state.json")
+}
+
+func (s *StateStore) lockPath() string {
+	return filepath.Join(s.varDir, ".state.lock")
+}
+
+func cloneTask(task *core.Task) *core.Task {
+	if task == nil {
+		return nil
+	}
+	copy := *task
+	copy.Labels = append([]string(nil), task.Labels...)
+	return &copy
+}
+
+func withFileLock(path string, fn func() error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建锁目录失败: %w", err)
+	}
+	lockFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("打开锁文件失败: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("获取文件锁失败: %w", err)
+	}
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+	return fn()
+}
+
+func sortTasksByUpdatedDesc(tasks []*core.Task) {
+	sort.Slice(tasks, func(i, j int) bool {
+		left := tasks[i]
+		right := tasks[j]
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return left.IssueNumber > right.IssueNumber
+	})
+}
+
+func sortTasksByUpdatedAsc(tasks []*core.Task) {
+	sort.Slice(tasks, func(i, j int) bool {
+		left := tasks[i]
+		right := tasks[j]
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.Before(right.UpdatedAt)
+		}
+		return left.IssueNumber < right.IssueNumber
+	})
+}
