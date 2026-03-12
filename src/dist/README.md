@@ -59,12 +59,19 @@ bash install.sh --remove-cron
 
 ```bash
 ~/.ccclaw/bin/ccclaw scheduler status
+~/.ccclaw/bin/ccclaw scheduler doctor
 ~/.ccclaw/bin/ccclaw scheduler timers
 ~/.ccclaw/bin/ccclaw scheduler logs -f
+~/.ccclaw/bin/ccclaw --log-level debug run
 ~/.ccclaw/bin/ccclaw scheduler use cron
 ~/.ccclaw/bin/ccclaw scheduler use systemd
 ~/.ccclaw/bin/ccclaw scheduler use none
 ```
+
+说明：
+
+- `[scheduler.logs].level` 会同时影响 `ingest/run/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤
+- 手工排障时可用 `--log-level debug` 临时放大本次命令日志，不改写配置
 
 ## Shell 集成
 

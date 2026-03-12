@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/41490/ccclaw/internal/logging"
 )
 
 type LogsOptions struct {
@@ -80,16 +82,7 @@ func BuildLogArchivePath(baseDir, scope string, now time.Time) string {
 }
 
 func normalizeJournalLevel(level string) (string, error) {
-	level = strings.ToLower(strings.TrimSpace(level))
-	if level == "" {
-		return "", nil
-	}
-	switch level {
-	case "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug":
-		return level, nil
-	default:
-		return "", fmt.Errorf("未知日志级别: %s (允许值: emerg|alert|crit|err|warning|notice|info|debug)", level)
-	}
+	return logging.JournalPriority(level)
 }
 
 func openLogArchive(options LogsOptions) (*os.File, error) {

@@ -23,6 +23,7 @@ import (
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
+	"github.com/41490/ccclaw/internal/logging"
 	"github.com/41490/ccclaw/internal/memory"
 	"github.com/41490/ccclaw/internal/scheduler"
 	"github.com/41490/ccclaw/internal/tmux"
@@ -39,6 +40,8 @@ type Runtime struct {
 	memCache map[string]*memory.Index
 	ghCache  map[string]*github.Client
 	syncRepo func(repoPath, message string, paths []string, maxRetry int) error
+	log      *logging.Logger
+	logLevel string
 }
 
 const (
@@ -70,38 +73,7 @@ const (
 )
 
 func NewRuntime(configPath, envFile string) (*Runtime, error) {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return nil, err
-	}
-	if envFile == "" {
-		envFile = cfg.Paths.EnvFile
-	}
-	secrets, err := config.LoadSecrets(envFile)
-	if err != nil {
-		return nil, err
-	}
-	store, err := storage.Open(cfg.Paths.StateDB)
-	if err != nil {
-		return nil, err
-	}
-	mem, err := memory.Build(cfg.Paths.KBDir)
-	if err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("构建 kb 索引失败: %w", err)
-	}
-	rt := &Runtime{
-		cfg:      cfg,
-		secrets:  secrets,
-		store:    store,
-		mem:      mem,
-		memRoot:  cfg.Paths.KBDir,
-		memCache: map[string]*memory.Index{cfg.Paths.KBDir: mem},
-		ghCache:  map[string]*github.Client{},
-		syncRepo: vcs.SyncRepo,
-	}
-	rt.rep = reporter.New(rt.clientForRepo)
-	return rt, nil
+	return NewRuntimeWithOptions(configPath, envFile, RuntimeOptions{})
 }
 
 func (rt *Runtime) clientForRepo(repo string) *github.Client {
@@ -151,14 +123,19 @@ func (rt *Runtime) issueSourceRepos() []string {
 
 func (rt *Runtime) Ingest(ctx context.Context) error {
 	defer rt.store.Close()
+	repos := rt.issueSourceRepos()
+	rt.logInfo("ingest", "开始同步 open issues", "repo_count", len(repos), "log_level", rt.runtimeLogLevel())
 	seen := make(map[string]struct{})
-	for _, repo := range rt.issueSourceRepos() {
+	for _, repo := range repos {
 		issues, err := rt.clientForRepo(repo).ListOpenIssues(rt.cfg.GitHub.IssueLabel, rt.cfg.GitHub.Limit)
 		if err != nil {
+			rt.logError("ingest", "拉取 open issues 失败", "repo", repo, "error", err)
 			return err
 		}
+		rt.logDebug("ingest", "读取 open issues", "repo", repo, "count", len(issues))
 		for _, issue := range issues {
 			if err := rt.syncIssue(ctx, issue, false); err != nil {
+				rt.logError("ingest", "同步 issue 失败", "issue", rt.issueRef(issue.Repo, issue.Number), "error", err)
 				return err
 			}
 			seen[core.TaskID(issue.Repo, issue.Number)] = struct{}{}
@@ -167,12 +144,14 @@ func (rt *Runtime) Ingest(ctx context.Context) error {
 
 	tasks, err := rt.store.ListTasks()
 	if err != nil {
+		rt.logError("ingest", "读取任务列表失败", "error", err)
 		return err
 	}
-	observedRepos := make(map[string]struct{}, len(rt.issueSourceRepos()))
-	for _, repo := range rt.issueSourceRepos() {
+	observedRepos := make(map[string]struct{}, len(repos))
+	for _, repo := range repos {
 		observedRepos[repo] = struct{}{}
 	}
+	revisited := 0
 	for _, task := range tasks {
 		if task == nil || task.State == core.StateDone || task.State == core.StateDead {
 			continue
@@ -185,61 +164,82 @@ func (rt *Runtime) Ingest(ctx context.Context) error {
 		}
 		issue, err := rt.clientForRepo(task.IssueRepo).GetIssue(task.IssueNumber)
 		if err != nil {
+			rt.logError("ingest", "回查 issue 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 			return err
 		}
 		if err := rt.syncIssue(ctx, *issue, false); err != nil {
+			rt.logError("ingest", "回查同步 issue 失败", "issue", rt.issueRef(issue.Repo, issue.Number), "error", err)
 			return err
 		}
+		revisited++
 	}
+	rt.logInfo("ingest", "同步完成", "visible_tasks", len(seen), "revisited", revisited)
 	return nil
 }
 
-func (rt *Runtime) Run(ctx context.Context, limit int) error {
+func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 	defer rt.store.Close()
 	tasks, err := rt.store.ListRunnable(limit)
 	if err != nil {
+		rt.logError("run", "读取待执行任务失败", "limit", limit, "error", err)
 		return err
 	}
 	if len(tasks) == 0 {
-		fmt.Println("暂无待执行任务")
+		rt.logInfo("run", "暂无待执行任务", "limit", limit)
+		if out != nil {
+			_, _ = fmt.Fprintln(out, "暂无待执行任务")
+		}
 		return nil
 	}
+	rt.logInfo("run", "开始执行待处理任务", "count", len(tasks), "limit", limit, "log_level", rt.runtimeLogLevel())
 	execEngine, err := rt.newExecutor()
 	if err != nil {
+		rt.logError("run", "初始化执行器失败", "error", err)
 		return err
 	}
 	for _, task := range tasks {
 		issue, err := rt.clientForRepo(task.IssueRepo).GetIssue(task.IssueNumber)
 		if err != nil {
+			rt.logError("run", "读取 issue 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 			return err
 		}
 		if err := rt.syncIssue(ctx, *issue, true); err != nil {
+			rt.logError("run", "同步 issue 失败", "issue", rt.issueRef(issue.Repo, issue.Number), "error", err)
 			return err
 		}
 		fresh, err := rt.store.GetByIdempotency(task.IdempotencyKey)
 		if err != nil {
+			rt.logError("run", "读取任务最新状态失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 			return err
 		}
 		if fresh == nil || fresh.State == core.StateBlocked || fresh.State == core.StateDone || fresh.State == core.StateDead {
+			if fresh != nil {
+				rt.logDebug("run", "任务已不再可执行，跳过", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "state", fresh.State)
+			}
 			continue
 		}
 		target, err := rt.cfg.EnabledTargetByRepo(fresh.TargetRepo)
 		if err != nil {
+			rt.logError("run", "解析目标仓库失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "target_repo", fresh.TargetRepo, "error", err)
 			return err
 		}
 		runOpts := rt.buildExecutionOptions(fresh, target)
 		fresh.State = core.StateRunning
 		if err := rt.store.UpsertTask(fresh); err != nil {
+			rt.logError("run", "写入任务运行态失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
 			return err
 		}
 		_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
+		rt.logInfo("run", "开始执行任务", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "task_id", fresh.TaskID, "retry", fresh.RetryCount)
 		if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
+			rt.logInfo("run", "尝试恢复已有 session", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_id", runOpts.ResumeSessionID)
 		}
 
 		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
 		if result != nil && result.Pending {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
+			rt.logInfo("run", "任务已挂入 tmux 会话", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_name", result.SessionName)
 			continue
 		}
 		if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
@@ -251,6 +251,7 @@ func (rt *Runtime) Run(ctx context.Context, limit int) error {
 			}
 		}
 		if err := rt.finishTaskExecution(fresh, result, runErr); err != nil {
+			rt.logError("run", "收口任务执行结果失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
 			return err
 		}
 	}
@@ -261,10 +262,12 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 	defer rt.store.Close()
 	execEngine, err := rt.newExecutor()
 	if err != nil {
+		rt.logError("patrol", "初始化执行器失败", "error", err)
 		return err
 	}
 	manager := execEngine.TMux()
 	if manager == nil {
+		rt.logInfo("patrol", "当前未启用 tmux，会话巡查已跳过")
 		_, _ = fmt.Fprintln(out, "当前未启用 tmux，会话巡查已跳过")
 		return nil
 	}
@@ -272,12 +275,15 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 	timeout := execEngine.Timeout()
 	runningTasks, err := rt.store.ListRunning()
 	if err != nil {
+		rt.logError("patrol", "读取运行中任务失败", "error", err)
 		return err
 	}
 	sessions, err := manager.List("ccclaw-")
 	if err != nil {
+		rt.logError("patrol", "列出 tmux 会话失败", "error", err)
 		return err
 	}
+	rt.logInfo("patrol", "开始巡查 tmux 会话", "running_tasks", len(runningTasks), "sessions", len(sessions), "timeout", timeout.String())
 	sessionMap := make(map[string]tmux.SessionStatus, len(sessions))
 	for _, session := range sessions {
 		sessionMap[session.Name] = session
@@ -296,24 +302,31 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 		status, exists := sessionMap[artifacts.SessionName]
 		if !exists {
 			if handled, err := rt.finalizeMissingSession(task, execEngine); err != nil {
+				rt.logError("patrol", "收口丢失会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 				return err
 			} else if handled {
 				completed++
+				rt.logInfo("patrol", "发现已完成但会话已退出的任务", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
 				continue
 			}
 			if err := rt.markTaskDead(task, fmt.Sprintf("tmux 会话 %s 已丢失，且未找到结果文件", artifacts.SessionName), artifacts.LogFile); err != nil {
+				rt.logError("patrol", "标记丢失会话任务失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 				return err
 			}
+			rt.logWarning("patrol", "tmux 会话已丢失且无结果文件", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
 			timedOut++
 			continue
 		}
 		if status.PaneDead {
 			if err := rt.finalizePatrolSession(task, execEngine, status); err != nil {
+				rt.logError("patrol", "收口已退出会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
 				return err
 			}
 			completed++
+			rt.logInfo("patrol", "已收口退出的 tmux 会话", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "exit_code", status.ExitCode)
 			if killErr := manager.Kill(status.Name); killErr != nil {
 				_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("清理 tmux 会话失败: %v", killErr))
+				rt.logWarning("patrol", "清理已退出 tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
 			}
 			continue
 		}
@@ -322,6 +335,7 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 		if timeout > 0 && runningFor >= timeout {
 			tail, _ := manager.CaptureOutput(status.Name, 80)
 			if killErr := manager.Kill(status.Name); killErr != nil {
+				rt.logError("patrol", "终止超时 tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
 				return fmt.Errorf("终止超时 tmux 会话失败: %w", killErr)
 			}
 			reason := fmt.Sprintf("tmux 会话 %s 已运行 %s，超过超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout)
@@ -329,13 +343,16 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 				reason += "\n最后输出:\n" + tail
 			}
 			if err := rt.markTaskDead(task, reason, artifacts.LogFile); err != nil {
+				rt.logError("patrol", "标记超时任务失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
 				return err
 			}
+			rt.logWarning("patrol", "tmux 会话执行超时，已终止", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
 			timedOut++
 			continue
 		}
 		if timeout > 0 && runningFor >= timeout*8/10 {
 			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("tmux 会话 %s 已运行 %s，接近超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout))
+			rt.logWarning("patrol", "tmux 会话接近超时阈值", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
 			warnings++
 		}
 	}
@@ -345,12 +362,15 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 			continue
 		}
 		if err := manager.Kill(session.Name); err != nil {
+			rt.logError("patrol", "清理孤儿 tmux 会话失败", "session_name", session.Name, "error", err)
 			return fmt.Errorf("清理孤儿 tmux 会话失败: %w", err)
 		}
+		rt.logWarning("patrol", "已清理孤儿 tmux 会话", "session_name", session.Name)
 		orphaned++
 	}
 
 	rt.syncReposAfterPatrol(out)
+	rt.logInfo("patrol", "巡查完成", "completed", completed, "timeout", timedOut, "warning", warnings, "orphaned", orphaned, "running", len(runningTasks))
 	_, _ = fmt.Fprintf(out, "巡查完成: completed=%d timeout=%d warning=%d orphaned=%d running=%d\n", completed, timedOut, warnings, orphaned, len(runningTasks))
 	_ = ctx
 	return nil
@@ -846,6 +866,7 @@ func (rt *Runtime) ShowConfig(out io.Writer) error {
 
 func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	defer rt.store.Close()
+	rt.logInfo("doctor", "开始执行环境诊断", "log_level", rt.runtimeLogLevel())
 	checks := []struct {
 		name string
 		run  func() (string, error)
@@ -929,6 +950,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		approved = true
 	}
 	targetRepo, routeReasons := rt.resolveTargetRepo(issueRepo, issue.Body)
+	rt.logDebug("issue", "完成 Issue 评估", "issue", rt.issueRef(issueRepo, issue.Number), "from_run", fromRun, "trusted", trusted, "permission", permission, "approved", approved, "target_repo", targetRepo)
 	blockReasons := make([]string, 0, 2)
 	if !strings.EqualFold(strings.TrimSpace(issue.State), "open") {
 		blockReasons = append(blockReasons, fmt.Sprintf("Issue 当前状态为 `%s`，等待人工重新打开", issue.State))
@@ -997,6 +1019,11 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 			detail = blockReasonText(blockReasons)
 		}
 		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
+		if existing.State == core.StateBlocked {
+			rt.logWarning("issue", "Issue 已阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
+		} else {
+			rt.logInfo("issue", "Issue 已入队", "issue", rt.issueRef(issueRepo, issue.Number), "state", existing.State, "target_repo", existing.TargetRepo)
+		}
 		if existing.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(existing, blockReasonText(blockReasons))
 		}
@@ -1010,9 +1037,16 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 			detail = blockReasonText(blockReasons)
 		}
 		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
+		if existing.State == core.StateBlocked {
+			rt.logWarning("issue", "Issue 状态变更为阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
+		} else {
+			rt.logInfo("issue", "Issue 状态已更新", "issue", rt.issueRef(issueRepo, issue.Number), "from", previousState, "to", existing.State)
+		}
 		if existing.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(existing, blockReasonText(blockReasons))
 		}
+	} else {
+		rt.logDebug("issue", "Issue 状态无变化", "issue", rt.issueRef(issueRepo, issue.Number), "state", existing.State)
 	}
 	return nil
 }
@@ -1201,6 +1235,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 			return err
 		}
 		_ = rt.store.AppendEvent(task.TaskID, eventType, task.ErrorMsg)
+		rt.logError("execution", "任务执行失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "state", task.State, "retry", task.RetryCount, "error", runErr)
 		rt.reportFailure(task)
 		return nil
 	}
@@ -1211,6 +1246,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 		return err
 	}
 	_ = rt.store.AppendEvent(task.TaskID, core.EventDone, "任务执行完成")
+	rt.logInfo("execution", "任务执行完成", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "duration", resultDuration(result), "report", task.ReportPath)
 	if result != nil {
 		rt.reportSuccess(task, result.Duration, result.LogFile)
 	}
@@ -1247,6 +1283,7 @@ func (rt *Runtime) markTaskDead(task *core.Task, reason, logFile string) error {
 		return err
 	}
 	_ = rt.store.AppendEvent(task.TaskID, core.EventDead, reason)
+	rt.logError("execution", "任务已标记为终止", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "retry", task.RetryCount, "reason", reason)
 	rt.reportFailure(task)
 	_ = logFile
 	return nil
@@ -1809,6 +1846,7 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 		day = time.Now()
 	}
 	targetRepos := rt.journalTargetRepos()
+	rt.logInfo("journal", "开始生成日报", "day", day.Format("2006-01-02"), "targets", len(targetRepos), "log_level", rt.runtimeLogLevel())
 	writtenPaths := make([]string, 0, len(targetRepos)+3)
 	for _, targetRepo := range targetRepos {
 		summary, err := rt.store.JournalDaySummaryByTarget(day, targetRepo)
@@ -1841,6 +1879,7 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 			return fmt.Errorf("写入 journal 失败: %w", err)
 		}
 		writtenPaths = append(writtenPaths, path)
+		rt.logInfo("journal", "日报已生成", "day", day.Format("2006-01-02"), "target_repo", targetRepo, "path", path)
 		_, _ = fmt.Fprintf(out, "journal 已生成: %s\n", path)
 	}
 	summaryPaths, err := rt.refreshJournalSummaries(day)
@@ -1850,9 +1889,11 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 	writtenPaths = append(writtenPaths, summaryPaths...)
 	if homeRepo := strings.TrimSpace(rt.cfg.Paths.HomeRepo); homeRepo != "" && len(writtenPaths) > 0 {
 		if err := rt.repoSync(homeRepo, fmt.Sprintf("journal: %s", day.Format("2006-01-02")), writtenPaths, 3); err != nil {
+			rt.logWarning("journal", "知识仓库同步失败", "repo", homeRepo, "error", err)
 			_, _ = fmt.Fprintf(out, "警告: 知识仓库同步失败: %v\n", err)
 		}
 	}
+	rt.logInfo("journal", "日报生成完成", "day", day.Format("2006-01-02"), "files", len(writtenPaths))
 	return nil
 }
 

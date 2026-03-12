@@ -620,7 +620,7 @@ func normalizeSchedulerLogs(logs *SchedulerLogsConfig, defaultArchiveRoot string
 
 func isSupportedSchedulerLogLevel(level string) bool {
 	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug":
+	case "emerg", "alert", "crit", "err", "error", "warning", "notice", "info", "debug":
 		return true
 	default:
 		return false
@@ -857,9 +857,10 @@ func renderSchedulerSection(scheduler SchedulerConfig) []string {
 		fmt.Sprintf("patrol = %q", scheduler.Timers.Patrol),
 		fmt.Sprintf("journal = %q", scheduler.Timers.Journal),
 		"",
-		"# 调度日志视图：",
-		"# - level: `ccclaw scheduler logs` 默认 journal 优先级过滤",
-		"# - 允许值: emerg|alert|crit|err|warning|notice|info|debug",
+		"# 调度日志级别：",
+		"# - level: 运行态 `ingest/run/patrol/journal` 共享的日志阈值，同时也是 `ccclaw scheduler logs` 默认过滤",
+		"# - 运行态统一归一为 debug|info|warning|error；兼容历史别名 emerg|alert|crit|err|notice",
+		"# - `error` 在 journalctl 查询时会自动映射为 `err`",
 		"# - archive_dir: `ccclaw scheduler logs --archive` 默认归档目录",
 		"[scheduler.logs]",
 		fmt.Sprintf("level = %q", scheduler.Logs.Level),

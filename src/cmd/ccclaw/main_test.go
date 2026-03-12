@@ -336,6 +336,88 @@ func TestSchedulerLogsCommand(t *testing.T) {
 	}
 }
 
+func TestSchedulerLogsCommandAcceptsErrorAlias(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	journalLog := filepath.Join(dir, "journalctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeJournalctl(t, filepath.Join(fakeBin, "journalctl"), journalLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", journalLog)
+
+	cmd := newRootCmd()
+	cmd.SetOut(new(bytes.Buffer))
+	cmd.SetErr(new(bytes.Buffer))
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "logs", "run", "--level", "error"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler logs --level error 失败: %v", err)
+	}
+	payload, err := os.ReadFile(journalLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "-p err") {
+		t.Fatalf("expected error alias to map to err: %q", string(payload))
+	}
+}
+
+func TestRunCommandLogLevelOverride(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newRootCmd()
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "--log-level", "info", "run"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 run --log-level info 失败: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "暂无待执行任务") {
+		t.Fatalf("expected run stdout: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "暂无待执行任务") {
+		t.Fatalf("expected runtime info log on stderr: %q", stderr.String())
+	}
+
+	cmd = newRootCmd()
+	stdout = new(bytes.Buffer)
+	stderr = new(bytes.Buffer)
+	cmd.SetOut(stdout)
+	cmd.SetErr(stderr)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "--log-level", "warning", "run"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 run --log-level warning 失败: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "暂无待执行任务") {
+		t.Fatalf("expected run stdout: %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "暂无待执行任务") {
+		t.Fatalf("warning level should suppress runtime info log: %q", stderr.String())
+	}
+}
+
 func TestSchedulerDoctorCommand(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

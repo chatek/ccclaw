@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/41490/ccclaw/internal/config"
+	"github.com/41490/ccclaw/internal/logging"
 )
 
 type doctorCheck struct {
@@ -47,6 +48,16 @@ func Doctor(ctx context.Context, cfg *config.Config, out io.Writer) error {
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	probe := InspectStatus(cfg)
 	detail, statusErr := summarize(probe)
+	runtimeLevel, levelErr := logging.NormalizeRuntimeLevel(cfg.Scheduler.Logs.Level)
+	logLevelDetail := fmt.Sprintf(
+		"configured=%s runtime=%s scheduler_logs_default=%s cli/stderr 与 journald 共享同一阈值",
+		cfg.Scheduler.Logs.Level,
+		runtimeLevel,
+		cfg.Scheduler.Logs.Level,
+	)
+	if levelErr != nil {
+		logLevelDetail = fmt.Sprintf("configured=%s", cfg.Scheduler.Logs.Level)
+	}
 	checks := []doctorCheck{
 		{
 			Name: "调度配置",
@@ -58,6 +69,11 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 				cfg.Scheduler.Logs.ArchiveDir,
 			),
 			Err: validateDoctorConfig(cfg),
+		},
+		{
+			Name:   "运行态日志级别",
+			Detail: logLevelDetail,
+			Err:    levelErr,
 		},
 		{
 			Name:   "调度状态",

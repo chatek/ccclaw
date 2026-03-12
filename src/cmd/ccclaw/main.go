@@ -37,6 +37,7 @@ func newRootCmd() *cobra.Command {
 	var schedulerLogsLines int
 	var schedulerLogsLevel string
 	var schedulerLogsArchive bool
+	var runtimeLogLevel string
 
 	rootCmd := &cobra.Command{
 		Use:           "ccclaw",
@@ -54,13 +55,21 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.PersistentFlags().StringVar(&configPath, "config", defaultConfigPath(), "TOML 配置文件路径")
 	rootCmd.PersistentFlags().StringVar(&envFile, "env-file", defaultEnvFilePath(), "固定 .env 隐私配置文件路径")
+	rootCmd.PersistentFlags().StringVar(&runtimeLogLevel, "log-level", "", "临时覆盖运行态日志级别: debug|info|warning|error")
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
+
+	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
+		return app.NewRuntimeWithOptions(configPath, envFile, app.RuntimeOptions{
+			LogWriter:        cmd.ErrOrStderr(),
+			LogLevelOverride: runtimeLogLevel,
+		})
+	}
 
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "ingest",
 		Short: "拉取并入队 Issue 任务",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
@@ -72,11 +81,11 @@ func newRootCmd() *cobra.Command {
 		Use:   "run",
 		Short: "执行待处理任务",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
-			return rt.Run(cmd.Context(), runLimit)
+			return rt.Run(cmd.Context(), cmd.OutOrStdout(), runLimit)
 		},
 	}
 	runCmd.Flags().IntVar(&runLimit, "limit", 10, "本轮最多执行任务数")
@@ -86,11 +95,11 @@ func newRootCmd() *cobra.Command {
 		Use:   "status",
 		Short: "查看当前运行态快照",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
-			return rt.Status(os.Stdout)
+			return rt.Status(cmd.OutOrStdout())
 		},
 	})
 
@@ -98,7 +107,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "stats",
 		Short: "查看 token 使用统计",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
@@ -106,7 +115,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return rt.StatsWithOptions(os.Stdout, options)
+			return rt.StatsWithOptions(cmd.OutOrStdout(), options)
 		},
 	}
 	statsCmd.Flags().StringVar(&statsFrom, "from", "", "按 YYYY-MM-DD 指定统计起始日期(含当日)")
@@ -120,11 +129,11 @@ func newRootCmd() *cobra.Command {
 		Use:   "patrol",
 		Short: "巡查 tmux 会话与运行中任务",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
-			return rt.Patrol(cmd.Context(), os.Stdout)
+			return rt.Patrol(cmd.Context(), cmd.OutOrStdout())
 		},
 	})
 
@@ -132,7 +141,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "journal",
 		Short: "生成指定日期的 journal 日报",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
@@ -144,7 +153,7 @@ func newRootCmd() *cobra.Command {
 				}
 				day = parsed
 			}
-			return rt.Journal(day, os.Stdout)
+			return rt.Journal(day, cmd.OutOrStdout())
 		},
 	}
 	journalCmd.Flags().StringVar(&journalDate, "date", "", "按 YYYY-MM-DD 生成指定日期 journal")
@@ -154,11 +163,11 @@ func newRootCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "执行环境与部署健康检查",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
-			return rt.Doctor(cmd.Context(), os.Stdout)
+			return rt.Doctor(cmd.Context(), cmd.OutOrStdout())
 		},
 	})
 
@@ -166,7 +175,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "config",
 		Short: "校验并展示当前配置",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
@@ -266,7 +275,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "status",
 		Short: "单独查看当前调度器状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := app.NewRuntime(configPath, envFile)
+			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
@@ -372,7 +381,7 @@ func newRootCmd() *cobra.Command {
 	schedulerLogsCmd.Flags().BoolVarP(&schedulerLogsFollow, "follow", "f", false, "持续追随日志输出")
 	schedulerLogsCmd.Flags().StringVar(&schedulerLogsSince, "since", "", "仅显示指定时间之后的日志，如 '1 hour ago'")
 	schedulerLogsCmd.Flags().IntVar(&schedulerLogsLines, "lines", 50, "默认显示最近多少行日志")
-	schedulerLogsCmd.Flags().StringVar(&schedulerLogsLevel, "level", "", "journal 优先级过滤: emerg|alert|crit|err|warning|notice|info|debug")
+	schedulerLogsCmd.Flags().StringVar(&schedulerLogsLevel, "level", "", "journal 优先级过滤: emerg|alert|crit|err|warning|notice|info|debug|error")
 	schedulerLogsCmd.Flags().BoolVar(&schedulerLogsArchive, "archive", false, "将本次日志输出同步归档到 scheduler.logs.archive_dir")
 	schedulerCmd.AddCommand(schedulerLogsCmd)
 	schedulerCmd.AddCommand(&cobra.Command{
