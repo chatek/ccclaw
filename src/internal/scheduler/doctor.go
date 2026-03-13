@@ -61,7 +61,8 @@ func renderDoctorCheckExtra(check doctorCheck) string {
 
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 	probe := InspectStatus(cfg)
-	detail, statusErr := summarize(probe)
+	statusSnapshot, statusErr := CollectStatus(cfg)
+	detail := statusSnapshot.Detail()
 	runtimeLevel, levelErr := logging.NormalizeRuntimeLevel(cfg.Scheduler.Logs.Level)
 	logLevelDetail := fmt.Sprintf(
 		"configured=%s runtime=%s scheduler_logs_default=%s cli/stderr 与 journald 共享同一阈值",

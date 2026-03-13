@@ -617,6 +617,10 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
   --config ~/.ccclaw/ops/config/config.toml \
   --env-file ~/.ccclaw/.env
 
+~/.ccclaw/bin/ccclaw scheduler status --json \
+  --config ~/.ccclaw/ops/config/config.toml \
+  --env-file ~/.ccclaw/.env
+
 ~/.ccclaw/bin/ccclaw scheduler use cron --config ~/.ccclaw/ops/config/config.toml
 ~/.ccclaw/bin/ccclaw scheduler use systemd --config ~/.ccclaw/ops/config/config.toml
 ~/.ccclaw/bin/ccclaw scheduler use none --config ~/.ccclaw/ops/config/config.toml
@@ -652,6 +656,7 @@ ccclaw --log-level debug run    # 临时放大本次运行态日志密度
 
 # 运行态观测
 ccclaw status                   # 查看当前运行态快照
+ccclaw status --json            # 结构化输出运行态快照
 ccclaw patrol                   # 巡查 tmux 会话与运行中任务
 ccclaw stats                    # 查看 token 使用统计
 ccclaw stats --daily --from 2026-03-01 --to 2026-03-10
@@ -663,6 +668,7 @@ ccclaw journal --date 2026-03-10
 
 # 调度器
 ccclaw scheduler status         # 查看调度后端状态
+ccclaw scheduler status --json  # 结构化输出调度状态
 ccclaw scheduler doctor         # 查看调度与日志运维诊断
 ccclaw scheduler timers         # 默认窄视图，只保留关键列
 ccclaw scheduler timers --wide  # 完整视图，显示 CAL_RAW/CAL_CFG 与双时区时间
@@ -694,6 +700,12 @@ CLI 约定：
 2. 再看 `ccclaw scheduler doctor`，确认 linger、user bus、unit 漂移、timer/service 最近状态
 3. 最后按需要选择 `ccclaw scheduler timers --wide|--raw|--json`
 4. 若 doctor 提示 service 异常，再执行 `ccclaw scheduler logs <scope>` 或 `journalctl --user -u <service>`
+
+脚本化观测建议：
+
+- 根级运行态：`ccclaw status --json`
+- 调度后端状态：`ccclaw scheduler status --json`
+- 定时器详情：`ccclaw scheduler timers --json`
 
 ## 配置文件
 

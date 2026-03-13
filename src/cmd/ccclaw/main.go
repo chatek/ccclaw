@@ -41,6 +41,8 @@ func newRootCmd() *cobra.Command {
 	var schedulerLogsLines int
 	var schedulerLogsLevel string
 	var schedulerLogsArchive bool
+	var statusJSON bool
+	var schedulerStatusJSON bool
 	var schedulerTimersWide bool
 	var schedulerTimersRaw bool
 	var schedulerTimersJSON bool
@@ -101,7 +103,7 @@ func newRootCmd() *cobra.Command {
 	runCmd.Flags().IntVar(&runLimit, "limit", 10, "本轮最多执行任务数")
 	rootCmd.AddCommand(runCmd)
 
-	rootCmd.AddCommand(&cobra.Command{
+	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "查看当前运行态快照",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -109,9 +111,11 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return rt.Status(cmd.OutOrStdout())
+			return rt.StatusWithOptions(cmd.OutOrStdout(), app.StatusOptions{JSON: statusJSON})
 		},
-	})
+	}
+	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "输出结构化 JSON，便于脚本消费")
+	rootCmd.AddCommand(statusCmd)
 
 	statsCmd := &cobra.Command{
 		Use:   "stats",
@@ -281,21 +285,19 @@ func newRootCmd() *cobra.Command {
 		Use:   "scheduler",
 		Short: "管理调度器后端",
 	}
-	schedulerCmd.AddCommand(&cobra.Command{
+	schedulerStatusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "单独查看当前调度器状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rt, err := newRuntime(cmd)
+			cfg, err := config.Load(configPath)
 			if err != nil {
 				return err
 			}
-			detail, err := rt.SchedulerStatus()
-			if detail != "" {
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), detail)
-			}
-			return err
+			return scheduler.RenderStatus(cfg, cmd.OutOrStdout(), schedulerStatusJSON)
 		},
-	})
+	}
+	schedulerStatusCmd.Flags().BoolVar(&schedulerStatusJSON, "json", false, "输出结构化 JSON，便于脚本消费")
+	schedulerCmd.AddCommand(schedulerStatusCmd)
 	schedulerCmd.AddCommand(&cobra.Command{
 		Use:   "doctor",
 		Short: "单独检查调度后端、timer 与日志运维能力",

@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,25 +15,84 @@ import (
 )
 
 type Probe struct {
-	Requested        string
-	SystemdUserDir   string
-	SystemdInstalled bool
-	SystemdActive    bool
-	SystemdReason    string
-	CronActive       bool
-	CronReason       string
+	Requested        string `json:"requested"`
+	SystemdUserDir   string `json:"systemd_user_dir"`
+	SystemdInstalled bool   `json:"systemd_installed"`
+	SystemdActive    bool   `json:"systemd_active"`
+	SystemdReason    string `json:"systemd_reason,omitempty"`
+	CronActive       bool   `json:"cron_active"`
+	CronReason       string `json:"cron_reason,omitempty"`
 }
 
 type Diagnosis struct {
-	Effective string
-	Reason    string
-	Repair    string
-	Context   []string
+	Effective string   `json:"effective"`
+	Reason    string   `json:"reason"`
+	Repair    string   `json:"repair,omitempty"`
+	Context   []string `json:"context,omitempty"`
+}
+
+type StatusSnapshot struct {
+	Requested        string   `json:"requested"`
+	Effective        string   `json:"effective"`
+	Reason           string   `json:"reason"`
+	Repair           string   `json:"repair,omitempty"`
+	Context          []string `json:"context,omitempty"`
+	MatchesRequest   bool     `json:"matches_request"`
+	SystemdUserDir   string   `json:"systemd_user_dir,omitempty"`
+	SystemdInstalled bool     `json:"systemd_installed"`
+	SystemdActive    bool     `json:"systemd_active"`
+	SystemdReason    string   `json:"systemd_reason,omitempty"`
+	CronActive       bool     `json:"cron_active"`
+	CronReason       string   `json:"cron_reason,omitempty"`
 }
 
 func DescribeStatus(cfg *config.Config) (string, error) {
-	probe := InspectStatus(cfg)
-	return summarize(probe)
+	snapshot, err := CollectStatus(cfg)
+	return snapshot.Detail(), err
+}
+
+func CollectStatus(cfg *config.Config) (StatusSnapshot, error) {
+	return CollectStatusFromProbe(InspectStatus(cfg))
+}
+
+func CollectStatusFromProbe(probe Probe) (StatusSnapshot, error) {
+	requested := probe.Requested
+	if requested == "" {
+		requested = "none"
+	}
+	diagnosis := diagnose(probe, requested)
+	err := summarizeError(requested, diagnosis.Effective)
+	return StatusSnapshot{
+		Requested:        requested,
+		Effective:        diagnosis.Effective,
+		Reason:           diagnosis.Reason,
+		Repair:           diagnosis.Repair,
+		Context:          diagnosis.Context,
+		MatchesRequest:   err == nil,
+		SystemdUserDir:   probe.SystemdUserDir,
+		SystemdInstalled: probe.SystemdInstalled,
+		SystemdActive:    probe.SystemdActive,
+		SystemdReason:    probe.SystemdReason,
+		CronActive:       probe.CronActive,
+		CronReason:       probe.CronReason,
+	}, err
+}
+
+func RenderStatus(cfg *config.Config, out io.Writer, asJSON bool) error {
+	snapshot, err := CollectStatus(cfg)
+	if asJSON {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		if encodeErr := encoder.Encode(snapshot); encodeErr != nil {
+			return encodeErr
+		}
+		return err
+	}
+	_, writeErr := fmt.Fprintln(out, snapshot.Detail())
+	if writeErr != nil {
+		return writeErr
+	}
+	return err
 }
 
 func InspectStatus(cfg *config.Config) Probe {
@@ -51,44 +112,41 @@ func InspectStatus(cfg *config.Config) Probe {
 	return probe
 }
 
-func summarize(probe Probe) (string, error) {
-	requested := probe.Requested
-	if requested == "" {
-		requested = "none"
-	}
-	diagnosis := diagnose(probe, requested)
-
-	detail := fmt.Sprintf("request=%s effective=%s reason=%s", requested, diagnosis.Effective, diagnosis.Reason)
-	for _, item := range diagnosis.Context {
+func (snapshot StatusSnapshot) Detail() string {
+	detail := fmt.Sprintf("request=%s effective=%s reason=%s", snapshot.Requested, snapshot.Effective, snapshot.Reason)
+	for _, item := range snapshot.Context {
 		detail += " " + item
 	}
-	if diagnosis.Repair != "" {
-		detail += fmt.Sprintf(" repair=%s", diagnosis.Repair)
+	if snapshot.Repair != "" {
+		detail += fmt.Sprintf(" repair=%s", snapshot.Repair)
 	}
+	return detail
+}
 
+func summarizeError(requested, effective string) error {
 	switch requested {
 	case "none":
-		if diagnosis.Effective != "none" {
-			return detail, fmt.Errorf("配置要求 none，但当前检测到 %s 调度仍在生效", diagnosis.Effective)
+		if effective != "none" {
+			return fmt.Errorf("配置要求 none，但当前检测到 %s 调度仍在生效", effective)
 		}
-		return detail, nil
+		return nil
 	case "systemd":
-		if diagnosis.Effective != "systemd" {
-			return detail, fmt.Errorf("配置要求 systemd，但当前检测到 %s", diagnosis.Effective)
+		if effective != "systemd" {
+			return fmt.Errorf("配置要求 systemd，但当前检测到 %s", effective)
 		}
-		return detail, nil
+		return nil
 	case "cron":
-		if diagnosis.Effective != "cron" {
-			return detail, fmt.Errorf("配置要求 cron，但当前检测到 %s", diagnosis.Effective)
+		if effective != "cron" {
+			return fmt.Errorf("配置要求 cron，但当前检测到 %s", effective)
 		}
-		return detail, nil
+		return nil
 	case "auto":
-		if diagnosis.Effective == "none" || diagnosis.Effective == "systemd+cron" {
-			return detail, fmt.Errorf("自动调度未处于单一可用状态")
+		if effective == "none" || effective == "systemd+cron" {
+			return fmt.Errorf("自动调度未处于单一可用状态")
 		}
-		return detail, nil
+		return nil
 	default:
-		return detail, fmt.Errorf("未知调度模式: %s", requested)
+		return fmt.Errorf("未知调度模式: %s", requested)
 	}
 }
 

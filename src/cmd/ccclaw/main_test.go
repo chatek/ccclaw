@@ -247,6 +247,94 @@ func TestSchedulerStatusCommand(t *testing.T) {
 	}
 }
 
+func TestSchedulerStatusJSONCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeCrontab(t, filepath.Join(fakeBin, "crontab"), filepath.Join(dir, "crontab.txt"))
+	writeFakeSystemctlProbe(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_CRONTAB_FILE", filepath.Join(dir, "crontab.txt"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "scheduler", "status", "--json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler status --json 失败: %v", err)
+	}
+	var payload struct {
+		Requested      string `json:"requested"`
+		Effective      string `json:"effective"`
+		MatchesRequest bool   `json:"matches_request"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.Requested != "none" || payload.Effective != "none" || !payload.MatchesRequest {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+func TestStatusJSONCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	errOut := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(errOut)
+	cmd.SetArgs([]string{"--config", configPath, "--env-file", envPath, "status", "--json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 status --json 失败: %v", err)
+	}
+	var payload struct {
+		Scheduler struct {
+			Requested string `json:"requested"`
+			Effective string `json:"effective"`
+		} `json:"scheduler"`
+		Tasks struct {
+			Total int `json:"total"`
+		} `json:"tasks"`
+		Tokens struct {
+			Runs int `json:"runs"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.Scheduler.Requested != "none" || payload.Scheduler.Effective != "none" {
+		t.Fatalf("unexpected scheduler payload: %+v", payload.Scheduler)
+	}
+	if payload.Tasks.Total != 0 || payload.Tokens.Runs != 0 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
 func TestSchedulerTimersCommand(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
