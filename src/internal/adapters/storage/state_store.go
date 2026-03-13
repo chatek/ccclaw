@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/41490/ccclaw/internal/core"
 )
@@ -37,6 +40,18 @@ func (s *StateStore) GetByIdempotency(idempotencyKey string) (*core.Task, error)
 	return nil, nil
 }
 
+func (s *StateStore) GetTask(taskID string) (*core.Task, error) {
+	state, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	task := state.Tasks[taskID]
+	if task == nil {
+		return nil, nil
+	}
+	return cloneTask(task), nil
+}
+
 func (s *StateStore) UpsertTask(task *core.Task) error {
 	if task == nil {
 		return errors.New("task 不能为空")
@@ -49,9 +64,79 @@ func (s *StateStore) UpsertTask(task *core.Task) error {
 		if state.Tasks == nil {
 			state.Tasks = map[string]*core.Task{}
 		}
+		now := time.Now().UTC()
+		existing := cloneTask(state.Tasks[task.TaskID])
+		if task.CreatedAt.IsZero() {
+			if existing != nil && !existing.CreatedAt.IsZero() {
+				task.CreatedAt = existing.CreatedAt
+			} else {
+				task.CreatedAt = now
+			}
+		}
+		if existing == nil {
+			if task.UpdatedAt.IsZero() {
+				task.UpdatedAt = now
+			}
+		} else if taskChanged(existing, task) || task.UpdatedAt.IsZero() {
+			task.UpdatedAt = now
+		}
 		state.Tasks[task.TaskID] = cloneTask(task)
 		return s.saveUnlocked(state)
 	})
+}
+
+func (s *StateStore) ApplyTask(taskID string, fn func(*core.Task) (*core.Task, error)) (*core.Task, error) {
+	if stringsTrimSpace(taskID) == "" {
+		return nil, errors.New("taskID 不能为空")
+	}
+	if fn == nil {
+		return nil, errors.New("task 更新函数不能为空")
+	}
+	var updated *core.Task
+	err := withFileLock(s.lockPath(), func() error {
+		state, err := s.loadUnlocked()
+		if err != nil {
+			return err
+		}
+		if state.Tasks == nil {
+			state.Tasks = map[string]*core.Task{}
+		}
+		existing := cloneTask(state.Tasks[taskID])
+		next, err := fn(existing)
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			delete(state.Tasks, taskID)
+			updated = nil
+			return s.saveUnlocked(state)
+		}
+		now := time.Now().UTC()
+		if next.TaskID == "" {
+			next.TaskID = taskID
+		}
+		if next.CreatedAt.IsZero() {
+			if existing != nil && !existing.CreatedAt.IsZero() {
+				next.CreatedAt = existing.CreatedAt
+			} else {
+				next.CreatedAt = now
+			}
+		}
+		if existing == nil {
+			if next.UpdatedAt.IsZero() {
+				next.UpdatedAt = now
+			}
+		} else if taskChanged(existing, next) || next.UpdatedAt.IsZero() {
+			next.UpdatedAt = now
+		}
+		state.Tasks[taskID] = cloneTask(next)
+		updated = cloneTask(next)
+		return s.saveUnlocked(state)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 func (s *StateStore) ListTasks() ([]*core.Task, error) {
@@ -167,6 +252,21 @@ func cloneTask(task *core.Task) *core.Task {
 	return &copy
 }
 
+func taskChanged(existing, next *core.Task) bool {
+	if existing == nil || next == nil {
+		return existing != next
+	}
+	left := cloneTask(existing)
+	right := cloneTask(next)
+	left.UpdatedAt = time.Time{}
+	right.UpdatedAt = time.Time{}
+	return !reflect.DeepEqual(left, right)
+}
+
+func stringsTrimSpace(value string) string {
+	return strings.TrimSpace(value)
+}
+
 func withFileLock(path string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("创建锁目录失败: %w", err)
@@ -200,6 +300,17 @@ func sortTasksByUpdatedAsc(tasks []*core.Task) {
 		right := tasks[j]
 		if !left.UpdatedAt.Equal(right.UpdatedAt) {
 			return left.UpdatedAt.Before(right.UpdatedAt)
+		}
+		return left.IssueNumber < right.IssueNumber
+	})
+}
+
+func sortTasksByCreatedAsc(tasks []*core.Task) {
+	sort.Slice(tasks, func(i, j int) bool {
+		left := tasks[i]
+		right := tasks[j]
+		if !left.CreatedAt.Equal(right.CreatedAt) {
+			return left.CreatedAt.Before(right.CreatedAt)
 		}
 		return left.IssueNumber < right.IssueNumber
 	})

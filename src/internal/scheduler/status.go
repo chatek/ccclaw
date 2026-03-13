@@ -166,7 +166,7 @@ func diagnose(probe Probe, requested string) Diagnosis {
 		diagnosis.Reason = fallbackReason(probe.SystemdReason, "已检测到启用中的 user systemd timer")
 	case probe.CronActive:
 		diagnosis.Effective = "cron"
-		diagnosis.Reason = fallbackReason(probe.CronReason, "已检测到受控 crontab ingest/run/patrol/journal 规则")
+		diagnosis.Reason = fallbackReason(probe.CronReason, "已检测到受控 crontab ingest/patrol/journal 规则")
 	case probe.SystemdInstalled:
 		diagnosis.Reason = summarizeInstalledButInactiveSystemd(probe.SystemdUserDir, probe.SystemdReason)
 		diagnosis.Repair = systemdRepairHint(probe.SystemdReason, true)
@@ -275,11 +275,11 @@ func systemdRepairHint(reason string, installed bool) string {
 func cronRepairHint(reason string) string {
 	switch {
 	case strings.TrimSpace(reason) == "":
-		return "请补充受控 crontab 规则，确保 ingest/run/patrol/journal 四条任务都已写入"
+		return "请补充受控 crontab 规则，确保 ingest/patrol/journal 三条任务都已写入"
 	case strings.Contains(reason, "未找到 crontab"):
 		return "当前环境缺少 crontab；请安装 cron/cronie，或执行 `ccclaw scheduler disable-cron` 后改用 systemd/none"
 	case strings.Contains(reason, "未配置 crontab"), strings.Contains(reason, "未检测到受控 crontab 规则"):
-		return "请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"
+		return "请执行 `ccclaw scheduler enable-cron` 补齐 ingest/patrol/journal 三条受控规则"
 	default:
 		return "请检查当前用户 crontab，或重新执行 `ccclaw scheduler enable-cron` 修复受控规则"
 	}
@@ -362,7 +362,7 @@ func detectCronEntries(cfg *config.Config) (bool, string) {
 		return false, text
 	}
 	if ContainsManagedCron(string(output), cfg) {
-		return true, "已检测到受控 crontab ingest/run/patrol/journal 规则"
+		return true, "已检测到受控 crontab ingest/patrol/journal 规则"
 	}
 	return false, "未检测到受控 crontab 规则"
 }

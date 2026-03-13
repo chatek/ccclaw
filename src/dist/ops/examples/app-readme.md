@@ -26,7 +26,6 @@
 
 - 当前托管单元：
   - `ccclaw-ingest.timer`
-  - `ccclaw-run.timer`
   - `ccclaw-patrol.timer`
   - `ccclaw-journal.timer`
   - `ccclaw-archive.timer`
@@ -36,7 +35,7 @@
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
+systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
 ```
 
 - 推荐排障顺序：

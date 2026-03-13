@@ -221,7 +221,6 @@ func (cfg *Config) Validate() error {
 	}
 	for key, value := range map[string]string{
 		"ingest":  cfg.Scheduler.Timers.Ingest,
-		"run":     cfg.Scheduler.Timers.Run,
 		"patrol":  cfg.Scheduler.Timers.Patrol,
 		"journal": cfg.Scheduler.Timers.Journal,
 	} {
@@ -592,8 +591,8 @@ func defaultRejectWords() []string {
 
 func defaultSchedulerTimers() SchedulerTimersConfig {
 	return SchedulerTimersConfig{
-		Ingest:  "*:0/5",
-		Run:     "*:0/10",
+		Ingest:  "*:0/4",
+		Run:     "",
 		Patrol:  "*:0/2",
 		Journal: "*-*-* 23:50:00",
 	}
@@ -609,9 +608,6 @@ func normalizeSchedulerTimers(timers *SchedulerTimersConfig) {
 		timers.Ingest = defaults.Ingest
 	}
 	timers.Run = strings.TrimSpace(timers.Run)
-	if timers.Run == "" {
-		timers.Run = defaults.Run
-	}
 	timers.Patrol = strings.TrimSpace(timers.Patrol)
 	if timers.Patrol == "" {
 		timers.Patrol = defaults.Patrol
@@ -688,7 +684,6 @@ func validateSchedulerConfig(scheduler SchedulerConfig) error {
 	}
 	for key, value := range map[string]string{
 		"ingest":  scheduler.Timers.Ingest,
-		"run":     scheduler.Timers.Run,
 		"patrol":  scheduler.Timers.Patrol,
 		"journal": scheduler.Timers.Journal,
 	} {
@@ -887,12 +882,11 @@ func renderSchedulerSection(scheduler SchedulerConfig) []string {
 		"# - 若表达式未显式附带时区，运行时会追加 scheduler.calendar_timezone",
 		"[scheduler.timers]",
 		fmt.Sprintf("ingest = %q", scheduler.Timers.Ingest),
-		fmt.Sprintf("run = %q", scheduler.Timers.Run),
 		fmt.Sprintf("patrol = %q", scheduler.Timers.Patrol),
 		fmt.Sprintf("journal = %q", scheduler.Timers.Journal),
 		"",
 		"# 调度日志级别：",
-		"# - level: 运行态 `ingest/run/patrol/journal` 共享的日志阈值，同时也是 `ccclaw scheduler logs` 默认过滤",
+		"# - level: 运行态 `ingest/patrol/journal` 共享的日志阈值，同时也是 `ccclaw scheduler logs` 默认过滤",
 		"# - 运行态统一归一为 debug|info|warning|error；兼容历史别名 emerg|alert|crit|err|notice",
 		"# - `error` 在 journalctl 查询时会自动映射为 `err`",
 		"# - archive_dir: `ccclaw scheduler logs --archive` 默认归档目录",
@@ -923,7 +917,7 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString(fmt.Sprintf("issue_label = %q\n", cfg.GitHub.IssueLabel))
 	buf.WriteString("# ingest 每轮会在 control_repo 与所有启用 target repo 中分别拉取 open issues。\n")
 	buf.WriteString("# - 只统计匹配 issue_label 的 Issue\n")
-	buf.WriteString("# - 不是并发数，也不是 run 阶段的执行上限\n")
+	buf.WriteString("# - 不是并发数；实际执行改由 ingest 按仓槽位推进\n")
 	buf.WriteString(fmt.Sprintf("limit = %d\n\n", cfg.GitHub.Limit))
 
 	buf.WriteString("# 固定路径边界：\n")

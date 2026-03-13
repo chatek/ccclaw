@@ -9,12 +9,13 @@ import (
 type State string
 
 const (
-	StateNew     State = "NEW"
-	StateRunning State = "RUNNING"
-	StateBlocked State = "BLOCKED"
-	StateFailed  State = "FAILED"
-	StateDone    State = "DONE"
-	StateDead    State = "DEAD"
+	StateNew        State = "NEW"
+	StateRunning    State = "RUNNING"
+	StateFinalizing State = "FINALIZING"
+	StateBlocked    State = "BLOCKED"
+	StateFailed     State = "FAILED"
+	StateDone       State = "DONE"
+	StateDead       State = "DEAD"
 )
 
 type EventType string

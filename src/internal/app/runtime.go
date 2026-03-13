@@ -180,96 +180,14 @@ func (rt *Runtime) Ingest(ctx context.Context) error {
 		}
 		revisited++
 	}
-	rt.logInfo("ingest", "同步完成", "visible_tasks", len(seen), "revisited", revisited)
-	return nil
+	rt.logInfo("ingest", "同步完成，准备执行按仓调度循环", "visible_tasks", len(seen), "revisited", revisited)
+	return rt.runIngestCycle(ctx, nil, false)
 }
 
 func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 	defer rt.store.Close()
-	tasks, err := rt.store.ListRunnable(limit)
-	if err != nil {
-		rt.logError("run", "读取待执行任务失败", "limit", limit, "error", err)
-		return err
-	}
-	if len(tasks) == 0 {
-		rt.logInfo("run", "暂无待执行任务", "limit", limit)
-		if out != nil {
-			_, _ = fmt.Fprintln(out, "暂无待执行任务")
-		}
-		return nil
-	}
-	rt.logInfo("run", "开始执行待处理任务", "count", len(tasks), "limit", limit, "log_level", rt.runtimeLogLevel())
-	execEngine, err := rt.newExecutor()
-	if err != nil {
-		rt.logError("run", "初始化执行器失败", "error", err)
-		return err
-	}
-	for _, task := range tasks {
-		issue, err := rt.clientForRepo(task.IssueRepo).GetIssue(task.IssueNumber)
-		if err != nil {
-			rt.logError("run", "读取 issue 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
-			return err
-		}
-		if err := rt.syncIssue(ctx, *issue, true); err != nil {
-			rt.logError("run", "同步 issue 失败", "issue", rt.issueRef(issue.Repo, issue.Number), "error", err)
-			return err
-		}
-		fresh, err := rt.store.GetByIdempotency(task.IdempotencyKey)
-		if err != nil {
-			rt.logError("run", "读取任务最新状态失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
-			return err
-		}
-		if fresh == nil || fresh.State == core.StateBlocked || fresh.State == core.StateDone || fresh.State == core.StateDead {
-			if fresh != nil {
-				rt.logDebug("run", "任务已不再可执行，跳过", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "state", fresh.State)
-			}
-			continue
-		}
-		target, err := rt.cfg.EnabledTargetByRepo(fresh.TargetRepo)
-		if err != nil {
-			rt.logError("run", "解析目标仓库失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "target_repo", fresh.TargetRepo, "error", err)
-			return err
-		}
-		if err := rt.ensureClaudeManagedHooks(target.LocalPath); err != nil {
-			rt.logError("run", "写入 Claude 项目 hook 配置失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "target_repo", fresh.TargetRepo, "error", err)
-			return err
-		}
-		runOpts := rt.buildExecutionOptions(fresh, target)
-		fresh.State = core.StateRunning
-		if err := rt.store.UpsertTask(fresh); err != nil {
-			rt.logError("run", "写入任务运行态失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
-			return err
-		}
-		_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
-		rt.logInfo("run", "开始执行任务", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "task_id", fresh.TaskID, "task_class", fresh.TaskClass, "retry", fresh.RetryCount)
-		if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
-			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
-			rt.logInfo("run", "尝试恢复已有 session", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_id", runOpts.ResumeSessionID)
-		} else if err := claude.ClearHookState(rt.claudeHookStateDir(), string(fresh.TaskID)); err != nil {
-			rt.logWarning("run", "清理旧 Claude hook 状态失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
-		}
-
-		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
-		if result != nil && result.Pending {
-			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
-			rt.logInfo("run", "任务已挂入 tmux 会话", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_name", result.SessionName)
-			rt.reportStarted(fresh, result.SessionName)
-			continue
-		}
-		if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
-			result = &executor.Result{ResumeSessionID: runOpts.ResumeSessionID}
-		}
-		if result != nil {
-			if result.SessionID != "" {
-				fresh.LastSessionID = result.SessionID
-			}
-		}
-		if err := rt.finishTaskExecution(fresh, result, runErr); err != nil {
-			rt.logError("run", "收口任务执行结果失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
-			return err
-		}
-	}
-	return nil
+	rt.logInfo("run", "兼容入口已转发到按仓 ingest 调度", "limit", limit)
+	return rt.runIngestCycle(ctx, out, true)
 }
 
 func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
@@ -285,126 +203,7 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 		_, _ = fmt.Fprintln(out, "当前未启用 tmux，会话巡查已跳过")
 		return nil
 	}
-
-	timeout := execEngine.Timeout()
-	runningTasks, err := rt.store.ListRunning()
-	if err != nil {
-		rt.logError("patrol", "读取运行中任务失败", "error", err)
-		return err
-	}
-	sessions, err := manager.List("ccclaw-")
-	if err != nil {
-		rt.logError("patrol", "列出 tmux 会话失败", "error", err)
-		return err
-	}
-	rt.logInfo("patrol", "开始巡查 tmux 会话", "running_tasks", len(runningTasks), "sessions", len(sessions), "timeout", timeout.String())
-	sessionMap := make(map[string]tmux.SessionStatus, len(sessions))
-	for _, session := range sessions {
-		sessionMap[session.Name] = session
-	}
-
-	var (
-		completed int
-		timedOut  int
-		warnings  int
-		orphaned  int
-	)
-	taskSessions := make(map[string]struct{}, len(runningTasks))
-	for _, task := range runningTasks {
-		if err := rt.syncTaskSessionFromHook(task); err != nil {
-			rt.logWarning("patrol", "同步 Claude hook session 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
-		}
-		artifacts := execEngine.ArtifactPaths(task.TaskID)
-		taskSessions[artifacts.SessionName] = struct{}{}
-		status, exists := sessionMap[artifacts.SessionName]
-		if !exists {
-			if handled, err := rt.finalizeMissingSession(task, execEngine); err != nil {
-				rt.logError("patrol", "收口丢失会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
-				return err
-			} else if handled {
-				completed++
-				rt.logInfo("patrol", "发现已完成但会话已退出的任务", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
-				continue
-			}
-			if err := rt.markTaskDead(task, fmt.Sprintf("tmux 会话 %s 已丢失，且未找到结构化结果或诊断文件", artifacts.SessionName), artifacts.LogFile); err != nil {
-				rt.logError("patrol", "标记丢失会话任务失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
-				return err
-			}
-			rt.logWarning("patrol", "tmux 会话已丢失且无结构化结果或诊断文件", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
-			timedOut++
-			continue
-		}
-		if status.PaneDead {
-			if err := rt.finalizePatrolSession(task, execEngine, status); err != nil {
-				rt.logError("patrol", "收口已退出会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
-				return err
-			}
-			completed++
-			rt.logInfo("patrol", "已收口退出的 tmux 会话", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "exit_code", status.ExitCode)
-			if killErr := manager.Kill(status.Name); killErr != nil {
-				_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("清理 tmux 会话失败: %v", killErr))
-				rt.logWarning("patrol", "清理已退出 tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
-			}
-			continue
-		}
-
-		runningFor := time.Since(status.CreatedAt)
-		restarted, err := rt.maybeRestartForContextPressure(task, status.Name, runningFor)
-		if err != nil {
-			rt.logError("patrol", "检查 Claude 上下文占用失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
-			return err
-		}
-		if restarted {
-			if killErr := manager.Kill(status.Name); killErr != nil {
-				rt.logError("patrol", "终止 fresh restart tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
-				return fmt.Errorf("终止 fresh restart tmux 会话失败: %w", killErr)
-			}
-			rt.logWarning("patrol", "Claude 上下文占用达到阈值，已触发 fresh restart", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
-			warnings++
-			continue
-		}
-		if timeout > 0 && runningFor >= timeout {
-			tail, _ := manager.CaptureOutput(status.Name, 80)
-			if killErr := manager.Kill(status.Name); killErr != nil {
-				rt.logError("patrol", "终止超时 tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
-				return fmt.Errorf("终止超时 tmux 会话失败: %w", killErr)
-			}
-			reason := fmt.Sprintf("tmux 会话 %s 已运行 %s，超过超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout)
-			if tail != "" {
-				reason += "\n最后输出:\n" + tail
-			}
-			if err := rt.markTaskDead(task, reason, artifacts.LogFile); err != nil {
-				rt.logError("patrol", "标记超时任务失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
-				return err
-			}
-			rt.logWarning("patrol", "tmux 会话执行超时，已终止", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
-			timedOut++
-			continue
-		}
-		if timeout > 0 && runningFor >= timeout*8/10 {
-			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("tmux 会话 %s 已运行 %s，接近超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout))
-			rt.logWarning("patrol", "tmux 会话接近超时阈值", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
-			warnings++
-		}
-	}
-
-	for _, session := range sessions {
-		if _, exists := taskSessions[session.Name]; exists {
-			continue
-		}
-		if err := manager.Kill(session.Name); err != nil {
-			rt.logError("patrol", "清理孤儿 tmux 会话失败", "session_name", session.Name, "error", err)
-			return fmt.Errorf("清理孤儿 tmux 会话失败: %w", err)
-		}
-		rt.logWarning("patrol", "已清理孤儿 tmux 会话", "session_name", session.Name)
-		orphaned++
-	}
-
-	rt.syncReposAfterPatrol(out)
-	rt.logInfo("patrol", "巡查完成", "completed", completed, "timeout", timedOut, "warning", warnings, "orphaned", orphaned, "running", len(runningTasks))
-	_, _ = fmt.Fprintf(out, "巡查完成: completed=%d timeout=%d warning=%d orphaned=%d running=%d\n", completed, timedOut, warnings, orphaned, len(runningTasks))
-	_ = ctx
-	return nil
+	return rt.patrolRepoSlots(ctx, execEngine, manager, out)
 }
 
 func (rt *Runtime) Stats(out io.Writer) error {
@@ -1283,97 +1082,106 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	}
 	blockReasons = append(blockReasons, routeReasons...)
 	labels := github.LabelNames(issue.Labels)
-	if existing == nil {
-		existing = &core.Task{
-			TaskID:         core.TaskID(issueRepo, issue.Number),
-			IdempotencyKey: core.IdempotencyKey(issueRepo, issue.Number),
-			ControlRepo:    rt.cfg.GitHub.ControlRepo,
-			IssueRepo:      issueRepo,
-			TargetRepo:     targetRepo,
-			CreatedAt:      issue.CreatedAt,
+	taskID := core.TaskID(issueRepo, issue.Number)
+	var previousState core.State
+	updated, err := rt.store.ApplyTask(taskID, func(current *core.Task) (*core.Task, error) {
+		if current == nil {
+			current = &core.Task{
+				TaskID:         taskID,
+				IdempotencyKey: core.IdempotencyKey(issueRepo, issue.Number),
+				ControlRepo:    rt.cfg.GitHub.ControlRepo,
+				IssueRepo:      issueRepo,
+				TargetRepo:     targetRepo,
+				CreatedAt:      issue.CreatedAt,
+			}
 		}
-	}
-	previousState := existing.State
-	existing.IssueNumber = issue.Number
-	existing.IssueRepo = issueRepo
-	existing.IssueTitle = issue.Title
-	existing.IssueBody = issue.Body
-	existing.IssueAuthor = issue.User.Login
-	existing.IssueAuthorPermission = permission
-	existing.Labels = labels
-	existing.Intent = core.InferIntent(labels)
-	existing.TaskClass = taskClass
-	existing.RiskLevel = core.InferRisk(labels)
-	existing.Approved = approved
-	existing.TargetRepo = targetRepo
-	existing.ApprovalCommand = approval.Command
-	existing.ApprovalActor = approval.Actor
-	existing.ApprovalCommentID = approval.CommentID
-	if doneComment != nil {
-		existing.DoneCommentID = doneComment.ID
-	} else {
-		existing.DoneCommentID = 0
-	}
-
-	switch {
-	case doneComment != nil:
-		existing.State = core.StateDone
-		existing.ErrorMsg = ""
-	case existing.State == core.StateDead:
-		// 保持终态，只更新元数据。
-	case len(blockReasons) == 0:
-		if existing.State == core.StateBlocked || existing.State == "" || previousState == core.StateDone {
-			existing.State = core.StateNew
+		previousState = current.State
+		current.IssueNumber = issue.Number
+		current.IssueRepo = issueRepo
+		current.IssueTitle = issue.Title
+		current.IssueBody = issue.Body
+		current.IssueAuthor = issue.User.Login
+		current.IssueAuthorPermission = permission
+		current.Labels = labels
+		current.Intent = core.InferIntent(labels)
+		current.TaskClass = taskClass
+		current.RiskLevel = core.InferRisk(labels)
+		current.Approved = approved
+		current.TargetRepo = targetRepo
+		current.ApprovalCommand = approval.Command
+		current.ApprovalActor = approval.Actor
+		current.ApprovalCommentID = approval.CommentID
+		if doneComment != nil {
+			current.DoneCommentID = doneComment.ID
+		} else {
+			current.DoneCommentID = 0
 		}
-	default:
-		existing.State = core.StateBlocked
-	}
 
-	if err := rt.store.UpsertTask(existing); err != nil {
+		switch {
+		case doneComment != nil:
+			current.State = core.StateDone
+			current.ErrorMsg = ""
+		case current.State == core.StateDead:
+			// 保持终态，只更新元数据。
+		case current.State == core.StateRunning || current.State == core.StateFinalizing:
+			// 执行中或收尾中任务只刷新元数据，不回退主状态。
+		case len(blockReasons) == 0:
+			if current.State == core.StateBlocked || current.State == "" || previousState == core.StateDone {
+				current.State = core.StateNew
+			}
+		default:
+			current.State = core.StateBlocked
+		}
+		return current, nil
+	})
+	if err != nil {
 		return err
+	}
+	if updated == nil {
+		return nil
 	}
 	if previousState == "" {
 		eventType := core.EventCreated
-		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t class=%s target=%s", existing.IssueAuthor, permission, approved, existing.TaskClass, displayTargetRepo(targetRepo))
-		if existing.State == core.StateDone {
+		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t class=%s target=%s", updated.IssueAuthor, permission, approved, updated.TaskClass, displayTargetRepo(targetRepo))
+		if updated.State == core.StateDone {
 			eventType = core.EventDone
 			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
-		} else if existing.State == core.StateBlocked {
+		} else if updated.State == core.StateBlocked {
 			eventType = core.EventBlocked
 			detail = blockReasonText(blockReasons)
 		}
-		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
-		if existing.State == core.StateBlocked {
+		_ = rt.store.AppendEvent(updated.TaskID, eventType, detail)
+		if updated.State == core.StateBlocked {
 			rt.logWarning("issue", "Issue 已阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
 		} else {
-			rt.logInfo("issue", "Issue 已入队", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", existing.TaskClass, "state", existing.State, "target_repo", existing.TargetRepo)
+			rt.logInfo("issue", "Issue 已入队", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", updated.TaskClass, "state", updated.State, "target_repo", updated.TargetRepo)
 		}
-		if existing.State == core.StateBlocked && !fromRun {
-			rt.reportBlocked(existing, blockReasonText(blockReasons))
+		if updated.State == core.StateBlocked && !fromRun {
+			rt.reportBlocked(updated, blockReasonText(blockReasons))
 		}
 		return nil
 	}
-	if previousState != existing.State {
+	if previousState != updated.State {
 		eventType := core.EventUpdated
-		detail := fmt.Sprintf("状态变更: %s -> %s", previousState, existing.State)
-		if existing.State == core.StateDone {
+		detail := fmt.Sprintf("状态变更: %s -> %s", previousState, updated.State)
+		if updated.State == core.StateDone {
 			eventType = core.EventDone
 			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
-		} else if existing.State == core.StateBlocked {
+		} else if updated.State == core.StateBlocked {
 			eventType = core.EventBlocked
 			detail = blockReasonText(blockReasons)
 		}
-		_ = rt.store.AppendEvent(existing.TaskID, eventType, detail)
-		if existing.State == core.StateBlocked {
+		_ = rt.store.AppendEvent(updated.TaskID, eventType, detail)
+		if updated.State == core.StateBlocked {
 			rt.logWarning("issue", "Issue 状态变更为阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
 		} else {
-			rt.logInfo("issue", "Issue 状态已更新", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", existing.TaskClass, "from", previousState, "to", existing.State)
+			rt.logInfo("issue", "Issue 状态已更新", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", updated.TaskClass, "from", previousState, "to", updated.State)
 		}
-		if existing.State == core.StateBlocked && !fromRun {
-			rt.reportBlocked(existing, blockReasonText(blockReasons))
+		if updated.State == core.StateBlocked && !fromRun {
+			rt.reportBlocked(updated, blockReasonText(blockReasons))
 		}
 	} else {
-		rt.logDebug("issue", "Issue 状态无变化", "issue", rt.issueRef(issueRepo, issue.Number), "state", existing.State)
+		rt.logDebug("issue", "Issue 状态无变化", "issue", rt.issueRef(issueRepo, issue.Number), "state", updated.State)
 	}
 	return nil
 }
@@ -1537,8 +1345,14 @@ func (rt *Runtime) syncTaskSessionFromHook(task *core.Task) error {
 	if strings.TrimSpace(state.SessionID) == "" || state.SessionID == task.LastSessionID {
 		return nil
 	}
-	task.LastSessionID = strings.TrimSpace(state.SessionID)
-	return rt.store.UpsertTask(task)
+	_, err = rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, nil
+		}
+		existing.LastSessionID = strings.TrimSpace(state.SessionID)
+		return existing, nil
+	})
+	return err
 }
 
 func (rt *Runtime) maybeRestartForContextPressure(task *core.Task, sessionName string, runningFor time.Duration) (bool, error) {

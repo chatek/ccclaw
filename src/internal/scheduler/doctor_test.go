@@ -26,7 +26,7 @@ func TestDetectManagedUnitDriftReportsMissingAndDrifted(t *testing.T) {
 		}
 	}
 
-	if err := os.Remove(filepath.Join(cfg.Scheduler.SystemdUserDir, "ccclaw-run.timer")); err != nil {
+	if err := os.Remove(filepath.Join(cfg.Scheduler.SystemdUserDir, "ccclaw-ingest.timer")); err != nil {
 		t.Fatalf("删除 unit 失败: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cfg.Scheduler.SystemdUserDir, "ccclaw-patrol.service"), []byte("[Unit]\nDescription=drifted\n"), 0o644); err != nil {
@@ -37,7 +37,7 @@ func TestDetectManagedUnitDriftReportsMissingAndDrifted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("检测 unit 漂移失败: %v", err)
 	}
-	if len(status.Missing) != 1 || status.Missing[0] != "ccclaw-run.timer" {
+	if len(status.Missing) != 1 || status.Missing[0] != "ccclaw-ingest.timer" {
 		t.Fatalf("unexpected missing units: %+v", status.Missing)
 	}
 	if len(status.Drifted) != 1 || status.Drifted[0] != "ccclaw-patrol.service" {

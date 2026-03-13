@@ -539,7 +539,7 @@ test_systemd_install_auto_enable_and_restart() {
   assert_contains "$config_file" '[scheduler.timers]'
   assert_contains "$config_file" '[scheduler.logs]'
   assert_contains "$systemctl_log" '--user daemon-reload'
-  assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
+  assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 
   run_case "$log2" \
     env \
@@ -559,7 +559,7 @@ test_systemd_install_auto_enable_and_restart() {
       --task-repo "41490/task-local" \
       --scheduler systemd
 
-  assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
+  assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 }
 
 test_merge_managed_markdown_preserves_skill_meta_fields() {

@@ -559,7 +559,7 @@ func TestSummarizeSchedulerCronPasses(t *testing.T) {
 	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "cron",
 		CronActive: true,
-		CronReason: "已检测到受控 crontab ingest/run/patrol/journal 规则",
+		CronReason: "已检测到受控 crontab ingest/patrol/journal 规则",
 	})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -612,7 +612,7 @@ func TestSummarizeSchedulerCronMissingManagedEntries(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cron mismatch error")
 	}
-	if want := "repair=请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"; !strings.Contains(detail, want) {
+	if want := "repair=请执行 `ccclaw scheduler enable-cron` 补齐 ingest/patrol/journal 三条受控规则"; !strings.Contains(detail, want) {
 		t.Fatalf("expected cron repair %q in %q", want, detail)
 	}
 }
@@ -1349,17 +1349,26 @@ exit 0
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
 			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: tmpDir,
+				KBPath:    "/opt/ccclaw/kb",
+			}},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
 		store:   store,
 	}
+	rt.syncRepo = func(repoPath, message string, paths []string, maxRetry int) error { return nil }
 
 	var out bytes.Buffer
 	if err := rt.Patrol(context.Background(), &out); err != nil {
 		t.Fatalf("执行 patrol 失败: %v", err)
 	}
-	if !strings.Contains(out.String(), "completed=1") {
+	if !strings.Contains(out.String(), "pane_dead=1") {
 		t.Fatalf("unexpected patrol output: %q", out.String())
+	}
+	if err := rt.runIngestCycle(context.Background(), nil, true); err != nil {
+		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
 	store, err = storage.Open(stateDB)
@@ -1479,6 +1488,11 @@ exit 0
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
 			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: tmpDir,
+				KBPath:    "/opt/ccclaw/kb",
+			}},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
 		store:   store,
@@ -1487,6 +1501,16 @@ exit 0
 	var out bytes.Buffer
 	if err := rt.Patrol(context.Background(), &out); err != nil {
 		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot == nil || slot.Phase != storage.RepoSlotPhasePaneDead {
+		t.Fatalf("预期 patrol 仅标记 pane_dead，实际为 %#v", slot)
+	}
+	if err := rt.runIngestCycle(context.Background(), nil, true); err != nil {
+		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
 	store, err = storage.Open(stateDB)
@@ -1593,6 +1617,11 @@ exit 0
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
 			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: tmpDir,
+				KBPath:    "/opt/ccclaw/kb",
+			}},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
 		store:   store,
@@ -1601,6 +1630,16 @@ exit 0
 	var out bytes.Buffer
 	if err := rt.Patrol(context.Background(), &out); err != nil {
 		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot == nil || slot.Phase != storage.RepoSlotPhasePaneDead {
+		t.Fatalf("预期 patrol 仅标记 pane_dead，实际为 %#v", slot)
+	}
+	if err := rt.runIngestCycle(context.Background(), nil, true); err != nil {
+		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
 	store, err = storage.Open(stateDB)
@@ -1719,6 +1758,11 @@ exit 0
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
 			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: tmpDir,
+				KBPath:    "/opt/ccclaw/kb",
+			}},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
 		store:   store,
@@ -1727,6 +1771,13 @@ exit 0
 	var out bytes.Buffer
 	if err := rt.Patrol(context.Background(), &out); err != nil {
 		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot == nil || slot.Phase != storage.RepoSlotPhaseRunning {
+		t.Fatalf("预期任务仍保持运行槽位，实际为 %#v", slot)
 	}
 
 	store, err = storage.Open(stateDB)
@@ -1738,14 +1789,14 @@ exit 0
 	if err != nil {
 		t.Fatalf("读取任务失败: %v", err)
 	}
-	if loaded == nil || loaded.State != core.StateNew {
-		t.Fatalf("预期任务回到 NEW，实际为 %#v", loaded)
+	if loaded == nil || loaded.State != core.StateRunning {
+		t.Fatalf("预期任务保持 RUNNING，实际为 %#v", loaded)
 	}
-	if loaded.RestartCount != 1 {
-		t.Fatalf("预期 RestartCount=1，实际为 %#v", loaded)
+	if loaded.RestartCount != 0 {
+		t.Fatalf("预期 RestartCount 仍由 sidecar 管理，实际为 %#v", loaded)
 	}
-	if loaded.LastSessionID != "" {
-		t.Fatalf("预期清空 LastSessionID，实际为 %#v", loaded)
+	if loaded.LastSessionID != "sess-new" {
+		t.Fatalf("预期仅同步最新 session_id，实际为 %#v", loaded)
 	}
 	if _, err := os.Stat(filepath.Join(hookStateDir, "64_body.json")); !os.IsNotExist(err) {
 		t.Fatalf("预期 hook 状态已清理，实际 err=%v", err)
@@ -1756,6 +1807,13 @@ exit 0
 	}
 	if strings.TrimSpace(string(killed)) != sessionName {
 		t.Fatalf("预期 kill 当前 session，实际为 %q", string(killed))
+	}
+	slot, err = store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot == nil || slot.Phase != storage.RepoSlotPhaseRunning || slot.RestartCount != 1 {
+		t.Fatalf("预期 sidecar 记录重启后的运行态，实际为 %#v", slot)
 	}
 }
 

@@ -15,6 +15,7 @@ type Store struct {
 	varDir string
 	state  *StateStore
 	jsonl  *JSONLStore
+	slots  *RepoSlotStore
 }
 
 type TokenUsageRecord struct {
@@ -150,6 +151,7 @@ func Open(path string) (*Store, error) {
 		varDir: varDir,
 		state:  newStateStore(varDir),
 		jsonl:  newJSONLStore(varDir),
+		slots:  newRepoSlotStore(varDir),
 	}, nil
 }
 
@@ -169,12 +171,36 @@ func (s *Store) GetByIdempotency(idempotencyKey string) (*core.Task, error) {
 	return s.state.GetByIdempotency(idempotencyKey)
 }
 
+func (s *Store) GetTask(taskID string) (*core.Task, error) {
+	return s.state.GetTask(taskID)
+}
+
 func (s *Store) UpsertTask(task *core.Task) error {
 	return s.state.UpsertTask(task)
 }
 
+func (s *Store) ApplyTask(taskID string, fn func(*core.Task) (*core.Task, error)) (*core.Task, error) {
+	return s.state.ApplyTask(taskID, fn)
+}
+
 func (s *Store) AppendEvent(taskID string, eventType core.EventType, detail string) error {
 	return s.jsonl.AppendEvent(taskID, eventType, detail)
+}
+
+func (s *Store) GetRepoSlot(targetRepo string) (*RepoSlot, error) {
+	return s.slots.Get(targetRepo)
+}
+
+func (s *Store) ListRepoSlots() ([]*RepoSlot, error) {
+	return s.slots.List()
+}
+
+func (s *Store) UpsertRepoSlot(slot *RepoSlot) error {
+	return s.slots.Upsert(slot)
+}
+
+func (s *Store) DeleteRepoSlot(targetRepo string) error {
+	return s.slots.Delete(targetRepo)
 }
 
 func (s *Store) AppendEventAt(taskID string, eventType core.EventType, detail string, createdAt time.Time) error {
@@ -415,6 +441,31 @@ func (s *Store) ListRunnable(limit int) ([]*core.Task, error) {
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+func (s *Store) ListRunnableByTarget(limitPerTarget int) (map[string][]*core.Task, error) {
+	tasks, err := s.state.ListTasks()
+	if err != nil {
+		return nil, err
+	}
+	grouped := map[string][]*core.Task{}
+	for _, task := range tasks {
+		if task.State != core.StateNew && task.State != core.StateFailed {
+			continue
+		}
+		targetRepo := strings.TrimSpace(task.TargetRepo)
+		if targetRepo == "" {
+			continue
+		}
+		grouped[targetRepo] = append(grouped[targetRepo], task)
+	}
+	for targetRepo := range grouped {
+		sortTasksByCreatedAsc(grouped[targetRepo])
+		if limitPerTarget > 0 && len(grouped[targetRepo]) > limitPerTarget {
+			grouped[targetRepo] = grouped[targetRepo][:limitPerTarget]
+		}
+	}
+	return grouped, nil
 }
 
 func (s *Store) ListRunning() ([]*core.Task, error) {

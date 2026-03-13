@@ -1519,7 +1519,6 @@ calendar_timezone = "$CALENDAR_TIMEZONE"
 # - 若表达式未显式带时区，运行时会自动追加 scheduler.calendar_timezone
 [scheduler.timers]
 ingest = "$INGEST_CALENDAR"
-run = "$RUN_CALENDAR"
 patrol = "$PATROL_CALENDAR"
 journal = "$JOURNAL_CALENDAR"
 
@@ -1557,7 +1556,7 @@ sync_scheduler_config() {
     return 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
-    log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE config set-scheduler --mode $SCHEDULER --systemd-user-dir $SYSTEMD_USER_DIR --calendar-timezone $CALENDAR_TIMEZONE --ingest-calendar '$INGEST_CALENDAR' --run-calendar '$RUN_CALENDAR' --patrol-calendar '$PATROL_CALENDAR' --journal-calendar '$JOURNAL_CALENDAR'"
+    log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE config set-scheduler --mode $SCHEDULER --systemd-user-dir $SYSTEMD_USER_DIR --calendar-timezone $CALENDAR_TIMEZONE --ingest-calendar '$INGEST_CALENDAR' --patrol-calendar '$PATROL_CALENDAR' --journal-calendar '$JOURNAL_CALENDAR'"
     return 0
   fi
   "$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" config set-scheduler \
@@ -1565,7 +1564,6 @@ sync_scheduler_config() {
     --systemd-user-dir "$SYSTEMD_USER_DIR" \
     --calendar-timezone "$CALENDAR_TIMEZONE" \
     --ingest-calendar "$INGEST_CALENDAR" \
-    --run-calendar "$RUN_CALENDAR" \
     --patrol-calendar "$PATROL_CALENDAR" \
     --journal-calendar "$JOURNAL_CALENDAR" >/dev/null
 }
@@ -1573,15 +1571,13 @@ sync_scheduler_config() {
 create_user_systemd_units() {
   local ingest_service="$SYSTEMD_USER_DIR/ccclaw-ingest.service"
   local ingest_timer="$SYSTEMD_USER_DIR/ccclaw-ingest.timer"
-  local run_service="$SYSTEMD_USER_DIR/ccclaw-run.service"
-  local run_timer="$SYSTEMD_USER_DIR/ccclaw-run.timer"
   local patrol_service="$SYSTEMD_USER_DIR/ccclaw-patrol.service"
   local patrol_timer="$SYSTEMD_USER_DIR/ccclaw-patrol.timer"
   local journal_service="$SYSTEMD_USER_DIR/ccclaw-journal.service"
   local journal_timer="$SYSTEMD_USER_DIR/ccclaw-journal.timer"
   local archive_service="$SYSTEMD_USER_DIR/ccclaw-archive.service"
   local archive_timer="$SYSTEMD_USER_DIR/ccclaw-archive.timer"
-  local ingest_calendar run_calendar patrol_calendar journal_calendar archive_calendar
+  local ingest_calendar patrol_calendar journal_calendar archive_calendar
   if [[ "$SCHEDULER_EFFECTIVE" != "systemd" ]]; then
     log "跳过 user systemd 单元部署；当前调度模式: $SCHEDULER_EFFECTIVE"
     return 0
@@ -1592,7 +1588,6 @@ create_user_systemd_units() {
     return 0
   fi
   ingest_calendar="$(calendar_with_timezone "$INGEST_CALENDAR")"
-  run_calendar="$(calendar_with_timezone "$RUN_CALENDAR")"
   patrol_calendar="$(calendar_with_timezone "$PATROL_CALENDAR")"
   journal_calendar="$(calendar_with_timezone "$JOURNAL_CALENDAR")"
   archive_calendar="$(calendar_with_timezone "Mon 02:00:00")"
@@ -1614,28 +1609,6 @@ Description=Run ccclaw ingest on schedule
 OnCalendar=$ingest_calendar
 Persistent=true
 Unit=ccclaw-ingest.service
-
-[Install]
-WantedBy=timers.target
-UNIT
-  cat > "$run_service" <<UNIT
-[Unit]
-Description=ccclaw run service
-After=network-online.target
-
-[Service]
-Type=oneshot
-WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/bin/ccclaw run --config $CONFIG_FILE --env-file $ENV_FILE
-UNIT
-  cat > "$run_timer" <<UNIT
-[Unit]
-Description=Run ccclaw worker on schedule
-
-[Timer]
-OnCalendar=$run_calendar
-Persistent=true
-Unit=ccclaw-run.service
 
 [Install]
 WantedBy=timers.target
@@ -1765,16 +1738,16 @@ activate_user_systemd_timers() {
     SYSTEMD_ACTIVATION_STATUS="planned:auto"
     SYSTEMD_ACTIVATION_REASON="模拟模式：将自动执行 daemon-reload + enable --now"
     log "[simulate] systemctl --user daemon-reload"
-    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+    log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
     if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+      log "[simulate] systemctl --user restart ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
     fi
     return 0
   fi
   systemctl --user daemon-reload
-  systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
+  systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
   if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
-    systemctl --user restart ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
+    systemctl --user restart ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
     SYSTEMD_ACTIVATION_STATUS="restarted"
     SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit"
     return 0
@@ -2038,7 +2011,7 @@ print_summary() {
       else
         scheduler_step_6="6. 当前会话未直连 user bus；请在登录会话中手工启用用户定时器:
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       fi
       scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
@@ -2051,7 +2024,7 @@ print_summary() {
       scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       ;;
     none|*)
       scheduler_step_6="6. 当前调度模式为 none；如需受控 cron，可执行:
@@ -2059,7 +2032,7 @@ print_summary() {
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+   systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       ;;
   esac
   cat <<MSG
@@ -2089,8 +2062,6 @@ $result_title
 - user systemd 单元(仅 systemd 模式写入):
   - ccclaw-ingest.service
   - ccclaw-ingest.timer
-  - ccclaw-run.service
-  - ccclaw-run.timer
   - ccclaw-patrol.service
   - ccclaw-patrol.timer
   - ccclaw-journal.service

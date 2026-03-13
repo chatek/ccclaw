@@ -1,0 +1,687 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/41490/ccclaw/internal/adapters/storage"
+	"github.com/41490/ccclaw/internal/claude"
+	"github.com/41490/ccclaw/internal/config"
+	"github.com/41490/ccclaw/internal/core"
+	"github.com/41490/ccclaw/internal/executor"
+	"github.com/41490/ccclaw/internal/tmux"
+	"github.com/41490/ccclaw/internal/vcs"
+)
+
+func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
+	execEngine, err := rt.newExecutor()
+	if err != nil {
+		return err
+	}
+	advanced, err := rt.advanceRepoSlots(ctx, execEngine)
+	if err != nil {
+		return err
+	}
+	if dispatchOnly {
+		return rt.dispatchNextByRepo(ctx, execEngine, out, advanced)
+	}
+	return rt.dispatchNextByRepo(ctx, execEngine, out, advanced)
+}
+
+func (rt *Runtime) advanceRepoSlots(ctx context.Context, execEngine *executor.Executor) (map[string]struct{}, error) {
+	if err := rt.hydrateRepoSlots(); err != nil {
+		return nil, err
+	}
+	slots, err := rt.store.ListRepoSlots()
+	if err != nil {
+		return nil, err
+	}
+	advanced := map[string]struct{}{}
+	for _, slot := range slots {
+		if slot == nil {
+			continue
+		}
+		advanced[slot.TargetRepo] = struct{}{}
+		if err := rt.advanceRepoSlot(ctx, execEngine, slot); err != nil {
+			return nil, err
+		}
+	}
+	return advanced, nil
+}
+
+func (rt *Runtime) hydrateRepoSlots() error {
+	tasks, err := rt.store.ListTasks()
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task == nil || strings.TrimSpace(task.TargetRepo) == "" {
+			continue
+		}
+		if task.State != core.StateRunning && task.State != core.StateFinalizing {
+			continue
+		}
+		slot, err := rt.store.GetRepoSlot(task.TargetRepo)
+		if err != nil {
+			return err
+		}
+		if slot != nil && strings.TrimSpace(slot.TaskID) != "" {
+			continue
+		}
+		phase := storage.RepoSlotPhaseRunning
+		if task.State == core.StateFinalizing {
+			phase = storage.RepoSlotPhaseFinalizing
+		}
+		if err := rt.store.UpsertRepoSlot(&storage.RepoSlot{
+			TargetRepo:  task.TargetRepo,
+			TaskID:      task.TaskID,
+			SessionName: executor.SessionName(task.TaskID),
+			Phase:       phase,
+			LastProbeAt: time.Now().UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rt *Runtime) advanceRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot) error {
+	if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
+		return nil
+	}
+	switch slot.Phase {
+	case storage.RepoSlotPhaseRunning, storage.RepoSlotPhaseRestarting:
+		return rt.refreshRunningRepoSlot(execEngine, slot)
+	case storage.RepoSlotPhasePaneDead, storage.RepoSlotPhaseFinalizing, storage.RepoSlotPhaseFinalizeFailed:
+		return rt.finalizeRepoSlot(ctx, execEngine, slot)
+	default:
+		return nil
+	}
+}
+
+func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *storage.RepoSlot) error {
+	if slot == nil || execEngine == nil {
+		return nil
+	}
+	manager := execEngine.TMux()
+	if manager == nil || strings.TrimSpace(slot.SessionName) == "" {
+		return nil
+	}
+	status, err := manager.Status(slot.SessionName)
+	if err != nil {
+		if errors.Is(err, tmux.ErrSessionNotFound) {
+			slot.Phase = storage.RepoSlotPhasePaneDead
+			slot.CompletedAt = time.Now().UTC()
+			slot.LastError = "tmux 会话已退出，等待 ingest 收口"
+			return rt.store.UpsertRepoSlot(slot)
+		}
+		return err
+	}
+	if status.PaneDead {
+		slot.Phase = storage.RepoSlotPhasePaneDead
+		slot.CompletedAt = time.Now().UTC()
+		slot.LastProbeAt = time.Now().UTC()
+		return rt.store.UpsertRepoSlot(slot)
+	}
+	return nil
+}
+
+func (rt *Runtime) dispatchNextByRepo(ctx context.Context, execEngine *executor.Executor, out io.Writer, skipRepos map[string]struct{}) error {
+	grouped, err := rt.store.ListRunnableByTarget(1)
+	if err != nil {
+		return err
+	}
+	targets := rt.cfg.EnabledTargets()
+	dispatched := 0
+	for idx := range targets {
+		target := &targets[idx]
+		if _, skipped := skipRepos[target.Repo]; skipped {
+			continue
+		}
+		slot, err := rt.store.GetRepoSlot(target.Repo)
+		if err != nil {
+			return err
+		}
+		if slot != nil && slot.Phase != "" {
+			continue
+		}
+		queue := grouped[target.Repo]
+		if len(queue) == 0 {
+			continue
+		}
+		if err := rt.dispatchTask(ctx, execEngine, queue[0], target); err != nil {
+			return err
+		}
+		dispatched++
+	}
+	if out != nil {
+		if dispatched == 0 {
+			_, _ = fmt.Fprintln(out, "暂无可发射任务")
+		} else {
+			_, _ = fmt.Fprintf(out, "本轮已发射 %d 个仓库槽位任务\n", dispatched)
+		}
+	}
+	return nil
+}
+
+func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Executor, task *core.Task, target *config.TargetConfig) error {
+	if task == nil || target == nil {
+		return nil
+	}
+	if err := rt.ensureClaudeManagedHooks(target.LocalPath); err != nil {
+		return err
+	}
+	runOpts := rt.buildExecutionOptions(task, target)
+	fresh, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, fmt.Errorf("任务不存在: %s", task.TaskID)
+		}
+		existing.State = core.StateRunning
+		existing.ErrorMsg = ""
+		return existing, nil
+	})
+	if err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
+	if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
+		_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
+	} else if err := claude.ClearHookState(rt.claudeHookStateDir(), string(fresh.TaskID)); err != nil {
+		rt.logWarning("ingest", "清理旧 Claude hook 状态失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
+	}
+
+	result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
+	if result != nil && result.Pending {
+		slot := &storage.RepoSlot{
+			TargetRepo:  fresh.TargetRepo,
+			TaskID:      fresh.TaskID,
+			SessionName: result.SessionName,
+			Phase:       storage.RepoSlotPhaseRunning,
+			LastProbeAt: time.Now().UTC(),
+		}
+		if err := rt.store.UpsertRepoSlot(slot); err != nil {
+			return err
+		}
+		_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
+		rt.reportStarted(fresh, result.SessionName)
+		return nil
+	}
+	if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
+		result = &executor.Result{ResumeSessionID: runOpts.ResumeSessionID}
+	}
+	slot := &storage.RepoSlot{
+		TargetRepo:  fresh.TargetRepo,
+		TaskID:      fresh.TaskID,
+		SessionName: executor.SessionName(fresh.TaskID),
+		Phase:       storage.RepoSlotPhasePaneDead,
+		LastProbeAt: time.Now().UTC(),
+		CompletedAt: time.Now().UTC(),
+	}
+	if runErr != nil {
+		slot.LastError = strings.TrimSpace(runErr.Error())
+	}
+	if err := rt.store.UpsertRepoSlot(slot); err != nil {
+		return err
+	}
+	return rt.finalizeRepoSlot(ctx, execEngine, slot)
+}
+
+func (rt *Runtime) finalizeRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot) error {
+	if slot == nil {
+		return nil
+	}
+	task, err := rt.store.GetTask(slot.TaskID)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return rt.store.DeleteRepoSlot(slot.TargetRepo)
+	}
+	result, runErr := execEngine.LoadResult(task.TaskID)
+	result = enrichDiagnosticResult(execEngine, task.TaskID, result)
+	if slot.Phase == storage.RepoSlotPhasePaneDead && runErr != nil && strings.TrimSpace(slot.LastError) != "" {
+		runErr = fmt.Errorf("%s: %w", slot.LastError, runErr)
+	}
+	if result != nil && result.SessionID != "" {
+		if _, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+			if existing == nil {
+				return nil, nil
+			}
+			existing.LastSessionID = result.SessionID
+			return existing, nil
+		}); err != nil {
+			return err
+		}
+	}
+	if result != nil {
+		if err := rt.persistExecutionMetrics(task, result); err != nil {
+			return err
+		}
+	}
+	if runErr != nil {
+		return rt.failTaskExecution(task, result, runErr)
+	}
+	return rt.completeTaskFinalizing(ctx, task, result, slot)
+}
+
+func (rt *Runtime) failTaskExecution(task *core.Task, result *executor.Result, runErr error) error {
+	if task == nil {
+		return nil
+	}
+	updated, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, nil
+		}
+		if result != nil && result.SessionID != "" {
+			existing.LastSessionID = result.SessionID
+		}
+		if result != nil && strings.TrimSpace(result.ResumeSessionID) != "" {
+			existing.LastSessionID = ""
+		}
+		existing.DoneCommentID = 0
+		existing.RetryCount++
+		existing.ErrorMsg = formatExecutionFailure(runErr, result)
+		existing.State = core.StateFailed
+		if existing.RetryCount >= core.MaxRetry {
+			existing.State = core.StateDead
+		}
+		return existing, nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return nil
+	}
+	eventType := core.EventFailed
+	if updated.State == core.StateDead {
+		eventType = core.EventDead
+	}
+	_ = rt.store.AppendEvent(updated.TaskID, eventType, updated.ErrorMsg)
+	rt.reportFailure(updated)
+	return rt.store.DeleteRepoSlot(updated.TargetRepo)
+}
+
+func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, result *executor.Result, slot *storage.RepoSlot) error {
+	if task == nil {
+		return nil
+	}
+	updated, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, nil
+		}
+		if result != nil && result.SessionID != "" {
+			existing.LastSessionID = result.SessionID
+		}
+		existing.State = core.StateFinalizing
+		existing.ErrorMsg = ""
+		existing.RestartCount = 0
+		if strings.TrimSpace(existing.ReportPath) == "" {
+			existing.ReportPath = filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), existing.IssueNumber, existing.IssueTitle)))
+		}
+		return existing, nil
+	})
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		return rt.store.DeleteRepoSlot(task.TargetRepo)
+	}
+	if slot == nil {
+		slot = &storage.RepoSlot{
+			TargetRepo: updated.TargetRepo,
+			TaskID:     updated.TaskID,
+			Phase:      storage.RepoSlotPhaseFinalizing,
+		}
+	}
+	if slot.SyncTarget == "" {
+		slot.SyncTarget = storage.FinalizeStepPending
+	}
+	if slot.SyncHome == "" {
+		slot.SyncHome = storage.FinalizeStepPending
+	}
+	if slot.ReportIssue == "" {
+		slot.ReportIssue = storage.FinalizeStepPending
+	}
+	slot.Phase = storage.RepoSlotPhaseFinalizing
+	if err := rt.store.UpsertRepoSlot(slot); err != nil {
+		return err
+	}
+	if err := rt.runFinalizeSteps(ctx, updated, result, slot); err != nil {
+		return err
+	}
+	if slot.SyncTarget != storage.FinalizeStepOK || slot.SyncHome != storage.FinalizeStepOK {
+		return nil
+	}
+	doneCommentID := updated.DoneCommentID
+	if slot.ReportIssue != storage.FinalizeStepOK {
+		if result != nil && rt.rep != nil {
+			doneTask := *updated
+			doneTask.State = core.StateDone
+			comment := rt.reportSuccess(&doneTask, result.Duration, result.LogFile)
+			if comment == nil || comment.ID == 0 {
+				slot.Phase = storage.RepoSlotPhaseFinalizeFailed
+				slot.ReportIssue = storage.FinalizeStepFailed
+				slot.LastError = "Issue 完成回帖失败"
+				slot.Hints = []string{"请检查 GitHub Issue 评论权限与网络可达性", "确认 `gh auth status` 正常", "处理完成后重新执行一轮 ingest 补齐回帖"}
+				_ = rt.store.UpsertRepoSlot(slot)
+				return nil
+			}
+			doneCommentID = comment.ID
+		}
+		slot.ReportIssue = storage.FinalizeStepOK
+		if err := rt.store.UpsertRepoSlot(slot); err != nil {
+			return err
+		}
+	}
+	if _, err := rt.store.ApplyTask(updated.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, nil
+		}
+		existing.State = core.StateDone
+		existing.ErrorMsg = ""
+		existing.DoneCommentID = doneCommentID
+		return existing, nil
+	}); err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(updated.TaskID, core.EventDone, "任务执行完成")
+	return rt.store.DeleteRepoSlot(updated.TargetRepo)
+}
+
+func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result *executor.Result, slot *storage.RepoSlot) error {
+	_ = ctx
+	_ = result
+	if task == nil || slot == nil {
+		return nil
+	}
+	if slot.SyncTarget != storage.FinalizeStepOK {
+		state, hints, err := rt.syncFinalizeTarget(task)
+		slot.SyncTarget = state
+		if err != nil {
+			return rt.handleFinalizeFailure(task, slot, "target", err, hints)
+		}
+	}
+	if slot.SyncHome != storage.FinalizeStepOK {
+		state, hints, err := rt.syncFinalizeHome(task)
+		slot.SyncHome = state
+		if err != nil {
+			return rt.handleFinalizeFailure(task, slot, "home", err, hints)
+		}
+	}
+	if slot.ReportIssue == storage.FinalizeStepOK {
+		return nil
+	}
+	slot.ReportIssue = storage.FinalizeStepPending
+	return rt.store.UpsertRepoSlot(slot)
+}
+
+func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot, step string, err error, hints []string) error {
+	slot.Phase = storage.RepoSlotPhaseFinalizeFailed
+	slot.LastError = strings.TrimSpace(err.Error())
+	slot.Hints = append([]string(nil), hints...)
+	if saveErr := rt.store.UpsertRepoSlot(slot); saveErr != nil {
+		return saveErr
+	}
+	_, _ = rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+		if existing == nil {
+			return nil, nil
+		}
+		existing.State = core.StateFinalizing
+		existing.ErrorMsg = slot.LastError
+		return existing, nil
+	})
+	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("任务收尾失败[%s]: %s", step, slot.LastError))
+	if rt.rep != nil && slot.LastError != "" {
+		_ = rt.rep.ReportFinalizing(task, step, slot.LastError, slot.Hints)
+	}
+	return nil
+}
+
+func (rt *Runtime) syncFinalizeTarget(task *core.Task) (storage.FinalizeStepState, []string, error) {
+	if task == nil || strings.TrimSpace(task.TargetRepo) == "" {
+		return storage.FinalizeStepOK, nil, nil
+	}
+	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
+	if err != nil {
+		return storage.FinalizeStepFailed, []string{fmt.Sprintf("请检查目标仓配置: %v", err)}, err
+	}
+	err = rt.repoSync(target.LocalPath, fmt.Sprintf("task done: %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
+	if err == nil {
+		return storage.FinalizeStepOK, nil, nil
+	}
+	return finalizeFailureState(err), buildFinalizeHints(task.TargetRepo, target.LocalPath, err), err
+}
+
+func (rt *Runtime) syncFinalizeHome(task *core.Task) (storage.FinalizeStepState, []string, error) {
+	homeRepo := strings.TrimSpace(rt.cfg.Paths.HomeRepo)
+	if homeRepo == "" {
+		return storage.FinalizeStepOK, nil, nil
+	}
+	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
+	if err == nil && target != nil && filepath.Clean(target.LocalPath) == filepath.Clean(homeRepo) {
+		return storage.FinalizeStepOK, nil, nil
+	}
+	err = rt.repoSync(homeRepo, fmt.Sprintf("task done(home): %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
+	if err == nil {
+		return storage.FinalizeStepOK, nil, nil
+	}
+	return finalizeFailureState(err), buildFinalizeHints("知识仓库", homeRepo, err), err
+}
+
+func finalizeFailureState(err error) storage.FinalizeStepState {
+	if err == nil {
+		return storage.FinalizeStepOK
+	}
+	if errors.Is(err, vcs.ErrConflict) {
+		return storage.FinalizeStepConflict
+	}
+	return storage.FinalizeStepFailed
+}
+
+func buildFinalizeHints(repo, localPath string, err error) []string {
+	hints := []string{
+		fmt.Sprintf("本机仓库路径: `%s`", localPath),
+		"建议先执行 `jj st` 确认当前工作区状态",
+		"建议再执行 `jj log -r 'conflicts()|@|@-'` 查看冲突与最近变更",
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if errors.Is(err, vcs.ErrConflict) {
+		hints = append(hints,
+			"请在 GitHub 仓库的 `Code -> Commits` 查看远端最近提交",
+			"若涉及同一区域并发修改，请在 GitHub 仓库的 `Pull requests` 查看是否已有相关改动待合并",
+			"本地收敛后可执行 `jj resolve`，再执行 `jj git push --remote origin --bookmark main`",
+		)
+	}
+	if strings.Contains(text, "protected branch") || strings.Contains(text, "branch protection") {
+		hints = append(hints, "请在 GitHub 仓库的 `Settings -> Branches` 检查默认分支保护规则，必要时改为人工经 PR 合并")
+	}
+	if repo != "" && repo != "知识仓库" {
+		hints = append(hints, fmt.Sprintf("请优先检查 GitHub 仓库 `%s` 的 `Code` / `Pull requests` / `Actions` 页面", repo))
+	}
+	return hints
+}
+
+func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Executor, manager tmux.Manager, out io.Writer) error {
+	if err := rt.hydrateRepoSlots(); err != nil {
+		return err
+	}
+	slots, err := rt.store.ListRepoSlots()
+	if err != nil {
+		return err
+	}
+	timeout := execEngine.Timeout()
+	var (
+		running    int
+		restarting int
+		paneDead   int
+	)
+	for _, slot := range slots {
+		if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
+			continue
+		}
+		if slot.Phase != storage.RepoSlotPhaseRunning && slot.Phase != storage.RepoSlotPhaseRestarting {
+			if slot.Phase == storage.RepoSlotPhasePaneDead {
+				paneDead++
+			}
+			continue
+		}
+		running++
+		task, err := rt.store.GetTask(slot.TaskID)
+		if err != nil {
+			return err
+		}
+		if task == nil {
+			if err := rt.store.DeleteRepoSlot(slot.TargetRepo); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := rt.syncTaskSessionFromHook(task); err != nil {
+			rt.logWarning("patrol", "同步 Claude hook session 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
+		}
+		status, err := manager.Status(slot.SessionName)
+		if err != nil {
+			if errors.Is(err, tmux.ErrSessionNotFound) {
+				slot.Phase = storage.RepoSlotPhasePaneDead
+				slot.CompletedAt = time.Now().UTC()
+				slot.LastProbeAt = time.Now().UTC()
+				slot.LastError = "tmux 会话已退出，等待 ingest 收口"
+				if err := rt.store.UpsertRepoSlot(slot); err != nil {
+					return err
+				}
+				paneDead++
+				continue
+			}
+			return err
+		}
+		if status.PaneDead {
+			slot.Phase = storage.RepoSlotPhasePaneDead
+			slot.CompletedAt = time.Now().UTC()
+			slot.LastProbeAt = time.Now().UTC()
+			if err := rt.store.UpsertRepoSlot(slot); err != nil {
+				return err
+			}
+			paneDead++
+			continue
+		}
+		runningFor := time.Since(status.CreatedAt)
+		if shouldRestart, reason, err := rt.shouldRestartRunningSlot(task, status.Name, runningFor); err != nil {
+			return err
+		} else if shouldRestart {
+			if err := rt.restartRepoSlotTask(ctx, execEngine, manager, task, slot, reason); err != nil {
+				return err
+			}
+			restarting++
+			continue
+		}
+		if timeout > 0 && runningFor >= timeout {
+			reason := fmt.Sprintf("tmux 会话 %s 已运行 %s，超过超时阈值 %s", status.Name, runningFor.Round(time.Second), timeout)
+			if err := rt.restartRepoSlotTask(ctx, execEngine, manager, task, slot, reason); err != nil {
+				return err
+			}
+			restarting++
+			continue
+		}
+		slot.LastProbeAt = time.Now().UTC()
+		if err := rt.store.UpsertRepoSlot(slot); err != nil {
+			return err
+		}
+	}
+	if out != nil {
+		_, _ = fmt.Fprintf(out, "巡查完成: running=%d restarting=%d pane_dead=%d\n", running, restarting, paneDead)
+	}
+	return nil
+}
+
+func (rt *Runtime) shouldRestartRunningSlot(task *core.Task, sessionName string, runningFor time.Duration) (bool, string, error) {
+	if task == nil {
+		return false, "", nil
+	}
+	state, err := claude.LoadHookState(rt.claudeHookStateDir(), string(task.TaskID))
+	if err != nil || state == nil {
+		return false, "", err
+	}
+	if strings.TrimSpace(state.SessionID) != "" && state.SessionID != task.LastSessionID {
+		if _, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+			if existing == nil {
+				return nil, nil
+			}
+			existing.LastSessionID = strings.TrimSpace(state.SessionID)
+			return existing, nil
+		}); err != nil {
+			return false, "", err
+		}
+	}
+	if !state.PreCompactAt.IsZero() {
+		return true, fmt.Sprintf("Claude 会话 %s 命中 PreCompact:%s", sessionName, displayPreCompactMatcher(state.PreCompactMatcher)), nil
+	}
+	if strings.TrimSpace(state.TranscriptPath) == "" {
+		return false, "", nil
+	}
+	metrics, err := claude.ContextMetricsFromTranscript(state.TranscriptPath, state.Model, state.ContextWindowSize)
+	if err != nil || metrics == nil {
+		return false, "", err
+	}
+	if metrics.UsablePercent <= contextRestartThreshold {
+		return false, "", nil
+	}
+	reason := fmt.Sprintf(
+		"Claude usable context 已达 %.1f%%，超过阈值 %.1f%% (context=%d usable=%d model=%s running=%s)",
+		metrics.UsablePercent,
+		contextRestartThreshold,
+		metrics.ContextLength,
+		metrics.UsableTokens,
+		displayContextModel(metrics.Model),
+		runningFor.Round(time.Second),
+	)
+	return true, reason, nil
+}
+
+func (rt *Runtime) restartRepoSlotTask(ctx context.Context, execEngine *executor.Executor, manager tmux.Manager, task *core.Task, slot *storage.RepoSlot, reason string) error {
+	if task == nil || slot == nil {
+		return nil
+	}
+	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
+	if err != nil {
+		return err
+	}
+	if err := manager.Kill(slot.SessionName); err != nil {
+		return err
+	}
+	if err := claude.ClearHookState(rt.claudeHookStateDir(), string(task.TaskID)); err != nil {
+		return err
+	}
+	runOpts := rt.buildExecutionOptions(task, target)
+	slot.Phase = storage.RepoSlotPhaseRestarting
+	slot.RestartCount++
+	slot.LastError = strings.TrimSpace(reason)
+	slot.LastProbeAt = time.Now().UTC()
+	if err := rt.store.UpsertRepoSlot(slot); err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, "patrol 原地重启 Claude: "+strings.TrimSpace(reason))
+	result, runErr := execEngine.Run(ctx, target.LocalPath, task.TaskID, runOpts)
+	if runErr != nil {
+		slot.Phase = storage.RepoSlotPhasePaneDead
+		slot.LastError = strings.TrimSpace(runErr.Error())
+		return rt.store.UpsertRepoSlot(slot)
+	}
+	if result != nil && result.Pending {
+		slot.Phase = storage.RepoSlotPhaseRunning
+		slot.SessionName = result.SessionName
+		slot.LastProbeAt = time.Now().UTC()
+		return rt.store.UpsertRepoSlot(slot)
+	}
+	slot.Phase = storage.RepoSlotPhasePaneDead
+	slot.CompletedAt = time.Now().UTC()
+	if result != nil {
+		slot.SessionName = result.SessionName
+	}
+	return rt.store.UpsertRepoSlot(slot)
+}

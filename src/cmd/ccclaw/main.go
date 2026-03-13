@@ -233,7 +233,6 @@ func newRootCmd() *cobra.Command {
 	var schedulerUserDir string
 	var schedulerCalendarTimezone string
 	var schedulerIngestCalendar string
-	var schedulerRunCalendar string
 	var schedulerPatrolCalendar string
 	var schedulerJournalCalendar string
 	configSetSchedulerCmd := &cobra.Command{
@@ -254,9 +253,6 @@ func newRootCmd() *cobra.Command {
 			if schedulerIngestCalendar != "" {
 				cfg.Scheduler.Timers.Ingest = schedulerIngestCalendar
 			}
-			if schedulerRunCalendar != "" {
-				cfg.Scheduler.Timers.Run = schedulerRunCalendar
-			}
 			if schedulerPatrolCalendar != "" {
 				cfg.Scheduler.Timers.Patrol = schedulerPatrolCalendar
 			}
@@ -275,7 +271,6 @@ func newRootCmd() *cobra.Command {
 	configSetSchedulerCmd.Flags().StringVar(&schedulerUserDir, "systemd-user-dir", "", "user systemd 单元目录")
 	configSetSchedulerCmd.Flags().StringVar(&schedulerCalendarTimezone, "calendar-timezone", "", "systemd timer 日程解释时区，默认 Asia/Shanghai")
 	configSetSchedulerCmd.Flags().StringVar(&schedulerIngestCalendar, "ingest-calendar", "", "ingest timer 的 OnCalendar 表达式")
-	configSetSchedulerCmd.Flags().StringVar(&schedulerRunCalendar, "run-calendar", "", "run timer 的 OnCalendar 表达式")
 	configSetSchedulerCmd.Flags().StringVar(&schedulerPatrolCalendar, "patrol-calendar", "", "patrol timer 的 OnCalendar 表达式")
 	configSetSchedulerCmd.Flags().StringVar(&schedulerJournalCalendar, "journal-calendar", "", "journal timer 的 OnCalendar 表达式")
 	_ = configSetSchedulerCmd.MarkFlagRequired("mode")

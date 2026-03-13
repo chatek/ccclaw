@@ -82,6 +82,26 @@ func (r *Reporter) ReportRestarted(task *core.Task, reason string, restartCount,
 	return err
 }
 
+func (r *Reporter) ReportFinalizing(task *core.Task, step, errMsg string, hints []string) error {
+	client := r.client(task)
+	if client == nil {
+		return nil
+	}
+	body := fmt.Sprintf("任务进入收尾待处理状态。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 失败步骤: `%s`\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, strings.TrimSpace(step), strings.TrimSpace(errMsg))
+	if len(hints) > 0 {
+		body += "\n\n建议处理:\n"
+		for _, hint := range hints {
+			hint = strings.TrimSpace(hint)
+			if hint == "" {
+				continue
+			}
+			body += "- " + hint + "\n"
+		}
+	}
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
+}
+
 func splitFailureMessage(raw string) (string, string) {
 	message := strings.TrimSpace(raw)
 	if message == "" {

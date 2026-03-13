@@ -44,15 +44,6 @@ func ManagedTimerDefinitions(cfg *config.Config) ([]TimerDefinition, error) {
 			Calendar:       timers.Ingest,
 		},
 		{
-			Key:            "run",
-			TimerUnit:      "ccclaw-run.timer",
-			ServiceUnit:    "ccclaw-run.service",
-			ServiceCommand: "run",
-			ServiceDesc:    "ccclaw run service",
-			TimerDesc:      "Run ccclaw worker on schedule",
-			Calendar:       timers.Run,
-		},
-		{
 			Key:            "patrol",
 			TimerUnit:      "ccclaw-patrol.timer",
 			ServiceUnit:    "ccclaw-patrol.service",

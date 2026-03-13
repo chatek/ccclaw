@@ -22,8 +22,7 @@ func ManagedCronCommands(cfg *config.Config) []string {
 	configPath := filepath.ToSlash(filepath.Join(cfg.Paths.AppDir, "ops", "config", "config.toml"))
 	envFile := filepath.ToSlash(cfg.Paths.EnvFile)
 	return []string{
-		fmt.Sprintf("*/5 * * * * %s ingest --config %s --env-file %s", appBin, configPath, envFile),
-		fmt.Sprintf("*/10 * * * * %s run --config %s --env-file %s", appBin, configPath, envFile),
+		fmt.Sprintf("*/4 * * * * %s ingest --config %s --env-file %s", appBin, configPath, envFile),
 		fmt.Sprintf("*/2 * * * * %s patrol --config %s --env-file %s", appBin, configPath, envFile),
 		fmt.Sprintf("50 23 * * * %s journal --config %s --env-file %s", appBin, configPath, envFile),
 	}

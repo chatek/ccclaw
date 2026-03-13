@@ -377,7 +377,6 @@ func managedLogUnits(scope string) ([]string, error) {
 	case "", "all":
 		return []string{
 			"ccclaw-ingest.service",
-			"ccclaw-run.service",
 			"ccclaw-patrol.service",
 			"ccclaw-journal.service",
 			"ccclaw-archive.service",
@@ -386,7 +385,7 @@ func managedLogUnits(scope string) ([]string, error) {
 	case "ingest":
 		return []string{"ccclaw-ingest.service"}, nil
 	case "run":
-		return []string{"ccclaw-run.service"}, nil
+		return []string{"ccclaw-ingest.service"}, nil
 	case "patrol":
 		return []string{"ccclaw-patrol.service"}, nil
 	case "journal":

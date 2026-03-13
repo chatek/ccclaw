@@ -15,7 +15,6 @@ import (
 func ManagedSystemdTimers() []string {
 	return []string{
 		"ccclaw-ingest.timer",
-		"ccclaw-run.timer",
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.timer",
 		"ccclaw-archive.timer",
@@ -27,8 +26,6 @@ func managedSystemdUnits() []string {
 	return []string{
 		"ccclaw-ingest.service",
 		"ccclaw-ingest.timer",
-		"ccclaw-run.service",
-		"ccclaw-run.timer",
 		"ccclaw-patrol.service",
 		"ccclaw-patrol.timer",
 		"ccclaw-journal.service",

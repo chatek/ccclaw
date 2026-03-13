@@ -591,7 +591,7 @@ Enable background timers if desired:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer
+systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer
 ```
 
 Check task repo bindings:
@@ -609,7 +609,7 @@ ccclaw -V
 ccclaw doctor
 ccclaw config
 ccclaw ingest
-ccclaw run
+ccclaw run                      # compatibility entry; forwards into the per-target ingest cycle
 ccclaw status
 ccclaw target list
 ccclaw target add --repo owner/repo --path /abs/path/to/repo

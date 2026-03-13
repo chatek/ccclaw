@@ -38,7 +38,7 @@ bash install.sh
 
 - `auto`：优先部署 `systemd --user`
 - 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
-- 受控 `cron` 会写入 `ingest/run/patrol/journal` 四类周期任务
+- 受控 `cron` 会写入 `ingest/patrol/journal` 三类周期任务
 - `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
 - `systemd --user` 额外托管 `ccclaw-archive.timer` 与 `ccclaw-sevolver.timer`
 - `ccclaw-archive.timer` 每周导出历史周 JSONL 为 Parquet，`ccclaw-sevolver.timer` 每晚维护 Skill 生命周期与缺口信号
@@ -83,7 +83,7 @@ bash install.sh --remove-cron
 - `scheduler status --json` 提供请求模式、生效模式、修复建议与 systemd/cron 原始探测字段
 - `scheduler doctor` 会额外检查 linger、user bus、unit 漂移，以及最近失败的托管 service；`--json` 提供摘要与逐项检查结果
 - `scheduler timers` 默认只保留关键列；`--wide` 显示 `CAL_RAW/CAL_CFG` 与双时区时间；`--raw` 输出 key=value 原始字段；`--json` 提供结构化脚本视图
-- `[scheduler.logs].level` 会同时影响 `ingest/run/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤
+- `[scheduler.logs].level` 会同时影响 `ingest/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤
 - 手工排障时可用 `--log-level debug` 临时放大本次命令日志，不改写配置
 - `[scheduler.logs].retention_days`、`max_files`、`compress` 只治理带 ccclaw 归档头的受管文件，不影响归档目录里的人工文件
 

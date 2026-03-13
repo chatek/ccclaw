@@ -46,8 +46,7 @@ calendar_timezone = "Asia/Shanghai"
 # - 若要配置凌晨 01:01:42，可写为 `*-*-* 01:01:42`
 # - 若表达式未显式带时区，运行时会自动追加 scheduler.calendar_timezone
 [scheduler.timers]
-ingest = "*:0/5"
-run = "*:0/10"
+ingest = "*:0/4"
 patrol = "*:0/2"
 journal = "*-*-* 23:50:00"
 

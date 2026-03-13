@@ -34,10 +34,12 @@ func TestStripManagedCronPreservesUserRules(t *testing.T) {
 	content := strings.Join([]string{
 		"MAILTO=test@example.com",
 		ManagedCronBegin,
-		ManagedCronCommands(cfg)[0],
-		ManagedCronCommands(cfg)[1],
-		ManagedCronCommands(cfg)[2],
-		ManagedCronCommands(cfg)[3],
+		"",
+	}, "\n")
+	for _, command := range ManagedCronCommands(cfg) {
+		content += command + "\n"
+	}
+	content += strings.Join([]string{
 		ManagedCronEnd,
 		"15 4 * * * echo keep-me",
 		"",
@@ -60,7 +62,8 @@ func TestContainsManagedCronRequiresFullSet(t *testing.T) {
 	if !ContainsManagedCron(block, cfg) {
 		t.Fatal("预期完整受控块被识别")
 	}
-	partial := strings.Replace(block, ManagedCronCommands(cfg)[3], "", 1)
+	commands := ManagedCronCommands(cfg)
+	partial := strings.Replace(block, commands[len(commands)-1], "", 1)
 	if ContainsManagedCron(partial, cfg) {
 		t.Fatalf("缺少 journal 规则时不应视为完整: %q", partial)
 	}

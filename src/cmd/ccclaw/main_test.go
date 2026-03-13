@@ -406,7 +406,7 @@ func TestSchedulerTimersWideCommand(t *testing.T) {
 	text := out.String()
 	if !strings.Contains(text, "视图: wide") ||
 		!strings.Contains(text, "CAL_RAW") ||
-		!strings.Contains(text, "*:0/5") ||
+		!strings.Contains(text, "*:0/4") ||
 		!strings.Contains(text, "ccclaw-ingest.timer") {
 		t.Fatalf("unexpected output: %q", text)
 	}
@@ -443,7 +443,7 @@ func TestSchedulerTimersRawCommand(t *testing.T) {
 	text := out.String()
 	if !strings.Contains(text, "视图: raw") ||
 		!strings.Contains(text, "[ingest]") ||
-		!strings.Contains(text, "calendar_raw=*:0/5") ||
+		!strings.Contains(text, "calendar_raw=*:0/4") ||
 		!strings.Contains(text, "timer_unit=ccclaw-ingest.timer") {
 		t.Fatalf("unexpected output: %q", text)
 	}
@@ -528,7 +528,7 @@ func TestSchedulerLogsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(payload), "--user --no-pager -n 12 -p warning -u ccclaw-run.service") {
+	if !strings.Contains(string(payload), "--user --no-pager -n 12 -p warning -u ccclaw-ingest.service") {
 		t.Fatalf("unexpected journalctl args: %q", string(payload))
 	}
 	archiveDir := filepath.Join(dir, "app", "log", "scheduler")
@@ -671,10 +671,10 @@ func TestRunCommandLogLevelOverride(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("执行 run --log-level info 失败: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "暂无待执行任务") {
+	if !strings.Contains(stdout.String(), "暂无可发射任务") {
 		t.Fatalf("expected run stdout: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "暂无待执行任务") {
+	if !strings.Contains(stderr.String(), "兼容入口已转发到按仓 ingest 调度") {
 		t.Fatalf("expected runtime info log on stderr: %q", stderr.String())
 	}
 
@@ -688,10 +688,10 @@ func TestRunCommandLogLevelOverride(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("执行 run --log-level warning 失败: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "暂无待执行任务") {
+	if !strings.Contains(stdout.String(), "暂无可发射任务") {
 		t.Fatalf("expected run stdout: %q", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "暂无待执行任务") {
+	if strings.Contains(stderr.String(), "兼容入口已转发到按仓 ingest 调度") {
 		t.Fatalf("warning level should suppress runtime info log: %q", stderr.String())
 	}
 }
@@ -894,14 +894,12 @@ func TestSchedulerUseSystemdCommand(t *testing.T) {
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{
-		"ccclaw-ingest.service",
-		"ccclaw-ingest.timer",
-		"ccclaw-run.service",
-		"ccclaw-run.timer",
-		"ccclaw-patrol.service",
-		"ccclaw-patrol.timer",
-		"ccclaw-journal.service",
+		for _, name := range []string{
+			"ccclaw-ingest.service",
+			"ccclaw-ingest.timer",
+			"ccclaw-patrol.service",
+			"ccclaw-patrol.timer",
+			"ccclaw-journal.service",
 		"ccclaw-journal.timer",
 		"ccclaw-archive.service",
 		"ccclaw-archive.timer",
