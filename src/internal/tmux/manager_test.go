@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,29 @@ exit 1
 	}
 	if len(items) != 1 || items[0].Name != "ccclaw-test" || !items[0].PaneDead || items[0].ExitCode != 0 {
 		t.Fatalf("unexpected tmux items: %#v", items)
+	}
+}
+
+func TestExecManagerStatusTreatsNoServerAsSessionNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmuxBin := filepath.Join(tmpDir, "tmux")
+	script := `#!/bin/sh
+set -eu
+if [ "${1:-}" = "list-panes" ]; then
+  printf '%s\n' 'no server running on /tmp/tmux-1000/default' >&2
+  exit 1
+fi
+exit 1
+`
+	if err := os.WriteFile(tmuxBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+
+	manager, err := New(tmuxBin)
+	if err != nil {
+		t.Fatalf("创建 tmux manager 失败: %v", err)
+	}
+	if _, err := manager.Status("ccclaw-missing"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("预期 no server running 映射为 ErrSessionNotFound，实际 err=%v", err)
 	}
 }

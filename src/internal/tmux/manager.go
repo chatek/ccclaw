@@ -81,7 +81,7 @@ func (m *ExecManager) Launch(spec SessionSpec) error {
 func (m *ExecManager) Status(name string) (*SessionStatus, error) {
 	output, err := m.run("list-panes", "-t", name, "-F", "#{session_name}\t#{session_created}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}")
 	if err != nil {
-		if isMissingSession(err) {
+		if isSessionNotFoundError(err) {
 			return nil, ErrSessionNotFound
 		}
 		return nil, err
@@ -102,7 +102,7 @@ func (m *ExecManager) CaptureOutput(name string, lines int) (string, error) {
 	}
 	output, err := m.run("capture-pane", "-p", "-t", name, "-S", fmt.Sprintf("-%d", lines))
 	if err != nil {
-		if isMissingSession(err) {
+		if isSessionNotFoundError(err) {
 			return "", ErrSessionNotFound
 		}
 		return "", err
@@ -112,7 +112,7 @@ func (m *ExecManager) CaptureOutput(name string, lines int) (string, error) {
 
 func (m *ExecManager) Kill(name string) error {
 	_, err := m.run("kill-session", "-t", name)
-	if err != nil && isMissingSession(err) {
+	if err != nil && isSessionNotFoundError(err) {
 		return nil
 	}
 	return err
@@ -199,6 +199,10 @@ func parseStatuses(raw string) ([]SessionStatus, error) {
 func isMissingSession(err error) bool {
 	text := err.Error()
 	return strings.Contains(text, "can't find session") || strings.Contains(text, "找不到 session")
+}
+
+func isSessionNotFoundError(err error) bool {
+	return isMissingSession(err) || isNoServer(err)
 }
 
 func isNoServer(err error) bool {

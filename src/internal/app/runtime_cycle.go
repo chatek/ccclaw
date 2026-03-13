@@ -230,7 +230,7 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 		}
 		_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
 		rt.reportStarted(fresh, result.SessionName)
-		return nil
+		return rt.probeDispatchedTMuxSession(ctx, execEngine, fresh, slot)
 	}
 	if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
 		result = &executor.Result{ResumeSessionID: runOpts.ResumeSessionID}
@@ -252,6 +252,61 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 		return err
 	}
 	return rt.finalizeRepoSlot(ctx, execEngine, slot)
+}
+
+func (rt *Runtime) probeDispatchedTMuxSession(ctx context.Context, execEngine *executor.Executor, task *core.Task, slot *storage.RepoSlot) error {
+	if task == nil || slot == nil || execEngine == nil {
+		return nil
+	}
+	manager := execEngine.TMux()
+	if manager == nil || strings.TrimSpace(slot.SessionName) == "" {
+		return nil
+	}
+	status, err := manager.Status(slot.SessionName)
+	if err != nil {
+		if !errors.Is(err, tmux.ErrSessionNotFound) {
+			return err
+		}
+		return rt.markDispatchedSlotPaneDead(ctx, execEngine, task, slot, "tmux 会话发射后立即丢失，已转入收口")
+	}
+	if !status.PaneDead {
+		return nil
+	}
+	return rt.markDispatchedSlotPaneDead(ctx, execEngine, task, slot, fmt.Sprintf("tmux 会话发射后立即退出(exit=%d)，已转入收口", status.ExitCode))
+}
+
+func (rt *Runtime) markDispatchedSlotPaneDead(ctx context.Context, execEngine *executor.Executor, task *core.Task, slot *storage.RepoSlot, reason string) error {
+	if slot == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
+	slot.CompletedAt = now
+	slot.LastProbeAt = now
+	slot.LastError = formatLaunchProbeFailure(execEngine, slot.TaskID, reason)
+	if task != nil {
+		_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, slot.LastError)
+	}
+	if err := rt.store.UpsertRepoSlot(slot); err != nil {
+		return err
+	}
+	return rt.finalizeRepoSlot(ctx, execEngine, slot)
+}
+
+func formatLaunchProbeFailure(execEngine *executor.Executor, taskID, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if execEngine == nil || strings.TrimSpace(taskID) == "" {
+		return reason
+	}
+	artifacts := execEngine.ArtifactPaths(taskID)
+	diagnostic := readDiagnosticTail(artifacts.DiagnosticFile, 12)
+	if diagnostic == "" {
+		diagnostic = readDiagnosticTail(artifacts.LogFile, 12)
+	}
+	if diagnostic == "" || strings.Contains(reason, diagnostic) {
+		return reason
+	}
+	return fmt.Sprintf("%s；诊断输出: %s", reason, diagnostic)
 }
 
 func (rt *Runtime) finalizeRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot) error {

@@ -1853,6 +1853,141 @@ exit 0
 	}
 }
 
+func TestIngestDispatchFinalizesImmediatelyWhenSessionMissingRightAfterLaunch(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	appDir := filepath.Join(tmpDir, "app")
+	resultDir := filepath.Join(appDir, "var", "results")
+	logDir := filepath.Join(appDir, "log")
+	if err := os.MkdirAll(resultDir, 0o755); err != nil {
+		t.Fatalf("创建结果目录失败: %v", err)
+	}
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("创建日志目录失败: %v", err)
+	}
+	diagPath := filepath.Join(resultDir, "44_body.diag.txt")
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	tmuxBody := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "new-session" ]]; then
+  printf '%s\n' 'ccclaude: launch hook crashed' > "${TEST_DIAG_FILE:?}"
+  exit 0
+fi
+if [[ "${1:-}" == "set-option" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "list-panes" ]]; then
+  printf '%s\n' 'no server running on /tmp/tmux-1000/default' >&2
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(tmuxScript, []byte(tmuxBody), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TEST_DIAG_FILE", diagPath)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         "44#body",
+		IdempotencyKey: "44#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    44,
+		IssueTitle:     "launch then missing session",
+		IssueBody:      "请修复 tmux no server",
+		IssueAuthor:    "ZoomQuiet",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateNew,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "target")
+	if err := os.MkdirAll(targetPath, 0o755); err != nil {
+		t.Fatalf("创建 target 目录失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  appDir,
+				LogDir:  logDir,
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{"/bin/sh"},
+				Timeout: "30m",
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: targetPath,
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	if err := rt.runIngestCycle(context.Background(), nil, false); err != nil {
+		t.Fatalf("执行 ingest cycle 失败: %v", err)
+	}
+
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateFailed {
+		t.Fatalf("预期任务同轮进入 FAILED，实际为 %#v", loaded)
+	}
+	if !strings.Contains(loaded.ErrorMsg, "发射后立即丢失") {
+		t.Fatalf("预期失败信息包含即时自检结论，实际为 %q", loaded.ErrorMsg)
+	}
+	if !strings.Contains(loaded.ErrorMsg, "launch hook crashed") {
+		t.Fatalf("预期失败信息包含最早期诊断输出，实际为 %q", loaded.ErrorMsg)
+	}
+
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot != nil {
+		t.Fatalf("预期槽位已同轮收口删除，实际为 %#v", slot)
+	}
+
+	events, err := store.ListTaskEvents(20)
+	if err != nil {
+		t.Fatalf("读取任务事件失败: %v", err)
+	}
+	hasWarning := false
+	for _, item := range events {
+		if item.TaskID == task.TaskID && item.EventType == core.EventWarning && strings.Contains(item.Detail, "发射后立即丢失") {
+			hasWarning = true
+			break
+		}
+	}
+	if !hasWarning {
+		t.Fatalf("预期产生即时告警事件，实际事件=%#v", events)
+	}
+}
+
 func TestPatrolFreshRestartsWhenUsableContextExceedsThreshold(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")
