@@ -20,6 +20,7 @@ import (
 	"github.com/41490/ccclaw/internal/adapters/github"
 	"github.com/41490/ccclaw/internal/adapters/reporter"
 	"github.com/41490/ccclaw/internal/adapters/storage"
+	"github.com/41490/ccclaw/internal/claude"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
@@ -53,6 +54,8 @@ const (
 	claudeInstallScriptURL    = "https://claude.ai/install.sh"
 	issueTargetRepoPattern    = `(?mi)^\s*target_repo\s*:\s*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s*$`
 	manualSudoGuide           = "sudo 无口令未开启，请按文档手工执行 `sudo visudo` 并为当前用户配置 `NOPASSWD` 规则"
+	contextRestartThreshold   = 64.0
+	maxContextRestarts        = 2
 )
 
 type StatsOptions struct {
@@ -227,6 +230,10 @@ func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 			rt.logError("run", "解析目标仓库失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "target_repo", fresh.TargetRepo, "error", err)
 			return err
 		}
+		if err := rt.ensureClaudeManagedHooks(target.LocalPath); err != nil {
+			rt.logError("run", "写入 Claude 项目 hook 配置失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "target_repo", fresh.TargetRepo, "error", err)
+			return err
+		}
 		runOpts := rt.buildExecutionOptions(fresh, target)
 		fresh.State = core.StateRunning
 		if err := rt.store.UpsertTask(fresh); err != nil {
@@ -238,12 +245,15 @@ func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 		if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
 			rt.logInfo("run", "尝试恢复已有 session", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_id", runOpts.ResumeSessionID)
+		} else if err := claude.ClearHookState(rt.claudeHookStateDir(), string(fresh.TaskID)); err != nil {
+			rt.logWarning("run", "清理旧 Claude hook 状态失败", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "error", err)
 		}
 
 		result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
 		if result != nil && result.Pending {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("任务已挂入 tmux 会话 %s", result.SessionName))
 			rt.logInfo("run", "任务已挂入 tmux 会话", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_name", result.SessionName)
+			rt.reportStarted(fresh, result.SessionName)
 			continue
 		}
 		if result == nil && runErr != nil && strings.TrimSpace(runOpts.ResumeSessionID) != "" {
@@ -301,6 +311,9 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 	)
 	taskSessions := make(map[string]struct{}, len(runningTasks))
 	for _, task := range runningTasks {
+		if err := rt.syncTaskSessionFromHook(task); err != nil {
+			rt.logWarning("patrol", "同步 Claude hook session 失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
+		}
 		artifacts := execEngine.ArtifactPaths(task.TaskID)
 		taskSessions[artifacts.SessionName] = struct{}{}
 		status, exists := sessionMap[artifacts.SessionName]
@@ -336,6 +349,20 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 		}
 
 		runningFor := time.Since(status.CreatedAt)
+		restarted, err := rt.maybeRestartForContextPressure(task, status.Name, runningFor)
+		if err != nil {
+			rt.logError("patrol", "检查 Claude 上下文占用失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", err)
+			return err
+		}
+		if restarted {
+			if killErr := manager.Kill(status.Name); killErr != nil {
+				rt.logError("patrol", "终止 fresh restart tmux 会话失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "error", killErr)
+				return fmt.Errorf("终止 fresh restart tmux 会话失败: %w", killErr)
+			}
+			rt.logWarning("patrol", "Claude 上下文占用达到阈值，已触发 fresh restart", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", status.Name, "running_for", runningFor.Round(time.Second).String())
+			warnings++
+			continue
+		}
 		if timeout > 0 && runningFor >= timeout {
 			tail, _ := manager.CaptureOutput(status.Name, 80)
 			if killErr := manager.Kill(status.Name); killErr != nil {
@@ -1213,15 +1240,19 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	if err != nil {
 		return err
 	}
-	approval, err := client.FindApproval(
-		issue.Number,
-		rt.cfg.Approval.Words,
-		rt.cfg.Approval.RejectWords,
-		rt.cfg.Approval.MinimumPermission,
-	)
+	comments, err := client.ListComments(issue.Number)
 	if err != nil {
 		return err
 	}
+	currentDoneCommentID := int64(0)
+	if existing != nil {
+		currentDoneCommentID = existing.DoneCommentID
+	}
+	approval, err := client.FindApprovalInComments(comments, rt.cfg.Approval.Words, rt.cfg.Approval.RejectWords, rt.cfg.Approval.MinimumPermission)
+	if err != nil {
+		return err
+	}
+	doneComment := github.FindDoneComment(comments, currentDoneCommentID)
 	approved := trusted
 	switch {
 	case approval.Rejected:
@@ -1278,12 +1309,20 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	existing.ApprovalCommand = approval.Command
 	existing.ApprovalActor = approval.Actor
 	existing.ApprovalCommentID = approval.CommentID
+	if doneComment != nil {
+		existing.DoneCommentID = doneComment.ID
+	} else {
+		existing.DoneCommentID = 0
+	}
 
 	switch {
-	case existing.State == core.StateDone || existing.State == core.StateDead:
+	case doneComment != nil:
+		existing.State = core.StateDone
+		existing.ErrorMsg = ""
+	case existing.State == core.StateDead:
 		// 保持终态，只更新元数据。
 	case len(blockReasons) == 0:
-		if existing.State == core.StateBlocked || existing.State == "" {
+		if existing.State == core.StateBlocked || existing.State == "" || previousState == core.StateDone {
 			existing.State = core.StateNew
 		}
 	default:
@@ -1296,7 +1335,10 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	if previousState == "" {
 		eventType := core.EventCreated
 		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t class=%s target=%s", existing.IssueAuthor, permission, approved, existing.TaskClass, displayTargetRepo(targetRepo))
-		if existing.State == core.StateBlocked {
+		if existing.State == core.StateDone {
+			eventType = core.EventDone
+			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
+		} else if existing.State == core.StateBlocked {
 			eventType = core.EventBlocked
 			detail = blockReasonText(blockReasons)
 		}
@@ -1314,7 +1356,10 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	if previousState != existing.State {
 		eventType := core.EventUpdated
 		detail := fmt.Sprintf("状态变更: %s -> %s", previousState, existing.State)
-		if existing.State == core.StateBlocked {
+		if existing.State == core.StateDone {
+			eventType = core.EventDone
+			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
+		} else if existing.State == core.StateBlocked {
 			eventType = core.EventBlocked
 			detail = blockReasonText(blockReasons)
 		}
@@ -1466,6 +1511,121 @@ func (rt *Runtime) newExecutor() (*executor.Executor, error) {
 	)
 }
 
+func (rt *Runtime) claudeHookStateDir() string {
+	if rt == nil || rt.cfg == nil {
+		return ""
+	}
+	return claude.DefaultHookStateDir(rt.cfg.Paths.AppDir)
+}
+
+func (rt *Runtime) ensureClaudeManagedHooks(repoPath string) error {
+	if rt == nil || rt.cfg == nil {
+		return nil
+	}
+	ccclawBin := filepath.Join(rt.cfg.Paths.AppDir, "bin", "ccclaw")
+	return claude.EnsureManagedHookSettings(repoPath, ccclawBin)
+}
+
+func (rt *Runtime) syncTaskSessionFromHook(task *core.Task) error {
+	if task == nil {
+		return nil
+	}
+	state, err := claude.LoadHookState(rt.claudeHookStateDir(), string(task.TaskID))
+	if err != nil || state == nil {
+		return err
+	}
+	if strings.TrimSpace(state.SessionID) == "" || state.SessionID == task.LastSessionID {
+		return nil
+	}
+	task.LastSessionID = strings.TrimSpace(state.SessionID)
+	return rt.store.UpsertTask(task)
+}
+
+func (rt *Runtime) maybeRestartForContextPressure(task *core.Task, sessionName string, runningFor time.Duration) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	state, err := claude.LoadHookState(rt.claudeHookStateDir(), string(task.TaskID))
+	if err != nil || state == nil {
+		return false, err
+	}
+	if strings.TrimSpace(state.SessionID) != "" && state.SessionID != task.LastSessionID {
+		task.LastSessionID = strings.TrimSpace(state.SessionID)
+		if err := rt.store.UpsertTask(task); err != nil {
+			return false, err
+		}
+	}
+	if !state.PreCompactAt.IsZero() {
+		reason := fmt.Sprintf("Claude 会话 %s 命中 PreCompact:%s", sessionName, displayPreCompactMatcher(state.PreCompactMatcher))
+		return rt.scheduleFreshRestart(task, reason)
+	}
+	if strings.TrimSpace(state.TranscriptPath) == "" {
+		return false, nil
+	}
+	metrics, err := claude.ContextMetricsFromTranscript(state.TranscriptPath, state.Model, state.ContextWindowSize)
+	if err != nil || metrics == nil {
+		return false, err
+	}
+	if metrics.UsablePercent <= contextRestartThreshold {
+		return false, nil
+	}
+	reason := fmt.Sprintf(
+		"Claude usable context 已达 %.1f%%，超过阈值 %.1f%% (context=%d usable=%d model=%s running=%s)",
+		metrics.UsablePercent,
+		contextRestartThreshold,
+		metrics.ContextLength,
+		metrics.UsableTokens,
+		displayContextModel(metrics.Model),
+		runningFor.Round(time.Second),
+	)
+	return rt.scheduleFreshRestart(task, reason)
+}
+
+func (rt *Runtime) scheduleFreshRestart(task *core.Task, reason string) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	task.LastSessionID = ""
+	task.RestartCount++
+	task.ErrorMsg = strings.TrimSpace(reason)
+	if task.RestartCount > maxContextRestarts {
+		task.RetryCount = core.MaxRetry
+		task.State = core.StateDead
+		if err := rt.store.UpsertTask(task); err != nil {
+			return false, err
+		}
+		_ = rt.store.AppendEvent(task.TaskID, core.EventDead, "上下文 fresh restart 次数已耗尽: "+task.ErrorMsg)
+		rt.reportFailure(task)
+		return true, nil
+	}
+	task.State = core.StateNew
+	if err := claude.ClearHookState(rt.claudeHookStateDir(), string(task.TaskID)); err != nil {
+		return false, err
+	}
+	if err := rt.store.UpsertTask(task); err != nil {
+		return false, err
+	}
+	_ = rt.store.AppendEvent(task.TaskID, core.EventUpdated, "触发 fresh restart: "+task.ErrorMsg)
+	rt.reportRestarted(task, task.ErrorMsg, task.RestartCount)
+	return true, nil
+}
+
+func displayPreCompactMatcher(matcher string) string {
+	matcher = strings.TrimSpace(matcher)
+	if matcher == "" {
+		return "auto"
+	}
+	return matcher
+}
+
+func displayContextModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "unknown"
+	}
+	return model
+}
+
 func (rt *Runtime) persistExecutionMetrics(task *core.Task, result *executor.Result) error {
 	if task == nil || result == nil {
 		return nil
@@ -1506,6 +1666,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 			task.LastSessionID = ""
 			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("恢复 session %s 失败，后续重试将降级为新执行", resumeSessionID))
 		}
+		task.DoneCommentID = 0
 		task.RetryCount++
 		task.ErrorMsg = formatExecutionFailure(runErr, result)
 		task.State = core.StateFailed
@@ -1524,17 +1685,23 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 	}
 	task.State = core.StateDone
 	task.ErrorMsg = ""
+	task.RestartCount = 0
 	task.ReportPath = filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), task.IssueNumber, task.IssueTitle)))
 	if err := rt.store.UpsertTask(task); err != nil {
 		return err
 	}
 	_ = rt.store.AppendEvent(task.TaskID, core.EventDone, "任务执行完成")
 	rt.logInfo("execution", "任务执行完成", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "duration", resultDuration(result), "report", task.ReportPath)
-	if result != nil {
-		rt.reportSuccess(task, result.Duration, result.LogFile)
-	}
 	if err := rt.syncTaskTargetRepo(task); err != nil {
 		return err
+	}
+	if result != nil {
+		if comment := rt.reportSuccess(task, result.Duration, result.LogFile); comment != nil && comment.ID != 0 {
+			task.DoneCommentID = comment.ID
+			if err := rt.store.UpsertTask(task); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -1563,6 +1730,7 @@ func (rt *Runtime) finalizeMissingSession(task *core.Task, execEngine *executor.
 func (rt *Runtime) markTaskDead(task *core.Task, reason, logFile string) error {
 	task.RetryCount++
 	task.ErrorMsg = reason
+	task.DoneCommentID = 0
 	task.State = core.StateDead
 	if err := rt.store.UpsertTask(task); err != nil {
 		return err
@@ -1681,11 +1849,26 @@ func (rt *Runtime) reportFailure(task *core.Task) {
 	_ = rt.rep.ReportFailure(task)
 }
 
-func (rt *Runtime) reportSuccess(task *core.Task, duration time.Duration, logFile string) {
+func (rt *Runtime) reportSuccess(task *core.Task, duration time.Duration, logFile string) *github.Comment {
+	if rt.rep == nil {
+		return nil
+	}
+	comment, _ := rt.rep.ReportSuccess(task, duration, logFile)
+	return comment
+}
+
+func (rt *Runtime) reportStarted(task *core.Task, sessionName string) {
 	if rt.rep == nil {
 		return
 	}
-	_ = rt.rep.ReportSuccess(task, duration, logFile)
+	_ = rt.rep.ReportStarted(task, sessionName)
+}
+
+func (rt *Runtime) reportRestarted(task *core.Task, reason string, restartCount int) {
+	if rt.rep == nil {
+		return
+	}
+	_ = rt.rep.ReportRestarted(task, reason, restartCount, maxContextRestarts)
 }
 
 func (rt *Runtime) describeSchedulerStatus() (string, error) {

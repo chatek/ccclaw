@@ -13,6 +13,7 @@ import (
 
 const defaultTimeout = 20 * time.Second
 const ApprovalPrefix = "/ccclaw"
+const DoneMarker = "/ccclaw [DONE]"
 
 type Label struct {
 	Name string `json:"name"`
@@ -114,12 +115,16 @@ func (c *Client) ListComments(number int) ([]Comment, error) {
 	return comments, nil
 }
 
-func (c *Client) AddComment(number int, body string) error {
-	_, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/%d/comments", c.repo, number), "-f", "body="+body)
+func (c *Client) AddComment(number int, body string) (*Comment, error) {
+	out, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/%d/comments", c.repo, number), "-f", "body="+body)
 	if err != nil {
-		return fmt.Errorf("回写 issue 评论失败: %w", err)
+		return nil, fmt.Errorf("回写 issue 评论失败: %w", err)
 	}
-	return nil
+	var comment Comment
+	if err := json.Unmarshal(out, &comment); err != nil {
+		return nil, fmt.Errorf("解析 issue 评论回写结果失败: %w", err)
+	}
+	return &comment, nil
 }
 
 func (c *Client) CreateIssue(title, body string, labels []string) (*Issue, error) {
@@ -167,6 +172,10 @@ func (c *Client) FindApproval(number int, words, rejectWords []string, minimumPe
 	if err != nil {
 		return nil, err
 	}
+	return c.FindApprovalInComments(comments, words, rejectWords, minimumPermission)
+}
+
+func (c *Client) FindApprovalInComments(comments []Comment, words, rejectWords []string, minimumPermission string) (*Approval, error) {
 	for idx := len(comments) - 1; idx >= 0; idx-- {
 		comment := comments[idx]
 		match, ok := MatchApprovalCommand(comment.Body, words, rejectWords)
@@ -217,6 +226,42 @@ func MatchApprovalCommand(body string, words, rejectWords []string) (ApprovalCom
 		}
 	}
 	return ApprovalCommandMatch{}, false
+}
+
+func HasDoneMarker(body string) bool {
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := strings.TrimSpace(lines[idx])
+		if line == "" {
+			continue
+		}
+		return strings.EqualFold(line, DoneMarker)
+	}
+	return false
+}
+
+func FindDoneComment(comments []Comment, currentDoneCommentID int64) *Comment {
+	if currentDoneCommentID != 0 {
+		for _, comment := range comments {
+			if comment.ID != currentDoneCommentID {
+				continue
+			}
+			if HasDoneMarker(comment.Body) {
+				copy := comment
+				return &copy
+			}
+			return nil
+		}
+		return nil
+	}
+	for idx := len(comments) - 1; idx >= 0; idx-- {
+		if !HasDoneMarker(comments[idx].Body) {
+			continue
+		}
+		copy := comments[idx]
+		return &copy
+	}
+	return nil
 }
 
 func approvalWordSet(words []string) map[string]struct{} {

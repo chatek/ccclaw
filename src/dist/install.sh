@@ -1498,7 +1498,7 @@ log_dir = "$LOG_DIR"
 kb_dir = "$KB_DIR"
 env_file = "$ENV_FILE"
 
-# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。
+# 执行器默认走 ccclaude 包装器；当前包装器默认直连 claude，不再拼接 rtk proxy。
 [executor]
 provider = "claude-code"
 command = ["$CLAUDE_WRAPPER"]

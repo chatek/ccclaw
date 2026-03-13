@@ -939,7 +939,7 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString(fmt.Sprintf("kb_dir = %q\n", cfg.Paths.KBDir))
 	buf.WriteString(fmt.Sprintf("env_file = %q\n\n", cfg.Paths.EnvFile))
 
-	buf.WriteString("# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。\n")
+	buf.WriteString("# 执行器默认走 ccclaude 包装器；当前包装器默认直连 claude，不再拼接 rtk proxy。\n")
 	buf.WriteString("[executor]\n")
 	buf.WriteString(fmt.Sprintf("provider = %q\n", cfg.Executor.Provider))
 	buf.WriteString(fmt.Sprintf("binary = %q\n", cfg.Executor.Binary))

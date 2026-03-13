@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"text/tabwriter"
@@ -9,6 +12,7 @@ import (
 
 	"github.com/41490/ccclaw/internal/app"
 	"github.com/41490/ccclaw/internal/buildinfo"
+	"github.com/41490/ccclaw/internal/claude"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/scheduler"
 	"github.com/spf13/cobra"
@@ -62,6 +66,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
 	addArchiveCommand(rootCmd, &configPath)
 	addSevolverCommand(rootCmd, &configPath, &envFile)
+	addClaudeHookCommand(rootCmd)
 
 	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
 		return app.NewRuntimeWithOptions(configPath, envFile, app.RuntimeOptions{
@@ -516,6 +521,52 @@ func newRootCmd() *cobra.Command {
 	})
 
 	return rootCmd
+}
+
+func addClaudeHookCommand(rootCmd *cobra.Command) {
+	hookCmd := &cobra.Command{
+		Use:    "claude-hook EVENT",
+		Short:  "处理 Claude hook 回调",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			payload, err := io.ReadAll(cmd.InOrStdin())
+			if err != nil {
+				return fmt.Errorf("读取 Claude hook stdin 失败: %w", err)
+			}
+			var event string
+			switch args[0] {
+			case "session-start":
+				event = claude.HookEventSessionStart
+			case "pre-compact":
+				event = claude.HookEventPreCompact
+			case "stop":
+				event = claude.HookEventStop
+			default:
+				return fmt.Errorf("未知 Claude hook 事件: %s", args[0])
+			}
+			var hookPayload claude.HookPayload
+			if len(bytes.TrimSpace(payload)) > 0 {
+				if err := json.Unmarshal(payload, &hookPayload); err != nil {
+					return fmt.Errorf("解析 Claude hook payload 失败: %w", err)
+				}
+			}
+			hookPayload.HookEventName = event
+			taskID := os.Getenv("CCCLAW_TASK_ID")
+			stateDir := os.Getenv("CCCLAW_HOOK_STATE_DIR")
+			if stateDir == "" {
+				appDir := os.Getenv("CCCLAW_APP_DIR")
+				if appDir != "" {
+					stateDir = claude.DefaultHookStateDir(appDir)
+				}
+			}
+			if stateDir == "" {
+				return fmt.Errorf("缺少 CCCLAW_HOOK_STATE_DIR 或 CCCLAW_APP_DIR")
+			}
+			return claude.HandleHook(stateDir, taskID, hookPayload)
+		},
+	}
+	rootCmd.AddCommand(hookCmd)
 }
 
 func defaultConfigPath() string {

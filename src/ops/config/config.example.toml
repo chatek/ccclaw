@@ -26,7 +26,7 @@ log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
 
-# 执行器默认走 ccclaude 包装器，优先复用 rtk proxy，其次直连 claude。
+# 执行器默认走 ccclaude 包装器；当前包装器默认直连 claude，不再拼接 rtk proxy。
 [executor]
 provider = "claude-code"
 command = ["~/.ccclaw/bin/ccclaude"]

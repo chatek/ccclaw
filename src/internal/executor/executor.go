@@ -160,15 +160,10 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
 	}
-	if strings.TrimSpace(meta.RTKMarkerFile) != "" {
-		if err := os.Remove(meta.RTKMarkerFile); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("清理旧 rtk 标记失败: %w", err)
-		}
-	}
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
 	}
-	launchCommand := e.buildTMuxCommand(opts, artifacts.ResultFile, artifacts.LogFile, meta.RTKMarkerFile)
+	launchCommand := e.buildTMuxCommand(taskID, opts, artifacts.ResultFile, artifacts.LogFile)
 	if err := e.tmuxManager.Launch(tmux.SessionSpec{
 		Name:    artifacts.SessionName,
 		WorkDir: repoPath,
@@ -181,8 +176,8 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	return &artifacts, nil
 }
 
-func (e *Executor) buildTMuxCommand(opts RunOptions, resultFile, logFile, rtkMarkerFile string) string {
-	commandLine := shellJoin(e.commandWithEnv(opts, rtkMarkerFile))
+func (e *Executor) buildTMuxCommand(taskID string, opts RunOptions, resultFile, logFile string) string {
+	commandLine := shellJoin(e.commandWithEnv(taskID, opts, ""))
 	script := fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s %s", commandLine, shellQuote(resultFile), shellQuote(logFile))
 	return fmt.Sprintf("bash -lc %s", shellQuote(script))
 }
@@ -204,11 +199,6 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
 	}
-	if strings.TrimSpace(meta.RTKMarkerFile) != "" {
-		if err := os.Remove(meta.RTKMarkerFile); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("清理旧 rtk 标记失败: %w", err)
-		}
-	}
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
 	}
@@ -222,7 +212,7 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	args := e.commandArgs(opts)
 	cmd := exec.CommandContext(ctx, e.command[0], args...)
 	cmd.Dir = repoPath
-	cmd.Env = append(cmd.Environ(), mapToEnv(e.runtimeEnv(meta.RTKMarkerFile))...)
+	cmd.Env = append(cmd.Environ(), mapToEnv(e.runtimeEnv(taskID, meta.RTKMarkerFile))...)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -346,8 +336,7 @@ func (e *Executor) prepareArtifacts(taskID string, opts RunOptions) (Result, run
 	}
 	meta := runMetadata{
 		PromptFile:      promptFile,
-		RTKEnabled:      e.inferRTKEnabled(),
-		RTKMarkerFile:   filepath.Join(filepath.Dir(artifacts.MetaFile), safeTaskID(taskID)+".rtk"),
+		RTKEnabled:      false,
 		ResumeSessionID: opts.ResumeSessionID,
 	}
 	e.applyArtifactMetadata(&artifacts, artifacts, meta)
@@ -428,9 +417,9 @@ func (e *Executor) commandArgs(opts RunOptions) []string {
 	return args
 }
 
-func (e *Executor) commandWithEnv(opts RunOptions, rtkMarkerFile string) []string {
+func (e *Executor) commandWithEnv(taskID string, opts RunOptions, rtkMarkerFile string) []string {
 	commandLine := append([]string{}, e.command...)
-	envMap := e.runtimeEnv(rtkMarkerFile)
+	envMap := e.runtimeEnv(taskID, rtkMarkerFile)
 	if len(envMap) == 0 {
 		return append(commandLine, e.commandArgs(opts)...)
 	}
@@ -448,43 +437,27 @@ func (e *Executor) commandWithEnv(opts RunOptions, rtkMarkerFile string) []strin
 	return envArgs
 }
 
-func (e *Executor) runtimeEnv(rtkMarkerFile string) map[string]string {
+func (e *Executor) runtimeEnv(taskID, _ string) map[string]string {
 	envMap := copyMap(e.secrets)
 	if strings.TrimSpace(envMap["CCCLAW_CLAUDE_BIN"]) == "" && strings.TrimSpace(e.claudeBin) != "" {
 		envMap["CCCLAW_CLAUDE_BIN"] = e.claudeBin
 	}
-	if strings.TrimSpace(envMap["CCCLAW_RTK_BIN"]) == "" && strings.TrimSpace(e.rtkBin) != "" {
-		envMap["CCCLAW_RTK_BIN"] = e.rtkBin
+	appDir := filepath.Dir(filepath.Dir(e.resultDir))
+	if strings.TrimSpace(appDir) != "" {
+		envMap["CCCLAW_APP_DIR"] = appDir
+		envMap["CCCLAW_HOOK_STATE_DIR"] = filepath.Join(filepath.Dir(e.resultDir), "claude-hooks")
 	}
-	if strings.TrimSpace(rtkMarkerFile) != "" {
-		envMap["CCCLAW_RTK_MARKER_FILE"] = rtkMarkerFile
+	if strings.TrimSpace(taskID) != "" {
+		envMap["CCCLAW_TASK_ID"] = taskID
 	}
 	return envMap
 }
 
 func (e *Executor) resolveRTKEnabled(meta runMetadata) bool {
-	if enabled, found := readRTKMarker(meta.RTKMarkerFile); found {
-		return enabled
-	}
-	if meta.RTKEnabled {
-		return true
-	}
-	return e.inferRTKEnabled()
+	return false
 }
 
 func (e *Executor) inferRTKEnabled() bool {
-	if strings.TrimSpace(e.rtkBin) != "" {
-		return true
-	}
-	for _, part := range e.command {
-		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
-		if base == "rtk" {
-			return true
-		}
-		if strings.Contains(base, "ccclaude") {
-			return strings.TrimSpace(configuredOrDiscoveredBinary(e.secrets, "CCCLAW_RTK_BIN", "rtk")) != ""
-		}
-	}
 	return false
 }
 

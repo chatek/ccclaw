@@ -64,6 +64,7 @@ type Task struct {
 	IssueRepo             string
 	TargetRepo            string
 	LastSessionID         string
+	DoneCommentID         int64
 	IssueNumber           int
 	IssueTitle            string
 	IssueBody             string
@@ -79,6 +80,7 @@ type Task struct {
 	ApprovalCommentID     int64
 	State                 State
 	RetryCount            int
+	RestartCount          int
 	ErrorMsg              string
 	ReportPath            string
 	CreatedAt             time.Time

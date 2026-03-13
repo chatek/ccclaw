@@ -2,24 +2,8 @@
 set -euo pipefail
 
 claude_bin="${CCCLAW_CLAUDE_BIN:-}"
-rtk_bin="${CCCLAW_RTK_BIN:-}"
-
 if [[ -z "$claude_bin" ]]; then
   claude_bin="$(command -v claude || true)"
-fi
-if [[ -z "$rtk_bin" ]]; then
-  rtk_bin="$(command -v rtk || true)"
-fi
-
-if [[ -n "$rtk_bin" && -x "$rtk_bin" ]]; then
-  if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
-    printf '1\n' > "$CCCLAW_RTK_MARKER_FILE"
-  fi
-  exec "$rtk_bin" proxy claude "$@"
-fi
-
-if [[ -n "${CCCLAW_RTK_MARKER_FILE:-}" ]]; then
-  printf '0\n' > "$CCCLAW_RTK_MARKER_FILE"
 fi
 
 if [[ -n "$claude_bin" && -x "$claude_bin" ]]; then

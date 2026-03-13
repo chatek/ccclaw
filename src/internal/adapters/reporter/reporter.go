@@ -34,7 +34,8 @@ func (r *Reporter) ReportBlocked(task *core.Task, reason string) error {
 		return nil
 	}
 	body := fmt.Sprintf("任务已进入阻塞状态。\n\n- Issue: %s#%d\n- 原因: %s\n- 当前状态: `%s`", task.IssueRepo, task.IssueNumber, reason, task.State)
-	return client.AddComment(task.IssueNumber, body)
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
 }
 
 func (r *Reporter) ReportFailure(task *core.Task) error {
@@ -48,16 +49,37 @@ func (r *Reporter) ReportFailure(task *core.Task) error {
 	if diagnostic != "" {
 		body += fmt.Sprintf("\n- 诊断: `%s`", diagnostic)
 	}
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
+}
+
+func (r *Reporter) ReportSuccess(task *core.Task, duration time.Duration, logFile string) (*github.Comment, error) {
+	client := r.client(task)
+	if client == nil {
+		return nil, nil
+	}
+	body := fmt.Sprintf("任务执行完成。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`\n\n%s", task.IssueRepo, task.IssueNumber, task.State, duration.Round(time.Second), task.ReportPath, logFile, github.DoneMarker)
 	return client.AddComment(task.IssueNumber, body)
 }
 
-func (r *Reporter) ReportSuccess(task *core.Task, duration time.Duration, logFile string) error {
+func (r *Reporter) ReportStarted(task *core.Task, sessionName string) error {
 	client := r.client(task)
 	if client == nil {
 		return nil
 	}
-	body := fmt.Sprintf("任务执行完成。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`", task.IssueRepo, task.IssueNumber, task.State, duration.Round(time.Second), task.ReportPath, logFile)
-	return client.AddComment(task.IssueNumber, body)
+	body := fmt.Sprintf("任务已开始执行。\n\n- Issue: %s#%d\n- 状态: `%s`\n- tmux 会话: `%s`", task.IssueRepo, task.IssueNumber, task.State, sessionName)
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
+}
+
+func (r *Reporter) ReportRestarted(task *core.Task, reason string, restartCount, maxRestart int) error {
+	client := r.client(task)
+	if client == nil {
+		return nil
+	}
+	body := fmt.Sprintf("任务已触发 fresh restart。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 次数: `%d/%d`\n- 原因: `%s`", task.IssueRepo, task.IssueNumber, task.State, restartCount, maxRestart, strings.TrimSpace(reason))
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
 }
 
 func splitFailureMessage(raw string) (string, string) {

@@ -110,6 +110,23 @@ func TestIssueURL(t *testing.T) {
 	}
 }
 
+func TestFindDoneCommentRespectsPinnedDoneCommentID(t *testing.T) {
+	comments := []Comment{
+		{ID: 101, Body: "任务完成\n\n/ccclaw [DONE]"},
+		{ID: 102, Body: "只是补充讨论，不应自动重开"},
+	}
+	done := FindDoneComment(comments, 101)
+	if done == nil || done.ID != 101 {
+		t.Fatalf("unexpected done comment: %#v", done)
+	}
+	if FindDoneComment(comments, 102) != nil {
+		t.Fatal("expected non-done comment id to be ignored")
+	}
+	if !HasDoneMarker("foo\n\n/ccclaw [DONE]\n") {
+		t.Fatal("expected done marker to be detected")
+	}
+}
+
 func TestCreateIssuePassesLabelsAndParsesResponse(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")

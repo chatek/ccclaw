@@ -92,10 +92,10 @@ func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
 	}
 }
 
-func TestExecutorRunUsesWrapperRTKMarker(t *testing.T) {
+func TestExecutorRunForcesPlainClaudeMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "fake-wrapper.sh")
-	script := "#!/bin/sh\nset -eu\nif [ -n \"${CCCLAW_RTK_MARKER_FILE:-}\" ]; then\n  printf '1\\n' > \"$CCCLAW_RTK_MARKER_FILE\"\nfi\ncat <<'EOF'\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sess-rtk\",\"result\":\"任务完成\",\"total_cost_usd\":0.125,\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}\nEOF\n"
+	script := "#!/bin/sh\nset -eu\ncat <<'EOF'\n{\"type\":\"result\",\"subtype\":\"success\",\"session_id\":\"sess-plain\",\"result\":\"任务完成\",\"total_cost_usd\":0.125,\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}\nEOF\n"
 	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("写入脚本失败: %v", err)
 	}
@@ -108,8 +108,8 @@ func TestExecutorRunUsesWrapperRTKMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("执行器运行失败: %v", err)
 	}
-	if !result.RTKEnabled {
-		t.Fatalf("expected explicit rtk marker, got %#v", result)
+	if result.RTKEnabled {
+		t.Fatalf("expected plain claude mode, got %#v", result)
 	}
 }
 
@@ -170,12 +170,12 @@ func TestExecutorRuntimeEnvDiscoversLocalBins(t *testing.T) {
 		t.Fatalf("创建执行器失败: %v", err)
 	}
 
-	env := execEngine.runtimeEnv("")
+	env := execEngine.runtimeEnv("", "")
 	if got, want := env["CCCLAW_CLAUDE_BIN"], filepath.Join(localBin, "claude"); got != want {
 		t.Fatalf("unexpected claude bin: got=%q want=%q", got, want)
 	}
-	if got, want := env["CCCLAW_RTK_BIN"], filepath.Join(localBin, "rtk"); got != want {
-		t.Fatalf("unexpected rtk bin: got=%q want=%q", got, want)
+	if _, ok := env["CCCLAW_RTK_BIN"]; ok {
+		t.Fatalf("did not expect rtk bin in runtime env: %#v", env)
 	}
 }
 

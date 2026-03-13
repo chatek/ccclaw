@@ -375,6 +375,132 @@ esac
 	}
 }
 
+func TestSyncIssueKeepsDoneUntilDoneCommentRemoved(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	commentsFile := filepath.Join(tmpDir, "comments.json")
+	if err := os.WriteFile(commentsFile, []byte(`[
+  {"id":501,"body":"任务已完成\n\n/ccclaw [DONE]","user":{"login":"ccclaw-bot"}},
+  {"id":502,"body":"还有个想法，但先别重跑","user":{"login":"reviewer"}}
+]`), 0o644); err != nil {
+		t.Fatalf("写入 comments fixture 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/ccclaw/collaborators/author/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  "repos/41490/ccclaw/collaborators/reviewer/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  "repos/41490/ccclaw/collaborators/ccclaw-bot/permission")
+    printf '{"permission":"maintain"}\n'
+    ;;
+  "repos/41490/ccclaw/issues/41/comments?per_page=100")
+    cat "$TEST_COMMENTS_FILE"
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TEST_COMMENTS_FILE", commentsFile)
+
+	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 41),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 41),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    41,
+		IssueTitle:     "done marker",
+		State:          core.StateDone,
+		DoneCommentID:  501,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw", IssueLabel: "ccclaw"},
+			Paths:  config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Approval: config.ApprovalConfig{
+				Words:             []string{"approve"},
+				RejectWords:       []string{"reject"},
+				MinimumPermission: "maintain",
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: "/opt/src/ccclaw",
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store:   store,
+		ghCache: map[string]*github.Client{},
+	}
+
+	issue := github.Issue{
+		Repo:      "41490/ccclaw",
+		Number:    41,
+		Title:     "done marker",
+		Body:      "请处理",
+		State:     "open",
+		Labels:    []github.Label{{Name: "ccclaw"}},
+		User:      github.User{Login: "author"},
+		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("第一次 syncIssue 失败: %v", err)
+	}
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateDone || loaded.DoneCommentID != 501 {
+		t.Fatalf("预期保留 DONE，实际为 %#v", loaded)
+	}
+
+	if err := os.WriteFile(commentsFile, []byte(`[
+  {"id":502,"body":"已删完成标记，请重新执行","user":{"login":"reviewer"}}
+]`), 0o644); err != nil {
+		t.Fatalf("重写 comments fixture 失败: %v", err)
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("第二次 syncIssue 失败: %v", err)
+	}
+	loaded, err = store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateNew || loaded.DoneCommentID != 0 {
+		t.Fatalf("预期删除 done 标记后回到 NEW，实际为 %#v", loaded)
+	}
+}
+
 func TestSummarizeSchedulerNoneModePasses(t *testing.T) {
 	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "none",
@@ -1475,6 +1601,142 @@ exit 0
 	}
 	if !strings.Contains(loaded.ErrorMsg, "未找到 Claude 可执行文件") {
 		t.Fatalf("预期回退到日志尾部诊断，实际为 %q", loaded.ErrorMsg)
+	}
+}
+
+func TestPatrolFreshRestartsWhenUsableContextExceedsThreshold(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	fixtureDir := filepath.Join(tmpDir, "fixture")
+	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
+		t.Fatalf("创建 fixture 目录失败: %v", err)
+	}
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	tmuxBody := `#!/usr/bin/env bash
+set -euo pipefail
+fixture_dir="${TMUX_FIXTURE_DIR:?}"
+if [[ "${1:-}" == "list-panes" ]]; then
+  cat "$fixture_dir/list-panes.txt"
+  exit 0
+fi
+if [[ "${1:-}" == "kill-session" ]]; then
+  printf '%s\n' "${3:-}" >> "$fixture_dir/killed.txt"
+  exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(tmuxScript, []byte(tmuxBody), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+
+	task := &core.Task{
+		TaskID:         "64#body",
+		IdempotencyKey: "64#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    64,
+		IssueTitle:     "context restart",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateRunning,
+		LastSessionID:  "sess-old",
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	sessionName := executor.SessionName(task.TaskID)
+	if err := os.WriteFile(filepath.Join(fixtureDir, "list-panes.txt"), []byte(sessionName+"\t"+strconv.FormatInt(time.Now().Add(-2*time.Minute).Unix(), 10)+"\t0\t\t123\n"), 0o644); err != nil {
+		t.Fatalf("写入 list-panes fixture 失败: %v", err)
+	}
+
+	appDir := filepath.Join(tmpDir, "app")
+	logDir := filepath.Join(appDir, "log")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("创建日志目录失败: %v", err)
+	}
+	hookStateDir := filepath.Join(appDir, "var", "claude-hooks")
+	if err := os.MkdirAll(hookStateDir, 0o755); err != nil {
+		t.Fatalf("创建 hook 状态目录失败: %v", err)
+	}
+	transcriptPath := filepath.Join(tmpDir, "transcript.jsonl")
+	transcript := `{"timestamp":"2026-03-12T10:02:00Z","message":{"model":"Claude Sonnet 4","usage":{"input_tokens":80000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":12000}}}`
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("写入 transcript 失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hookStateDir, "64_body.json"), []byte(`{
+  "task_id": "64#body",
+  "session_id": "sess-new",
+  "transcript_path": "`+transcriptPath+`",
+  "model": "Claude Sonnet 4",
+  "context_window_size": 200000
+}`), 0o644); err != nil {
+		t.Fatalf("写入 hook 状态失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  appDir,
+				LogDir:  logDir,
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{"/bin/sh"},
+				Timeout: "30m",
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.Patrol(context.Background(), &out); err != nil {
+		t.Fatalf("执行 patrol 失败: %v", err)
+	}
+
+	store, err = storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("重新打开 store 失败: %v", err)
+	}
+	defer store.Close()
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateNew {
+		t.Fatalf("预期任务回到 NEW，实际为 %#v", loaded)
+	}
+	if loaded.RestartCount != 1 {
+		t.Fatalf("预期 RestartCount=1，实际为 %#v", loaded)
+	}
+	if loaded.LastSessionID != "" {
+		t.Fatalf("预期清空 LastSessionID，实际为 %#v", loaded)
+	}
+	if _, err := os.Stat(filepath.Join(hookStateDir, "64_body.json")); !os.IsNotExist(err) {
+		t.Fatalf("预期 hook 状态已清理，实际 err=%v", err)
+	}
+	killed, err := os.ReadFile(filepath.Join(fixtureDir, "killed.txt"))
+	if err != nil {
+		t.Fatalf("读取 killed 记录失败: %v", err)
+	}
+	if strings.TrimSpace(string(killed)) != sessionName {
+		t.Fatalf("预期 kill 当前 session，实际为 %q", string(killed))
 	}
 }
 

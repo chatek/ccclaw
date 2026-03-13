@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/41490/ccclaw/internal/adapters/github"
 	"github.com/41490/ccclaw/internal/core"
@@ -103,5 +104,49 @@ printf '{}\n'
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
+	}
+}
+
+func TestReportSuccessAppendsDoneMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$@" > "$CCCLAW_REPORTER_LOG"
+printf '{}\n'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	rep := New(func(repo string) *github.Client {
+		return github.NewClient(repo, map[string]string{})
+	})
+	task := &core.Task{
+		IssueRepo:   "41490/ccclaw",
+		IssueNumber: 37,
+		State:       core.StateDone,
+		ReportPath:  "docs/reports/260312_37_done.md",
+	}
+	if _, err := rep.ReportSuccess(task, 2*time.Second, "/tmp/task.log"); err != nil {
+		t.Fatalf("ReportSuccess failed: %v", err)
+	}
+
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	if !strings.Contains(string(payload), github.DoneMarker) {
+		t.Fatalf("expected done marker in %q", string(payload))
 	}
 }

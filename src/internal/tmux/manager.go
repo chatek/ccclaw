@@ -126,20 +126,22 @@ func (m *ExecManager) List(prefix string) ([]SessionStatus, error) {
 		}
 		return nil, err
 	}
-	items, err := parseStatuses(output)
-	if err != nil {
-		return nil, err
-	}
-	if prefix == "" {
-		return items, nil
-	}
-	filtered := make([]SessionStatus, 0, len(items))
-	for _, item := range items {
-		if strings.HasPrefix(item.Name, prefix) {
-			filtered = append(filtered, item)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	filteredLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
+		if prefix != "" && !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		filteredLines = append(filteredLines, line)
 	}
-	return filtered, nil
+	if len(filteredLines) == 0 {
+		return nil, nil
+	}
+	return parseStatuses(strings.Join(filteredLines, "\n"))
 }
 
 func (m *ExecManager) run(args ...string) (string, error) {
@@ -171,9 +173,13 @@ func parseStatuses(raw string) ([]SessionStatus, error) {
 		if err != nil {
 			return nil, fmt.Errorf("解析 tmux created_at 失败: %w", err)
 		}
-		exitCode, err := strconv.Atoi(parts[3])
-		if err != nil {
-			return nil, fmt.Errorf("解析 tmux exit code 失败: %w", err)
+		exitCode := 0
+		if strings.TrimSpace(parts[3]) != "" {
+			var err error
+			exitCode, err = strconv.Atoi(parts[3])
+			if err != nil {
+				return nil, fmt.Errorf("解析 tmux exit code 失败: %w", err)
+			}
 		}
 		panePID, err := strconv.Atoi(parts[4])
 		if err != nil {
