@@ -479,6 +479,10 @@ func (s *Store) ListTaskEventsBetween(start, end time.Time, limit int) ([]EventR
 	return limitEvents(records, limit), nil
 }
 
+func (s *Store) ListAllTaskEventsBetween(start, end time.Time) ([]EventRecord, error) {
+	return s.filteredEvents(start, end, "")
+}
+
 func (s *Store) ListTaskEventsBetweenByTarget(start, end time.Time, limit int, targetRepo string) ([]EventRecord, error) {
 	records, err := s.filteredEvents(start, end, strings.TrimSpace(targetRepo))
 	if err != nil {

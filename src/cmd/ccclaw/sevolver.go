@@ -38,6 +38,7 @@ func addSevolverCommand(rootCmd *cobra.Command, configPath, envFile *string) {
 				KBDir:       cfg.Paths.KBDir,
 				JournalDir:  journalDir,
 				ReportDir:   cfg.Paths.KBDir,
+				StateDBPath: cfg.Paths.StateDB,
 				ControlRepo: cfg.GitHub.ControlRepo,
 				TargetRepo:  cfg.GitHub.ControlRepo,
 				IssueLabel:  cfg.GitHub.IssueLabel,

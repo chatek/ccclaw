@@ -15,6 +15,7 @@ type Config struct {
 	KBDir       string
 	JournalDir  string
 	ReportDir   string
+	StateDBPath string
 	ControlRepo string
 	TargetRepo  string
 	IssueLabel  string
@@ -28,6 +29,7 @@ type Result struct {
 	WindowStart     time.Time
 	Hits            []SkillHit
 	Gaps            []GapSignal
+	TaskEventGaps   []GapSignal
 	Dormant         []string
 	Deprecated      []string
 	ReportPath      string
@@ -73,7 +75,12 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("扫描 journal 缺口信号失败: %w", err)
 	}
-	result.Gaps = gaps
+	taskEventGaps, err := ScanTaskEventsForGaps(cfg.StateDBPath, cfg.KBDir, result.WindowStart)
+	if err != nil {
+		return nil, fmt.Errorf("扫描 task_events 缺口信号失败: %w", err)
+	}
+	result.TaskEventGaps = taskEventGaps
+	result.Gaps = mergeGapSignals(gaps, taskEventGaps)
 
 	for _, hit := range hits {
 		skillFile := filepath.Join(cfg.KBDir, filepath.FromSlash(hit.SkillPath))
@@ -131,7 +138,7 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	result.ReportPath = reportPath
 
 	if out != nil {
-		_, _ = fmt.Fprintf(out, "sevolver: hits=%d gaps=%d dormant=%d deprecated=%d\n", len(result.Hits), len(result.Gaps), len(result.Dormant), len(result.Deprecated))
+		_, _ = fmt.Fprintf(out, "sevolver: hits=%d gaps=%d task_event_gaps=%d dormant=%d deprecated=%d\n", len(result.Hits), len(result.Gaps), len(result.TaskEventGaps), len(result.Dormant), len(result.Deprecated))
 		if result.DeepAnalysis != nil && result.DeepAnalysis.Triggered {
 			state := "reused"
 			if result.DeepAnalysis.Created {
@@ -155,4 +162,26 @@ func (cfg Config) deepAnalysisNow() time.Time {
 		return time.Now()
 	}
 	return cfg.Now
+}
+
+func mergeGapSignals(groups ...[]GapSignal) []GapSignal {
+	indexed := map[string]GapSignal{}
+	for _, group := range groups {
+		for _, gap := range group {
+			if strings.TrimSpace(gap.ID) == "" {
+				continue
+			}
+			if existing, ok := indexed[gap.ID]; ok {
+				indexed[gap.ID] = mergeGapSignal(existing, gap)
+				continue
+			}
+			indexed[gap.ID] = gap
+		}
+	}
+	items := make([]GapSignal, 0, len(indexed))
+	for _, item := range indexed {
+		items = append(items, item)
+	}
+	sortGapSignals(items)
+	return items
 }

@@ -15,6 +15,7 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		fmt.Sprintf("- 扫描窗口: %s -> %s", result.WindowStart.Format("2006-01-02"), result.Now.Format("2006-01-02")),
 		fmt.Sprintf("- Skill 命中: %d", len(result.Hits)),
 		fmt.Sprintf("- 缺口信号: %d", len(result.Gaps)),
+		fmt.Sprintf("- task_events 缺口: %d", len(result.TaskEventGaps)),
 		fmt.Sprintf("- dormant 处理: %d", len(result.Dormant)),
 		fmt.Sprintf("- deprecated 归档: %d", len(result.Deprecated)),
 	}
@@ -49,6 +50,12 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 	if len(result.Gaps) > 0 {
 		lines = append(lines, "", "## 缺口信号")
 		for _, gap := range result.Gaps {
+			lines = append(lines, fmt.Sprintf("- [%s] %s | %s | %s | %s", gap.ID, gap.Date.Format("2006-01-02"), gap.Keyword, gap.Source, gap.Context))
+		}
+	}
+	if len(result.TaskEventGaps) > 0 {
+		lines = append(lines, "", "## task_events 缺口")
+		for _, gap := range result.TaskEventGaps {
 			lines = append(lines, fmt.Sprintf("- [%s] %s | %s | %s | %s", gap.ID, gap.Date.Format("2006-01-02"), gap.Keyword, gap.Source, gap.Context))
 		}
 	}
