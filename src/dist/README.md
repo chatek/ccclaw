@@ -65,6 +65,7 @@ bash install.sh --remove-cron
 ~/.ccclaw/bin/ccclaw scheduler status
 ~/.ccclaw/bin/ccclaw scheduler status --json
 ~/.ccclaw/bin/ccclaw scheduler doctor
+~/.ccclaw/bin/ccclaw scheduler doctor --json
 ~/.ccclaw/bin/ccclaw scheduler timers
 ~/.ccclaw/bin/ccclaw scheduler timers --wide
 ~/.ccclaw/bin/ccclaw scheduler timers --raw
@@ -80,7 +81,7 @@ bash install.sh --remove-cron
 
 - `status --json` 提供整机运行态快照的结构化出口，适合巡检脚本直接消费
 - `scheduler status --json` 提供请求模式、生效模式、修复建议与 systemd/cron 原始探测字段
-- `scheduler doctor` 会额外检查 linger、user bus、unit 漂移，以及最近失败的托管 service
+- `scheduler doctor` 会额外检查 linger、user bus、unit 漂移，以及最近失败的托管 service；`--json` 提供摘要与逐项检查结果
 - `scheduler timers` 默认只保留关键列；`--wide` 显示 `CAL_RAW/CAL_CFG` 与双时区时间；`--raw` 输出 key=value 原始字段；`--json` 提供结构化脚本视图
 - `[scheduler.logs].level` 会同时影响 `ingest/run/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤
 - 手工排障时可用 `--log-level debug` 临时放大本次命令日志，不改写配置

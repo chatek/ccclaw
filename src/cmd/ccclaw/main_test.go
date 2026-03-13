@@ -747,6 +747,77 @@ func TestSchedulerDoctorCommand(t *testing.T) {
 	}
 }
 
+func TestSchedulerDoctorJSONCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigToml(dir, envPath, "systemd")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if err := writeManagedUnitFixture(cfg); err != nil {
+		t.Fatalf("写入 managed unit fixture 失败: %v", err)
+	}
+	writeFakeSystemctlDoctor(t, filepath.Join(fakeBin, "systemctl"), systemctlLog)
+	writeFakeLoginctl(t, filepath.Join(fakeBin, "loginctl"), filepath.Join(dir, "loginctl.log"))
+	writeFakeJournalctl(t, filepath.Join(fakeBin, "journalctl"), filepath.Join(dir, "journalctl.log"))
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+	t.Setenv("CCCLAW_FAKE_LOGINCTL_LOG", filepath.Join(dir, "loginctl.log"))
+	t.Setenv("CCCLAW_FAKE_JOURNALCTL_LOG", filepath.Join(dir, "journalctl.log"))
+
+	cmd := newRootCmd()
+	out := new(bytes.Buffer)
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+	cmd.SetArgs([]string{"--config", configPath, "scheduler", "doctor", "--json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("执行 scheduler doctor --json 失败: %v", err)
+	}
+	var payload struct {
+		Summary struct {
+			Total  int `json:"total"`
+			Passed int `json:"passed"`
+			Failed int `json:"failed"`
+		} `json:"summary"`
+		Checks []struct {
+			Name   string `json:"name"`
+			OK     bool   `json:"ok"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.Summary.Total == 0 || payload.Summary.Failed != 0 || payload.Summary.Passed != payload.Summary.Total {
+		t.Fatalf("unexpected summary: %+v", payload.Summary)
+	}
+	foundLinger := false
+	for _, check := range payload.Checks {
+		if check.Name == "linger" {
+			foundLinger = true
+			if !check.OK || check.Detail == "" {
+				t.Fatalf("unexpected linger payload: %+v", check)
+			}
+		}
+	}
+	if !foundLinger {
+		t.Fatalf("missing linger check: %+v", payload.Checks)
+	}
+}
+
 func TestSchedulerUseCronCommand(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")

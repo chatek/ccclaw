@@ -7,8 +7,11 @@
 
 - 体检：`~/.ccclaw/bin/ccclaw doctor`
 - 运行态快照：`~/.ccclaw/bin/ccclaw status`
+- 运行态 JSON：`~/.ccclaw/bin/ccclaw status --json`
 - 调度状态：`~/.ccclaw/bin/ccclaw scheduler status`
+- 调度状态 JSON：`~/.ccclaw/bin/ccclaw scheduler status --json`
 - 调度专用体检：`~/.ccclaw/bin/ccclaw scheduler doctor`
+- 调度专用体检 JSON：`~/.ccclaw/bin/ccclaw scheduler doctor --json`
 - 定时器列表：`~/.ccclaw/bin/ccclaw scheduler timers`
 - 定时器完整视图：`~/.ccclaw/bin/ccclaw scheduler timers --wide`
 - 定时器原始字段：`~/.ccclaw/bin/ccclaw scheduler timers --raw`
@@ -40,6 +43,11 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
   - 先看 `scheduler status`
   - 再看 `scheduler doctor`
   - 再按需切到 `scheduler timers --wide|--raw|--json`
+- 如需脚本消费：
+  - `status --json` 看整机运行态
+  - `scheduler status --json` 看调度后端判定
+  - `scheduler doctor --json` 看诊断摘要与逐项结果
+  - `scheduler timers --json` 看定时器明细
 
 ## 日志观察
 

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,12 +22,38 @@ type doctorCheck struct {
 	Err    error
 }
 
-func Doctor(ctx context.Context, cfg *config.Config, out io.Writer) error {
+type doctorSummary struct {
+	Total  int `json:"total"`
+	Passed int `json:"passed"`
+	Failed int `json:"failed"`
+}
+
+type doctorCheckSnapshot struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+	Repair string `json:"repair,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type doctorSnapshot struct {
+	Summary doctorSummary         `json:"summary"`
+	Checks  []doctorCheckSnapshot `json:"checks"`
+}
+
+func Doctor(ctx context.Context, cfg *config.Config, out io.Writer, asJSON bool) error {
 	checks := runDoctorChecks(ctx, cfg)
-	failed := 0
+	snapshot, err := buildDoctorSnapshot(checks)
+	if asJSON {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		if encodeErr := encoder.Encode(snapshot); encodeErr != nil {
+			return encodeErr
+		}
+		return err
+	}
 	for _, check := range checks {
 		if check.Err != nil {
-			failed++
 			_, _ = fmt.Fprintf(out, "[FAIL] %s: %v", check.Name, check.Err)
 			if rendered := renderDoctorCheckExtra(check); rendered != "" {
 				_, _ = fmt.Fprintf(out, " (%s)", rendered)
@@ -40,10 +67,7 @@ func Doctor(ctx context.Context, cfg *config.Config, out io.Writer) error {
 		}
 		_, _ = fmt.Fprintln(out)
 	}
-	if failed > 0 {
-		return fmt.Errorf("scheduler doctor 失败，共 %d 项异常", failed)
-	}
-	return nil
+	return err
 }
 
 func renderDoctorCheckExtra(check doctorCheck) string {
@@ -57,6 +81,32 @@ func renderDoctorCheckExtra(check doctorCheck) string {
 	default:
 		return ""
 	}
+}
+
+func buildDoctorSnapshot(checks []doctorCheck) (doctorSnapshot, error) {
+	snapshot := doctorSnapshot{
+		Checks: make([]doctorCheckSnapshot, 0, len(checks)),
+	}
+	for _, check := range checks {
+		item := doctorCheckSnapshot{
+			Name:   check.Name,
+			OK:     check.Err == nil,
+			Detail: check.Detail,
+			Repair: check.Repair,
+		}
+		if check.Err != nil {
+			item.Error = check.Err.Error()
+			snapshot.Summary.Failed++
+		} else {
+			snapshot.Summary.Passed++
+		}
+		snapshot.Checks = append(snapshot.Checks, item)
+	}
+	snapshot.Summary.Total = len(snapshot.Checks)
+	if snapshot.Summary.Failed > 0 {
+		return snapshot, fmt.Errorf("scheduler doctor 失败，共 %d 项异常", snapshot.Summary.Failed)
+	}
+	return snapshot, nil
 }
 
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {

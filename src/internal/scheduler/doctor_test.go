@@ -1,10 +1,15 @@
 package scheduler
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/41490/ccclaw/internal/config"
 )
 
 func TestDetectManagedUnitDriftReportsMissingAndDrifted(t *testing.T) {
@@ -60,5 +65,65 @@ func TestBuildServiceRepairHintDeduplicatesUnits(t *testing.T) {
 	}
 	if !strings.Contains(hint, "journalctl --user -u ccclaw-run.service -u ccclaw-journal.service") {
 		t.Fatalf("unexpected hint: %q", hint)
+	}
+}
+
+func TestDoctorJSONReturnsPayloadOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	journalctl := filepath.Join(fakeBin, "journalctl")
+	if err := os.WriteFile(journalctl, []byte("#!/usr/bin/env bash\nset -euo pipefail\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	cfg := testSystemdConfig()
+	cfg.Scheduler.Mode = "none"
+	cfg.Scheduler.SystemdUserDir = filepath.Join(dir, "systemd-user")
+	cfg.Scheduler.Logs.Level = "bogus"
+	cfg.GitHub.ControlRepo = config.OfficialControlRepo
+	cfg.Executor.Command = []string{"claude"}
+	cfg.Approval.Words = []string{"ok"}
+	cfg.Approval.RejectWords = []string{"no"}
+	cfg.Approval.MinimumPermission = "maintain"
+
+	var out bytes.Buffer
+	err := Doctor(context.Background(), cfg, &out, true)
+	if err == nil {
+		t.Fatal("预期 doctor 返回失败")
+	}
+	var payload struct {
+		Summary struct {
+			Total  int `json:"total"`
+			Passed int `json:"passed"`
+			Failed int `json:"failed"`
+		} `json:"summary"`
+		Checks []struct {
+			Name  string `json:"name"`
+			OK    bool   `json:"ok"`
+			Error string `json:"error"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.Summary.Failed != 2 || payload.Summary.Total == 0 {
+		t.Fatalf("unexpected summary: %+v", payload.Summary)
+	}
+	foundConfig := false
+	foundLevel := false
+	for _, check := range payload.Checks {
+		switch check.Name {
+		case "调度配置":
+			foundConfig = !check.OK && strings.Contains(check.Error, "scheduler.logs.level")
+		case "运行态日志级别":
+			foundLevel = !check.OK && strings.Contains(check.Error, "未知运行态日志级别")
+		}
+	}
+	if !foundConfig || !foundLevel {
+		t.Fatalf("unexpected checks: %+v", payload.Checks)
 	}
 }

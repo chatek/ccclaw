@@ -670,6 +670,7 @@ ccclaw journal --date 2026-03-10
 ccclaw scheduler status         # 查看调度后端状态
 ccclaw scheduler status --json  # 结构化输出调度状态
 ccclaw scheduler doctor         # 查看调度与日志运维诊断
+ccclaw scheduler doctor --json  # 结构化输出诊断摘要与检查项
 ccclaw scheduler timers         # 默认窄视图，只保留关键列
 ccclaw scheduler timers --wide  # 完整视图，显示 CAL_RAW/CAL_CFG 与双时区时间
 ccclaw scheduler timers --raw   # 原始字段视图，便于人工排障
@@ -705,6 +706,7 @@ CLI 约定：
 
 - 根级运行态：`ccclaw status --json`
 - 调度后端状态：`ccclaw scheduler status --json`
+- 深度诊断：`ccclaw scheduler doctor --json`
 - 定时器详情：`ccclaw scheduler timers --json`
 
 ## 配置文件

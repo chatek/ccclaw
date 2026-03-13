@@ -43,6 +43,7 @@ func newRootCmd() *cobra.Command {
 	var schedulerLogsArchive bool
 	var statusJSON bool
 	var schedulerStatusJSON bool
+	var schedulerDoctorJSON bool
 	var schedulerTimersWide bool
 	var schedulerTimersRaw bool
 	var schedulerTimersJSON bool
@@ -298,7 +299,7 @@ func newRootCmd() *cobra.Command {
 	}
 	schedulerStatusCmd.Flags().BoolVar(&schedulerStatusJSON, "json", false, "输出结构化 JSON，便于脚本消费")
 	schedulerCmd.AddCommand(schedulerStatusCmd)
-	schedulerCmd.AddCommand(&cobra.Command{
+	schedulerDoctorCmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "单独检查调度后端、timer 与日志运维能力",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -306,9 +307,11 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return scheduler.Doctor(cmd.Context(), cfg, cmd.OutOrStdout())
+			return scheduler.Doctor(cmd.Context(), cfg, cmd.OutOrStdout(), schedulerDoctorJSON)
 		},
-	})
+	}
+	schedulerDoctorCmd.Flags().BoolVar(&schedulerDoctorJSON, "json", false, "输出结构化 JSON，便于脚本消费")
+	schedulerCmd.AddCommand(schedulerDoctorCmd)
 	schedulerTimersCmd := &cobra.Command{
 		Use:   "timers",
 		Short: "查看 ccclaw user systemd timers 状态与下一次触发时间",
