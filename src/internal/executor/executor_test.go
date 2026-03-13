@@ -135,8 +135,8 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	if result == nil || !result.Pending {
 		t.Fatalf("预期返回 pending 结果，实际为 %#v", result)
 	}
-	if !strings.Contains(manager.spec.Command, "--output-format") || !strings.Contains(manager.spec.Command, "json") {
-		t.Fatalf("预期 tmux 命令包含 json 输出，实际为 %q", manager.spec.Command)
+	if !strings.Contains(manager.spec.Command, "--output-format") || !strings.Contains(manager.spec.Command, "stream-json") {
+		t.Fatalf("预期 tmux 命令包含 stream-json 输出，实际为 %q", manager.spec.Command)
 	}
 	if !strings.Contains(manager.spec.Command, "--resume") || !strings.Contains(manager.spec.Command, "sess-9") {
 		t.Fatalf("预期 tmux 命令包含 resume 参数，实际为 %q", manager.spec.Command)
@@ -149,6 +149,31 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	}
 	if !strings.Contains(manager.spec.Command, ".diag.txt") || !strings.Contains(manager.spec.Command, ".stdout.txt") || !strings.Contains(manager.spec.Command, "2> >(") {
 		t.Fatalf("预期 tmux 命令把 stdout/诊断分别写入暂存文件，实际为 %q", manager.spec.Command)
+	}
+}
+
+func TestExecutorRunCanFallbackToJSONOutputByConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	manager := &fakeTMuxManager{}
+	execEngine, err := New(
+		[]string{"sh"},
+		"",
+		time.Minute,
+		filepath.Join(tmpDir, "log"),
+		filepath.Join(tmpDir, "result"),
+		map[string]string{"CCCLAW_OUTPUT_FORMAT": "json"},
+		manager,
+	)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	_, runErr := execEngine.Run(context.Background(), tmpDir, "11#body", RunOptions{Prompt: "test prompt"})
+	if runErr != nil {
+		t.Fatalf("tmux launch 失败: %v", runErr)
+	}
+	if !strings.Contains(manager.spec.Command, "--output-format") || !strings.Contains(manager.spec.Command, "json") {
+		t.Fatalf("预期回滚到 json 输出，实际为 %q", manager.spec.Command)
 	}
 }
 
@@ -306,6 +331,77 @@ func TestLoadResultPromotesTMuxStdoutFileToStructuredResult(t *testing.T) {
 	}
 	if _, err := os.Stat(artifacts.StdoutFile); !os.IsNotExist(err) {
 		t.Fatalf("预期 stdout 暂存文件已清理，实际 err=%v", err)
+	}
+}
+
+func TestLoadResultMaterializesStreamJSONStdoutArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+	artifacts := execEngine.ArtifactPaths("46#stream")
+	if err := execEngine.writeRunMetadata(artifacts.MetaFile, runMetadata{OutputFormat: outputFormatStreamJSON}); err != nil {
+		t.Fatalf("写入元数据失败: %v", err)
+	}
+	streamRaw, err := os.ReadFile(filepath.Join("testdata", "stream_contract", "success.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 stream fixture 失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.StdoutFile, streamRaw, 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("46#stream")
+	if loadErr != nil {
+		t.Fatalf("预期 stream-json 能被兼容解析，实际失败: %v", loadErr)
+	}
+	if result == nil || !strings.Contains(result.Output, "任务已完成") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if _, err := os.Stat(artifacts.StreamFile); err != nil {
+		t.Fatalf("预期生成 stream 原始流文件: %v", err)
+	}
+	if _, err := os.Stat(artifacts.EventFile); err != nil {
+		t.Fatalf("预期生成 stream 事件快照文件: %v", err)
+	}
+}
+
+func TestLoadResultReturnsStructuredErrorFromStreamJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+	artifacts := execEngine.ArtifactPaths("47#stream-error")
+	if err := execEngine.writeRunMetadata(artifacts.MetaFile, runMetadata{OutputFormat: outputFormatStreamJSON}); err != nil {
+		t.Fatalf("写入元数据失败: %v", err)
+	}
+	streamRaw, err := os.ReadFile(filepath.Join("testdata", "stream_contract", "restart_error.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 stream fixture 失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.StdoutFile, streamRaw, 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("47#stream-error")
+	if loadErr == nil {
+		t.Fatal("预期 stream-json 错误事件被识别为失败")
+	}
+	if !strings.Contains(loadErr.Error(), "error_stream") {
+		t.Fatalf("unexpected error: %v", loadErr)
+	}
+	if result == nil || !strings.Contains(result.Output, "退出码") {
+		t.Fatalf("unexpected result: %#v", result)
 	}
 }
 

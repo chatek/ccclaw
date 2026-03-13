@@ -39,6 +39,11 @@ type Result struct {
 	Pending         bool
 }
 
+const (
+	outputFormatJSON       = "json"
+	outputFormatStreamJSON = "stream-json"
+)
+
 type RunOptions struct {
 	Prompt          string
 	ResumeSessionID string
@@ -135,6 +140,16 @@ func (e *Executor) LoadResult(taskID string) (*Result, error) {
 	stdoutPayload, stdoutErr := os.ReadFile(artifacts.StdoutFile)
 	if stdoutErr != nil && !os.IsNotExist(stdoutErr) {
 		return nil, fmt.Errorf("读取 stdout 暂存文件失败: %w", stdoutErr)
+	}
+	if normalizeOutputFormat(meta.OutputFormat) == outputFormatStreamJSON {
+		streamResultPayload, streamErr := e.materializeTMuxStreamArtifacts(taskID, artifacts, stdoutPayload)
+		if streamErr != nil {
+			return nil, streamErr
+		}
+		if len(bytes.TrimSpace(streamResultPayload)) > 0 {
+			resultPayload = streamResultPayload
+			stdoutPayload = nil
+		}
 	}
 	resultPayload, diagnosticPayload, materializeErr := e.materializeTMuxStdoutArtifact(artifacts, resultPayload, diagnosticPayload, stdoutPayload)
 	if materializeErr != nil {
@@ -296,8 +311,30 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	runErr := cmd.Run()
 	duration := time.Since(start)
 	exitCode := 0
-	result, parseErr := parseClaudeResult(stdout.Bytes(), duration, artifacts.LogFile, artifacts.ResultFile)
-	if persistErr := e.persistStructuredArtifacts(artifacts, stdout.Bytes(), stderr.Bytes(), parseErr); persistErr != nil {
+	resultPayload := stdout.Bytes()
+	var (
+		snapshot  *StreamEventSnapshot
+		streamErr error
+	)
+	if normalizeOutputFormat(meta.OutputFormat) == outputFormatStreamJSON {
+		snapshot, streamErr = e.PersistStreamEventSnapshot(taskID, stdout.Bytes())
+	}
+	result, parseErr := parseClaudeResult(resultPayload, duration, artifacts.LogFile, artifacts.ResultFile)
+	if parseErr != nil && normalizeOutputFormat(meta.OutputFormat) == outputFormatStreamJSON && !hasStructuredClaudePayload(resultPayload) {
+		switch {
+		case snapshot == nil && streamErr != nil:
+			parseErr = fmt.Errorf("解析 stream-json 输出失败: %w", streamErr)
+		case snapshot != nil:
+			compatPayload, compatErr := marshalCompatibleResultFromStreamSnapshot(snapshot, duration)
+			if compatErr != nil {
+				parseErr = fmt.Errorf("解析 stream-json 输出失败: %w", compatErr)
+			} else {
+				resultPayload = compatPayload
+				result, parseErr = parseClaudeResult(resultPayload, duration, artifacts.LogFile, artifacts.ResultFile)
+			}
+		}
+	}
+	if persistErr := e.persistStructuredArtifacts(artifacts, resultPayload, stdout.Bytes(), stderr.Bytes(), parseErr); persistErr != nil {
 		return nil, persistErr
 	}
 	if result != nil {
@@ -340,6 +377,7 @@ type runMetadata struct {
 	RTKEnabled      bool   `json:"rtk_enabled"`
 	RTKMarkerFile   string `json:"rtk_marker_file,omitempty"`
 	ResumeSessionID string `json:"resume_session_id,omitempty"`
+	OutputFormat    string `json:"output_format,omitempty"`
 }
 
 type claudeJSONResult struct {
@@ -411,6 +449,7 @@ func (e *Executor) prepareArtifacts(taskID string, opts RunOptions) (Result, run
 		PromptFile:      promptFile,
 		RTKEnabled:      false,
 		ResumeSessionID: opts.ResumeSessionID,
+		OutputFormat:    e.outputFormat(),
 	}
 	e.applyArtifactMetadata(&artifacts, artifacts, meta)
 	return artifacts, meta, nil
@@ -489,9 +528,30 @@ func (e *Executor) commandArgs(opts RunOptions) []string {
 	args = append(args,
 		"-p", opts.Prompt,
 		"--dangerously-skip-permissions",
-		"--output-format", "json",
+		"--output-format", e.outputFormat(),
 	)
 	return args
+}
+
+func (e *Executor) outputFormat() string {
+	if e == nil {
+		return outputFormatStreamJSON
+	}
+	if format := normalizeOutputFormat(e.secrets["CCCLAW_OUTPUT_FORMAT"]); format != "" {
+		return format
+	}
+	return outputFormatStreamJSON
+}
+
+func normalizeOutputFormat(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case outputFormatJSON:
+		return outputFormatJSON
+	case outputFormatStreamJSON:
+		return outputFormatStreamJSON
+	default:
+		return ""
+	}
 }
 
 func (e *Executor) commandWithEnv(taskID string, opts RunOptions, rtkMarkerFile string) []string {
@@ -567,9 +627,9 @@ func (e *Executor) initializeArtifactFiles(artifacts Result) error {
 	return nil
 }
 
-func (e *Executor) persistStructuredArtifacts(artifacts Result, stdoutPayload, stderrPayload []byte, parseErr error) error {
-	if parseErr == nil || hasStructuredClaudePayload(stdoutPayload) {
-		if err := os.WriteFile(artifacts.ResultFile, stdoutPayload, 0o644); err != nil {
+func (e *Executor) persistStructuredArtifacts(artifacts Result, resultPayload, stdoutPayload, stderrPayload []byte, parseErr error) error {
+	if parseErr == nil || hasStructuredClaudePayload(resultPayload) {
+		if err := os.WriteFile(artifacts.ResultFile, resultPayload, 0o644); err != nil {
 			return fmt.Errorf("写入结构化结果文件失败: %w", err)
 		}
 		if err := os.WriteFile(artifacts.DiagnosticFile, stderrPayload, 0o644); err != nil {
@@ -642,6 +702,27 @@ func (e *Executor) materializeTMuxStdoutArtifact(artifacts Result, resultPayload
 		return nil, nil, fmt.Errorf("清理无效 stdout 暂存文件失败: %w", err)
 	}
 	return nil, merged, nil
+}
+
+func (e *Executor) materializeTMuxStreamArtifacts(taskID string, artifacts Result, stdoutPayload []byte) ([]byte, error) {
+	if len(bytes.TrimSpace(stdoutPayload)) == 0 {
+		return nil, nil
+	}
+	snapshot, err := e.PersistStreamEventSnapshot(taskID, stdoutPayload)
+	if err != nil {
+		return nil, fmt.Errorf("解析 tmux stream-json 暂存失败: %w", err)
+	}
+	compatPayload, err := marshalCompatibleResultFromStreamSnapshot(snapshot, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(artifacts.ResultFile, compatPayload, 0o644); err != nil {
+		return nil, fmt.Errorf("写入 stream-json 兼容结果失败: %w", err)
+	}
+	if err := removeIfExists(artifacts.StdoutFile); err != nil {
+		return nil, fmt.Errorf("清理已消费 stdout 暂存文件失败: %w", err)
+	}
+	return compatPayload, nil
 }
 
 func wrapStructuredResultError(resultPayload []byte, parseErr error, hasDiagnostic bool) error {

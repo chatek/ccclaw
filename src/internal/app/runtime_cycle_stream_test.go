@@ -48,3 +48,33 @@ func TestMapStreamSnapshotFallsBackToSafeDefaults(t *testing.T) {
 		t.Fatalf("unexpected detail fallback: %q", detail)
 	}
 }
+
+func TestStreamExpectedOutcome(t *testing.T) {
+	failed := &executor.StreamEventSnapshot{
+		Mapping:   executor.StreamStateMapping{TaskState: core.StateFailed},
+		LastEvent: executor.StreamEventError,
+	}
+	if got := streamExpectedOutcome(failed); got != "failed" {
+		t.Fatalf("expected failed outcome, got %q", got)
+	}
+	done := &executor.StreamEventSnapshot{
+		Mapping:   executor.StreamStateMapping{TaskState: core.StateFinalizing},
+		LastEvent: executor.StreamEventResult,
+	}
+	if got := streamExpectedOutcome(done); got != "done" {
+		t.Fatalf("expected done outcome, got %q", got)
+	}
+}
+
+func TestStreamActualOutcome(t *testing.T) {
+	if got := streamActualOutcome(nil); got != "done" {
+		t.Fatalf("expected done outcome, got %q", got)
+	}
+	if got := streamActualOutcome(assertErr{}); got != "failed" {
+		t.Fatalf("expected failed outcome, got %q", got)
+	}
+}
+
+type assertErr struct{}
+
+func (assertErr) Error() string { return "boom" }

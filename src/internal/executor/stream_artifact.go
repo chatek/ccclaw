@@ -1,8 +1,13 @@
 package executor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/41490/ccclaw/internal/core"
 )
 
 func (e *Executor) PersistStreamEventSnapshot(taskID string, streamRaw []byte) (*StreamEventSnapshot, error) {
@@ -75,4 +80,67 @@ func writeStreamEventSnapshotFile(path string, snapshot *StreamEventSnapshot) er
 		return fmt.Errorf("写入 stream 事件快照失败: %w", err)
 	}
 	return nil
+}
+
+func marshalCompatibleResultFromStreamSnapshot(snapshot *StreamEventSnapshot, duration time.Duration) ([]byte, error) {
+	if snapshot == nil {
+		return nil, fmt.Errorf("stream 事件快照为空，无法生成兼容结果")
+	}
+	output := strings.TrimSpace(snapshot.Result)
+	if output == "" {
+		output = strings.TrimSpace(snapshot.Error)
+	}
+	if output == "" {
+		output = strings.TrimSpace(snapshot.Mapping.TaskEventDetail)
+	}
+	payload := claudeJSONResult{
+		Type:         "result",
+		Subtype:      "success",
+		SessionID:    strings.TrimSpace(snapshot.SessionID),
+		Result:       output,
+		TotalCostUSD: snapshot.CostUSD,
+		Usage:        snapshot.Usage,
+	}
+	if snapshotStartedAndEnded(snapshot) {
+		payload.DurationMS = int64(snapshot.UpdatedAt.Sub(snapshot.StartedAt) / time.Millisecond)
+	}
+	if payload.DurationMS <= 0 && duration > 0 {
+		payload.DurationMS = int64(duration / time.Millisecond)
+	}
+	if streamSnapshotHasError(snapshot) {
+		payload.IsError = true
+		payload.Subtype = "error_stream"
+		if strings.TrimSpace(payload.Result) == "" {
+			payload.Result = "stream-json 报告执行失败"
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 stream 兼容结果失败: %w", err)
+	}
+	return append(encoded, '\n'), nil
+}
+
+func streamSnapshotHasError(snapshot *StreamEventSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	switch snapshot.Mapping.TaskState {
+	case core.StateFailed, core.StateDead:
+		return true
+	}
+	if snapshot.LastEvent == StreamEventError {
+		return true
+	}
+	if strings.TrimSpace(snapshot.Error) != "" && strings.TrimSpace(snapshot.Result) == "" {
+		return true
+	}
+	return false
+}
+
+func snapshotStartedAndEnded(snapshot *StreamEventSnapshot) bool {
+	if snapshot == nil || snapshot.StartedAt.IsZero() || snapshot.UpdatedAt.IsZero() {
+		return false
+	}
+	return snapshot.UpdatedAt.After(snapshot.StartedAt)
 }

@@ -323,6 +323,11 @@ func (rt *Runtime) finalizeRepoSlot(ctx context.Context, execEngine *executor.Ex
 	}
 	result, runErr := execEngine.LoadResult(task.TaskID)
 	result = enrichDiagnosticResult(execEngine, task.TaskID, result)
+	streamSnapshot, streamErr := execEngine.LoadStreamEventSnapshot(task.TaskID)
+	if streamErr != nil {
+		rt.logWarning("stream", "读取 stream-json 对账快照失败", "task_id", task.TaskID, "target_repo", task.TargetRepo, "error", streamErr)
+	}
+	rt.recordStreamReconcile(task, streamSnapshot, runErr)
 	if slot.Phase == storage.RepoSlotPhasePaneDead && runErr != nil && strings.TrimSpace(slot.LastError) != "" {
 		runErr = fmt.Errorf("%s: %w", slot.LastError, runErr)
 	}
@@ -868,6 +873,51 @@ func mapStreamSnapshot(snapshot *executor.StreamEventSnapshot) (storage.RepoSlot
 		detail = strings.TrimSpace(snapshot.Result)
 	}
 	return slotPhase, slotStep, taskState, taskEvent, detail
+}
+
+func (rt *Runtime) recordStreamReconcile(task *core.Task, snapshot *executor.StreamEventSnapshot, runErr error) {
+	if rt == nil || task == nil || snapshot == nil || snapshot.EventCount == 0 {
+		return
+	}
+	expected := streamExpectedOutcome(snapshot)
+	actual := streamActualOutcome(runErr)
+	match := expected == actual
+	rt.logInfo(
+		"stream",
+		"stream-json 影子对账",
+		"issue", rt.issueRef(task.IssueRepo, task.IssueNumber),
+		"task_id", task.TaskID,
+		"target_repo", task.TargetRepo,
+		"expected", expected,
+		"actual", actual,
+		"match", match,
+		"events", snapshot.EventCount,
+		"last_event", snapshot.LastEvent,
+	)
+	if !match {
+		_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("stream-json 影子对账偏差: expected=%s actual=%s", expected, actual))
+	}
+}
+
+func streamExpectedOutcome(snapshot *executor.StreamEventSnapshot) string {
+	if snapshot == nil {
+		return "unknown"
+	}
+	switch snapshot.Mapping.TaskState {
+	case core.StateFailed, core.StateDead:
+		return "failed"
+	}
+	if snapshot.LastEvent == executor.StreamEventError {
+		return "failed"
+	}
+	return "done"
+}
+
+func streamActualOutcome(runErr error) string {
+	if runErr != nil {
+		return "failed"
+	}
+	return "done"
 }
 
 func defaultSlotStepForTask(state core.State) string {

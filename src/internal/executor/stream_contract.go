@@ -247,7 +247,10 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 		resultText = message
 	}
 	if kind == StreamEventError && strings.TrimSpace(errorText) == "" {
-		errorText = message
+		errorText = strings.TrimSpace(resultText)
+		if errorText == "" {
+			errorText = message
+		}
 	}
 	line := append([]byte(nil), raw...)
 	return StreamEvent{
