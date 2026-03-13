@@ -10,6 +10,7 @@ import (
 
 type fakeDeepAnalysisClient struct {
 	openIssues   []ghadapter.Issue
+	issuesByID   map[int]ghadapter.Issue
 	createdIssue *ghadapter.Issue
 	createCalls  int
 	lastTitle    string
@@ -30,6 +31,14 @@ func (f *fakeDeepAnalysisClient) CreateIssue(title, body string, labels []string
 		return f.createdIssue, nil
 	}
 	return &ghadapter.Issue{Repo: "41490/ccclaw", Number: 88, Title: title, Body: body}, nil
+}
+
+func (f *fakeDeepAnalysisClient) GetIssue(number int) (*ghadapter.Issue, error) {
+	if issue, ok := f.issuesByID[number]; ok {
+		copy := issue
+		return &copy, nil
+	}
+	return &ghadapter.Issue{Repo: "41490/ccclaw", Number: number, State: "open"}, nil
 }
 
 func TestShouldTriggerDeepAnalysisConsecutiveDays(t *testing.T) {

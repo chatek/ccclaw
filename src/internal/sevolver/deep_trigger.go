@@ -21,6 +21,7 @@ const (
 type DeepAnalysisClient interface {
 	ListOpenIssues(label string, limit int) ([]ghadapter.Issue, error)
 	CreateIssue(title, body string, labels []string) (*ghadapter.Issue, error)
+	GetIssue(number int) (*ghadapter.Issue, error)
 }
 
 type DeepAnalysisDecision struct {

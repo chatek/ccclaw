@@ -37,6 +37,15 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 	if len(result.EscalatedSkills) > 0 {
 		lines = append(lines, fmt.Sprintf("- 升级回写 skill: %d", len(result.EscalatedSkills)))
 	}
+	if len(result.ResolvedIssues) > 0 {
+		lines = append(lines, fmt.Sprintf("- 收敛关闭 issue: %d", len(result.ResolvedIssues)))
+	}
+	if len(result.ResolvedGapIDs) > 0 {
+		lines = append(lines, fmt.Sprintf("- 收敛回写 gap: %d", len(result.ResolvedGapIDs)))
+	}
+	if len(result.ResolvedSkills) > 0 {
+		lines = append(lines, fmt.Sprintf("- 收敛回写 skill: %d", len(result.ResolvedSkills)))
+	}
 	if len(result.Errors) > 0 {
 		lines = append(lines, fmt.Sprintf("- 非阻断告警: %d", len(result.Errors)))
 	}
@@ -87,6 +96,22 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		}
 		if len(result.EscalatedSkills) > 0 {
 			lines = append(lines, fmt.Sprintf("- 已回写 skill: %s", strings.Join(result.EscalatedSkills, ", ")))
+		}
+	}
+	if len(result.ResolvedIssues) > 0 || len(result.ResolvedGapIDs) > 0 || len(result.ResolvedSkills) > 0 {
+		lines = append(lines, "", "## 收敛回写")
+		if len(result.ResolvedIssues) > 0 {
+			values := make([]string, 0, len(result.ResolvedIssues))
+			for _, issueNumber := range result.ResolvedIssues {
+				values = append(values, fmt.Sprintf("#%d", issueNumber))
+			}
+			lines = append(lines, fmt.Sprintf("- 已关闭 Issue: %s", strings.Join(values, ", ")))
+		}
+		if len(result.ResolvedGapIDs) > 0 {
+			lines = append(lines, fmt.Sprintf("- 已标记 resolved 的 gap: %s", strings.Join(result.ResolvedGapIDs, ", ")))
+		}
+		if len(result.ResolvedSkills) > 0 {
+			lines = append(lines, fmt.Sprintf("- 已标记 converged 的 skill: %s", strings.Join(result.ResolvedSkills, ", ")))
 		}
 	}
 	if len(result.Errors) > 0 {

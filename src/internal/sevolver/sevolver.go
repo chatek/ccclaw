@@ -37,6 +37,9 @@ type Result struct {
 	DeepAnalysis    *DeepAnalysisDecision
 	EscalatedGapIDs []string
 	EscalatedSkills []string
+	ResolvedGapIDs  []string
+	ResolvedSkills  []string
+	ResolvedIssues  []int
 	Errors          []string
 }
 
@@ -117,7 +120,20 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	deepAnalysis, err := MaybeTriggerDeepAnalysis(cfg, backlog)
+	resolvedBacklog, resolution, err := ResolveClosedDeepAnalysisEscalations(cfg, backlog, result.Now)
+	if resolvedBacklog != nil {
+		backlog = resolvedBacklog
+	}
+	if resolution != nil {
+		result.ResolvedGapIDs = append([]string(nil), resolution.GapIDs...)
+		result.ResolvedSkills = append([]string(nil), resolution.SkillPaths...)
+		result.ResolvedIssues = append([]int(nil), resolution.IssueNumbers...)
+	}
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("深度分析收敛回写失败: %v", err))
+	}
+	activeBacklog := filterActiveGapSignals(backlog)
+	deepAnalysis, err := MaybeTriggerDeepAnalysis(cfg, activeBacklog)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("深度分析触发失败: %v", err))
 	} else {
@@ -148,6 +164,9 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 			if len(result.EscalatedGapIDs) > 0 || len(result.EscalatedSkills) > 0 {
 				_, _ = fmt.Fprintf(out, "sevolver: deep_analysis_backfill gaps=%d skills=%d\n", len(result.EscalatedGapIDs), len(result.EscalatedSkills))
 			}
+		}
+		if len(result.ResolvedIssues) > 0 || len(result.ResolvedGapIDs) > 0 || len(result.ResolvedSkills) > 0 {
+			_, _ = fmt.Fprintf(out, "sevolver: deep_analysis_resolved issues=%d gaps=%d skills=%d\n", len(result.ResolvedIssues), len(result.ResolvedGapIDs), len(result.ResolvedSkills))
 		}
 		if result.ReportPath != "" {
 			_, _ = fmt.Fprintf(out, "sevolver: report=%s\n", result.ReportPath)

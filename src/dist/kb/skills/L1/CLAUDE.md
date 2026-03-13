@@ -37,6 +37,7 @@ gap_escalations: []
 - `status: deprecated` 表示已移入 `kb/skills/deprecated/`，不再作为活动 Skill 加载
 - `gap_escalations` 记录 gap 被升级为 deep-analysis issue 后的处理状态
 - `gap_escalations[].status: escalated` 表示该缺口已升级处理中
+- `gap_escalations[].status: converged` 表示关联 deep-analysis issue 已关闭，skill 侧已完成收敛回写
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

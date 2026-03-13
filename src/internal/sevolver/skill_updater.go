@@ -134,6 +134,51 @@ func ApplySkillGapEscalation(skillFile string, gapIDs []string, decision DeepAna
 	return writeSkillFile(skillFile, content, meta, body)
 }
 
+func ApplySkillGapEscalationResolution(skillFile string, targets []skillGapEscalation, now time.Time) (bool, error) {
+	if len(targets) == 0 {
+		return false, nil
+	}
+	content, meta, body, err := readSkillFile(skillFile)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(meta.Name) == "" {
+		return false, nil
+	}
+
+	changed := false
+	for idx := range meta.GapEscalations {
+		for _, target := range targets {
+			if !skillGapEscalationMatches(meta.GapEscalations[idx], target) {
+				continue
+			}
+			if meta.GapEscalations[idx].Status != gapEscalationStatusConverged {
+				meta.GapEscalations[idx].Status = gapEscalationStatusConverged
+				changed = true
+			}
+			updatedAt := dateFloor(now).Format("2006-01-02")
+			if meta.GapEscalations[idx].UpdatedAt != updatedAt {
+				meta.GapEscalations[idx].UpdatedAt = updatedAt
+				changed = true
+			}
+			mergedGapIDs := uniqueSortedStrings(append(meta.GapEscalations[idx].GapIDs, target.GapIDs...))
+			if !equalStringSlices(meta.GapEscalations[idx].GapIDs, mergedGapIDs) {
+				meta.GapEscalations[idx].GapIDs = mergedGapIDs
+				changed = true
+			}
+			mergedSignals := uniqueSortedStrings(append(meta.GapSignals, target.GapIDs...))
+			if !equalStringSlices(meta.GapSignals, mergedSignals) {
+				meta.GapSignals = mergedSignals
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, writeSkillFile(skillFile, content, meta, body)
+}
+
 func ArchiveDeprecated(kbDir, skillFile string) (string, error) {
 	skillsRoot := filepath.Join(strings.TrimSpace(kbDir), "skills")
 	rel, err := filepath.Rel(skillsRoot, skillFile)
@@ -286,6 +331,27 @@ func normalizeSkillGapEscalations(items []skillGapEscalation) []skillGapEscalati
 		return normalized[i].Fingerprint < normalized[j].Fingerprint
 	})
 	return normalized
+}
+
+func skillGapEscalationMatches(current, target skillGapEscalation) bool {
+	currentFingerprint := strings.TrimSpace(current.Fingerprint)
+	targetFingerprint := strings.TrimSpace(target.Fingerprint)
+	if currentFingerprint != "" && targetFingerprint != "" && currentFingerprint == targetFingerprint {
+		return true
+	}
+	return current.IssueNumber > 0 && target.IssueNumber > 0 && current.IssueNumber == target.IssueNumber
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
 }
 
 func uniqueSortedStrings(values []string) []string {
