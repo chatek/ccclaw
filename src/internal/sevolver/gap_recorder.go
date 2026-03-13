@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -27,9 +26,19 @@ func AppendGapSignals(kbDir string, gaps []GapSignal, now time.Time) (string, er
 		return "", err
 	}
 	items := append(parseGapSignalEntries(existing), gaps...)
-	pruned := pruneGapEntries(items, now)
-	body := renderGapSignalBody(pruned)
-	if err := writeManagedMarkdownFile(path, gapSignalsTitle, body, userBody); err != nil {
+	if err := writeGapSignals(path, userBody, items, now); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func SaveGapSignals(kbDir string, gaps []GapSignal, now time.Time) (string, error) {
+	path := filepath.Join(strings.TrimSpace(kbDir), "assay", "gap-signals.md")
+	_, userBody, err := readManagedMarkdownFile(path, gapSignalsTitle)
+	if err != nil {
+		return "", err
+	}
+	if err := writeGapSignals(path, userBody, gaps, now); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -47,39 +56,41 @@ func LoadGapSignals(kbDir string, now time.Time) ([]GapSignal, error) {
 func parseGapSignalEntries(body string) []GapSignal {
 	lines := strings.Split(body, "\n")
 	items := make([]GapSignal, 0)
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "- [") {
-			continue
+	var current *GapSignal
+	flush := func() {
+		if current == nil {
+			return
 		}
-		line = strings.TrimPrefix(line, "- [")
-		idx := strings.Index(line, "] ")
-		if idx < 0 {
-			continue
-		}
-		id := strings.TrimSpace(line[:idx])
-		parts := strings.Split(line[idx+2:], " | ")
-		if len(parts) < 4 {
-			continue
-		}
-		day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(parts[0]), time.Local)
-		if err != nil {
-			continue
-		}
-		items = append(items, GapSignal{
-			ID:      id,
-			Date:    day,
-			Keyword: strings.TrimSpace(parts[1]),
-			Source:  strings.TrimSpace(parts[2]),
-			Context: strings.TrimSpace(parts[3]),
-		})
+		current.RelatedSkills = uniqueSortedStrings(current.RelatedSkills)
+		items = append(items, *current)
+		current = nil
 	}
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- [") {
+			flush()
+			item, ok := parseGapSignalHeadline(trimmed)
+			if ok {
+				current = &item
+			}
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		parseGapSignalMetadata(current, strings.TrimSpace(line))
+	}
+	flush()
 	return items
 }
 
 func pruneGapEntries(items []GapSignal, now time.Time) []GapSignal {
 	cutoff := dateFloor(now).AddDate(0, 0, -gapRetentionDays)
-	seen := map[string]struct{}{}
+	indexed := map[string]int{}
 	kept := make([]GapSignal, 0, len(items))
 	for _, item := range items {
 		if item.ID == "" {
@@ -88,18 +99,15 @@ func pruneGapEntries(items []GapSignal, now time.Time) []GapSignal {
 		if !item.Date.IsZero() && item.Date.Before(cutoff) {
 			continue
 		}
-		if _, ok := seen[item.ID]; ok {
+		if idx, ok := indexed[item.ID]; ok {
+			kept[idx] = mergeGapSignal(kept[idx], item)
 			continue
 		}
-		seen[item.ID] = struct{}{}
+		item.RelatedSkills = uniqueSortedStrings(item.RelatedSkills)
+		indexed[item.ID] = len(kept)
 		kept = append(kept, item)
 	}
-	sort.Slice(kept, func(i, j int) bool {
-		if !kept[i].Date.Equal(kept[j].Date) {
-			return kept[i].Date.Before(kept[j].Date)
-		}
-		return kept[i].ID < kept[j].ID
-	})
+	sortGapSignals(kept)
 	return kept
 }
 
@@ -109,7 +117,7 @@ func renderGapSignalBody(items []GapSignal) string {
 	}
 	lines := make([]string, 0, len(items)+1)
 	lines = append(lines, "以下条目由 `ccclaw sevolver` 自动维护，保留最近 30 天。", "")
-	for _, item := range items {
+	for idx, item := range items {
 		lines = append(lines, fmt.Sprintf("- [%s] %s | %s | %s | %s",
 			item.ID,
 			item.Date.Format("2006-01-02"),
@@ -117,8 +125,133 @@ func renderGapSignalBody(items []GapSignal) string {
 			item.Source,
 			item.Context,
 		))
+		if len(item.RelatedSkills) > 0 {
+			lines = append(lines, "  related_skills: "+strings.Join(uniqueSortedStrings(item.RelatedSkills), ", "))
+		}
+		if strings.TrimSpace(item.EscalationStatus) != "" {
+			lines = append(lines, "  escalation_status: "+strings.TrimSpace(item.EscalationStatus))
+		}
+		if strings.TrimSpace(item.EscalationFingerprint) != "" {
+			lines = append(lines, "  escalation_fingerprint: "+strings.TrimSpace(item.EscalationFingerprint))
+		}
+		if item.EscalationIssueNumber > 0 {
+			lines = append(lines, fmt.Sprintf("  escalation_issue_number: %d", item.EscalationIssueNumber))
+		}
+		if strings.TrimSpace(item.EscalationIssueURL) != "" {
+			lines = append(lines, "  escalation_issue_url: "+strings.TrimSpace(item.EscalationIssueURL))
+		}
+		if strings.TrimSpace(item.EscalationUpdatedAt) != "" {
+			lines = append(lines, "  escalation_updated_at: "+strings.TrimSpace(item.EscalationUpdatedAt))
+		}
+		if idx < len(items)-1 {
+			lines = append(lines, "")
+		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func writeGapSignals(path, userBody string, items []GapSignal, now time.Time) error {
+	pruned := pruneGapEntries(items, now)
+	body := renderGapSignalBody(pruned)
+	return writeManagedMarkdownFile(path, gapSignalsTitle, body, userBody)
+}
+
+func parseGapSignalHeadline(line string) (GapSignal, bool) {
+	line = strings.TrimPrefix(line, "- [")
+	idx := strings.Index(line, "] ")
+	if idx < 0 {
+		return GapSignal{}, false
+	}
+	id := strings.TrimSpace(line[:idx])
+	parts := strings.SplitN(line[idx+2:], " | ", 4)
+	if len(parts) < 4 {
+		return GapSignal{}, false
+	}
+	day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(parts[0]), time.Local)
+	if err != nil {
+		return GapSignal{}, false
+	}
+	return GapSignal{
+		ID:      id,
+		Date:    day,
+		Keyword: strings.TrimSpace(parts[1]),
+		Source:  strings.TrimSpace(parts[2]),
+		Context: strings.TrimSpace(parts[3]),
+	}, true
+}
+
+func parseGapSignalMetadata(item *GapSignal, line string) {
+	if item == nil {
+		return
+	}
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return
+	}
+	key := strings.TrimSpace(parts[0])
+	value := strings.TrimSpace(parts[1])
+	switch key {
+	case "related_skills":
+		item.RelatedSkills = append(item.RelatedSkills, splitCommaSeparated(value)...)
+	case "escalation_status":
+		item.EscalationStatus = value
+	case "escalation_fingerprint":
+		item.EscalationFingerprint = value
+	case "escalation_issue_number":
+		fmt.Sscanf(value, "%d", &item.EscalationIssueNumber)
+	case "escalation_issue_url":
+		item.EscalationIssueURL = value
+	case "escalation_updated_at":
+		item.EscalationUpdatedAt = value
+	}
+}
+
+func mergeGapSignal(current, incoming GapSignal) GapSignal {
+	if current.Date.IsZero() && !incoming.Date.IsZero() {
+		current.Date = incoming.Date
+	}
+	if strings.TrimSpace(current.Keyword) == "" {
+		current.Keyword = incoming.Keyword
+	}
+	if strings.TrimSpace(current.Source) == "" {
+		current.Source = incoming.Source
+	}
+	if strings.TrimSpace(current.Context) == "" {
+		current.Context = incoming.Context
+	}
+	current.RelatedSkills = uniqueSortedStrings(append(current.RelatedSkills, incoming.RelatedSkills...))
+	if strings.TrimSpace(current.EscalationStatus) == "" {
+		current.EscalationStatus = incoming.EscalationStatus
+	}
+	if strings.TrimSpace(current.EscalationFingerprint) == "" {
+		current.EscalationFingerprint = incoming.EscalationFingerprint
+	}
+	if current.EscalationIssueNumber == 0 {
+		current.EscalationIssueNumber = incoming.EscalationIssueNumber
+	}
+	if strings.TrimSpace(current.EscalationIssueURL) == "" {
+		current.EscalationIssueURL = incoming.EscalationIssueURL
+	}
+	if strings.TrimSpace(current.EscalationUpdatedAt) == "" {
+		current.EscalationUpdatedAt = incoming.EscalationUpdatedAt
+	}
+	return current
+}
+
+func splitCommaSeparated(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	items := strings.Split(raw, ",")
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	return values
 }
 
 func readManagedMarkdownFile(path, defaultTitle string) (string, string, error) {

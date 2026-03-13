@@ -686,7 +686,7 @@ preserve_skill_meta_fields() {
   has_yaml_frontmatter "$new_file" || return 0
 
   blocks_file="$(mktemp)"
-  for field in last_used use_count status gap_signals; do
+  for field in last_used use_count status gap_signals gap_escalations; do
     field_block="$(mktemp)"
     extract_frontmatter_field "$old_file" "$field" > "$field_block"
     if [[ -s "$field_block" ]]; then

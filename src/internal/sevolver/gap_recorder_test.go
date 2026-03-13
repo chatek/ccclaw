@@ -29,11 +29,12 @@ func TestAppendGapSignalsPrunesAndPreservesUserBlock(t *testing.T) {
 	}
 
 	updatedPath, err := AppendGapSignals(kbDir, []GapSignal{{
-		ID:      "gap-20260312-new",
-		Date:    time.Date(2026, 3, 12, 0, 0, 0, 0, time.Local),
-		Keyword: "失败",
-		Source:  "journal/2026/03/demo.md",
-		Context: "部署失败",
+		ID:            "gap-20260312-new",
+		Date:          time.Date(2026, 3, 12, 0, 0, 0, 0, time.Local),
+		Keyword:       "失败",
+		Source:        "journal/2026/03/demo.md",
+		Context:       "部署失败",
+		RelatedSkills: []string{"skills/L2/deploy-flow/CLAUDE.md"},
 	}}, time.Date(2026, 3, 12, 0, 0, 0, 0, time.Local))
 	if err != nil {
 		t.Fatalf("AppendGapSignals failed: %v", err)
@@ -52,6 +53,9 @@ func TestAppendGapSignalsPrunesAndPreservesUserBlock(t *testing.T) {
 	if !strings.Contains(text, "gap-20260312-new") {
 		t.Fatalf("new gap should exist: %q", text)
 	}
+	if !strings.Contains(text, "related_skills: skills/L2/deploy-flow/CLAUDE.md") {
+		t.Fatalf("related skills should be written: %q", text)
+	}
 	if !strings.Contains(text, "人工备注") {
 		t.Fatalf("user block should be preserved: %q", text)
 	}
@@ -62,5 +66,8 @@ func TestAppendGapSignalsPrunesAndPreservesUserBlock(t *testing.T) {
 	}
 	if len(loaded) != 1 || loaded[0].ID != "gap-20260312-new" {
 		t.Fatalf("unexpected loaded gaps: %#v", loaded)
+	}
+	if len(loaded[0].RelatedSkills) != 1 || loaded[0].RelatedSkills[0] != "skills/L2/deploy-flow/CLAUDE.md" {
+		t.Fatalf("expected related skill metadata to round-trip, got %#v", loaded[0].RelatedSkills)
 	}
 }

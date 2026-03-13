@@ -24,16 +24,18 @@ type Config struct {
 }
 
 type Result struct {
-	Now          time.Time
-	WindowStart  time.Time
-	Hits         []SkillHit
-	Gaps         []GapSignal
-	Dormant      []string
-	Deprecated   []string
-	ReportPath   string
-	GapFilePath  string
-	DeepAnalysis *DeepAnalysisDecision
-	Errors       []string
+	Now             time.Time
+	WindowStart     time.Time
+	Hits            []SkillHit
+	Gaps            []GapSignal
+	Dormant         []string
+	Deprecated      []string
+	ReportPath      string
+	GapFilePath     string
+	DeepAnalysis    *DeepAnalysisDecision
+	EscalatedGapIDs []string
+	EscalatedSkills []string
+	Errors          []string
 }
 
 func Run(cfg Config, out io.Writer) (*Result, error) {
@@ -113,6 +115,13 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 		result.Errors = append(result.Errors, fmt.Sprintf("深度分析触发失败: %v", err))
 	} else {
 		result.DeepAnalysis = deepAnalysis
+		backfill, err := BackfillDeepAnalysisEscalation(cfg.KBDir, backlog, deepAnalysis, result.Hits, result.Now)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("深度分析回写失败: %v", err))
+		} else if backfill != nil {
+			result.EscalatedGapIDs = append([]string(nil), backfill.GapIDs...)
+			result.EscalatedSkills = append([]string(nil), backfill.SkillPaths...)
+		}
 	}
 
 	reportPath, err := WriteDailyReport(reportRoot, result.Now, *result)
@@ -129,6 +138,9 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 				state = "created"
 			}
 			_, _ = fmt.Fprintf(out, "sevolver: deep_analysis=%s fingerprint=%s issue=%s\n", state, result.DeepAnalysis.Fingerprint, result.DeepAnalysis.IssueURL)
+			if len(result.EscalatedGapIDs) > 0 || len(result.EscalatedSkills) > 0 {
+				_, _ = fmt.Fprintf(out, "sevolver: deep_analysis_backfill gaps=%d skills=%d\n", len(result.EscalatedGapIDs), len(result.EscalatedSkills))
+			}
 		}
 		if result.ReportPath != "" {
 			_, _ = fmt.Fprintf(out, "sevolver: report=%s\n", result.ReportPath)

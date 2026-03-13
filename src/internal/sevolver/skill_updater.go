@@ -21,11 +21,21 @@ const (
 )
 
 type skillMeta struct {
-	Name       string   `yaml:"name"`
-	LastUsed   string   `yaml:"last_used,omitempty"`
-	UseCount   int      `yaml:"use_count,omitempty"`
-	Status     string   `yaml:"status,omitempty"`
-	GapSignals []string `yaml:"gap_signals"`
+	Name           string               `yaml:"name"`
+	LastUsed       string               `yaml:"last_used,omitempty"`
+	UseCount       int                  `yaml:"use_count,omitempty"`
+	Status         string               `yaml:"status,omitempty"`
+	GapSignals     []string             `yaml:"gap_signals"`
+	GapEscalations []skillGapEscalation `yaml:"gap_escalations,omitempty"`
+}
+
+type skillGapEscalation struct {
+	Fingerprint string   `yaml:"fingerprint"`
+	Status      string   `yaml:"status,omitempty"`
+	IssueNumber int      `yaml:"issue_number,omitempty"`
+	IssueURL    string   `yaml:"issue_url,omitempty"`
+	UpdatedAt   string   `yaml:"updated_at,omitempty"`
+	GapIDs      []string `yaml:"gap_ids,omitempty"`
 }
 
 type skillLifecycleAction struct {
@@ -101,6 +111,26 @@ func MarkDeprecated(skillFile string) error {
 		meta.GapSignals = []string{}
 	}
 	meta.Status = skillStatusDeprecated
+	return writeSkillFile(skillFile, content, meta, body)
+}
+
+func ApplySkillGapEscalation(skillFile string, gapIDs []string, decision DeepAnalysisDecision, now time.Time) error {
+	content, meta, body, err := readSkillFile(skillFile)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(meta.Name) == "" {
+		return fmt.Errorf("skill 缺少 name frontmatter: %s", skillFile)
+	}
+	meta.GapSignals = uniqueSortedStrings(append(meta.GapSignals, gapIDs...))
+	meta.GapEscalations = upsertSkillGapEscalation(meta.GapEscalations, skillGapEscalation{
+		Fingerprint: decision.Fingerprint,
+		Status:      gapEscalationStatusEscalated,
+		IssueNumber: decision.IssueNumber,
+		IssueURL:    decision.IssueURL,
+		UpdatedAt:   dateFloor(now).Format("2006-01-02"),
+		GapIDs:      append([]string(nil), gapIDs...),
+	})
 	return writeSkillFile(skillFile, content, meta, body)
 }
 
@@ -202,6 +232,8 @@ func writeSkillFile(path, original string, meta skillMeta, body string) error {
 	if meta.GapSignals == nil {
 		meta.GapSignals = []string{}
 	}
+	meta.GapSignals = uniqueSortedStrings(meta.GapSignals)
+	meta.GapEscalations = normalizeSkillGapEscalations(meta.GapEscalations)
 	if strings.TrimSpace(meta.Status) == "" {
 		meta.Status = skillStatusActive
 	}
@@ -214,6 +246,67 @@ func writeSkillFile(path, original string, meta skillMeta, body string) error {
 		return nil
 	}
 	return writeAtomically(path, []byte(content), 0o644)
+}
+
+func upsertSkillGapEscalation(existing []skillGapEscalation, incoming skillGapEscalation) []skillGapEscalation {
+	incoming.GapIDs = uniqueSortedStrings(incoming.GapIDs)
+	for idx := range existing {
+		if strings.TrimSpace(existing[idx].Fingerprint) != strings.TrimSpace(incoming.Fingerprint) {
+			continue
+		}
+		existing[idx].Status = incoming.Status
+		if incoming.IssueNumber > 0 {
+			existing[idx].IssueNumber = incoming.IssueNumber
+		}
+		if strings.TrimSpace(incoming.IssueURL) != "" {
+			existing[idx].IssueURL = incoming.IssueURL
+		}
+		if strings.TrimSpace(incoming.UpdatedAt) != "" {
+			existing[idx].UpdatedAt = incoming.UpdatedAt
+		}
+		existing[idx].GapIDs = uniqueSortedStrings(append(existing[idx].GapIDs, incoming.GapIDs...))
+		return existing
+	}
+	return append(existing, incoming)
+}
+
+func normalizeSkillGapEscalations(items []skillGapEscalation) []skillGapEscalation {
+	if len(items) == 0 {
+		return nil
+	}
+	normalized := append([]skillGapEscalation(nil), items...)
+	for idx := range normalized {
+		normalized[idx].Fingerprint = strings.TrimSpace(normalized[idx].Fingerprint)
+		normalized[idx].Status = strings.TrimSpace(normalized[idx].Status)
+		normalized[idx].IssueURL = strings.TrimSpace(normalized[idx].IssueURL)
+		normalized[idx].UpdatedAt = strings.TrimSpace(normalized[idx].UpdatedAt)
+		normalized[idx].GapIDs = uniqueSortedStrings(normalized[idx].GapIDs)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		return normalized[i].Fingerprint < normalized[j].Fingerprint
+	})
+	return normalized
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	items := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		items = append(items, value)
+	}
+	sort.Strings(items)
+	return items
 }
 
 func splitSkillFrontmatter(raw string) (string, string, bool) {

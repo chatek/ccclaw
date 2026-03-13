@@ -31,10 +31,13 @@ last_used: YYYY-MM-DD
 use_count: 0
 status: active
 gap_signals: []
+gap_escalations: []
 ```
 
 - `status: dormant` 表示超过 14 天未命中
 - `status: deprecated` 表示已移入 `kb/skills/deprecated/`，不再参与默认加载
+- `gap_escalations` 记录 gap 被升级为 deep-analysis issue 后的处理状态
+- `gap_escalations[].status: escalated` 表示该缺口已升级处理中
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

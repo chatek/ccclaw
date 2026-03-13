@@ -53,7 +53,7 @@ func TestScanJournalForGapsLoadsSignalRules(t *testing.T) {
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(journalDir, "2026.03.12.demo.md"), []byte("部署卡住，只能先回滚\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(journalDir, "2026.03.12.demo.md"), []byte("先参考 kb/skills/L2/deploy-flow/CLAUDE.md\n部署卡住，只能先回滚\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,5 +66,8 @@ func TestScanJournalForGapsLoadsSignalRules(t *testing.T) {
 	}
 	if gaps[0].Keyword != "卡住" {
 		t.Fatalf("unexpected gap keyword: %#v", gaps[0])
+	}
+	if len(gaps[0].RelatedSkills) != 1 || gaps[0].RelatedSkills[0] != "skills/L2/deploy-flow/CLAUDE.md" {
+		t.Fatalf("expected related skill to be attached, got %#v", gaps[0].RelatedSkills)
 	}
 }

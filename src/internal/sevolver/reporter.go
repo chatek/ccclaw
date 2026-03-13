@@ -30,6 +30,12 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 			lines = append(lines, fmt.Sprintf("- 深度分析: 未触发 (%s)", result.DeepAnalysis.Reason))
 		}
 	}
+	if len(result.EscalatedGapIDs) > 0 {
+		lines = append(lines, fmt.Sprintf("- 升级回写 gap: %d", len(result.EscalatedGapIDs)))
+	}
+	if len(result.EscalatedSkills) > 0 {
+		lines = append(lines, fmt.Sprintf("- 升级回写 skill: %d", len(result.EscalatedSkills)))
+	}
 	if len(result.Errors) > 0 {
 		lines = append(lines, fmt.Sprintf("- 非阻断告警: %d", len(result.Errors)))
 	}
@@ -68,6 +74,12 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		}
 		if result.DeepAnalysis.IssueURL != "" {
 			lines = append(lines, fmt.Sprintf("- Issue: %s", result.DeepAnalysis.IssueURL))
+		}
+		if len(result.EscalatedGapIDs) > 0 {
+			lines = append(lines, fmt.Sprintf("- 已回写 gap: %s", strings.Join(result.EscalatedGapIDs, ", ")))
+		}
+		if len(result.EscalatedSkills) > 0 {
+			lines = append(lines, fmt.Sprintf("- 已回写 skill: %s", strings.Join(result.EscalatedSkills, ", ")))
 		}
 	}
 	if len(result.Errors) > 0 {

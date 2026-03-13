@@ -577,6 +577,7 @@ keywords:
   - demo
 status: active
 gap_signals: []
+gap_escalations: []
 ---
 
 <!-- ccclaw:managed:start -->
@@ -599,6 +600,13 @@ use_count: 7
 status: dormant
 gap_signals:
   - gap-2026-03-10
+gap_escalations:
+  - fingerprint: sg-demo
+    status: escalated
+    issue_number: 88
+    issue_url: https://github.com/41490/ccclaw/issues/88
+    gap_ids:
+      - gap-2026-03-10
 ---
 
 <!-- ccclaw:managed:start -->
@@ -626,12 +634,17 @@ EOF
   assert_contains "$target" 'status: dormant'
   assert_contains "$target" 'gap_signals:'
   assert_contains "$target" '  - gap-2026-03-10'
+  assert_contains "$target" 'gap_escalations:'
+  assert_contains "$target" 'fingerprint: sg-demo'
+  assert_contains "$target" 'issue_number: 88'
   assert_not_contains "$target" 'status: active'
   assert_not_contains "$target" 'gap_signals: []'
+  assert_not_contains "$target" 'gap_escalations: []'
   assert_eq "1" "$(grep -c '^last_used:' "$target")" "last_used 不应重复"
   assert_eq "1" "$(grep -c '^use_count:' "$target")" "use_count 不应重复"
   assert_eq "1" "$(grep -c '^status:' "$target")" "status 不应重复"
   assert_eq "1" "$(grep -c '^gap_signals:' "$target")" "gap_signals 不应重复"
+  assert_eq "1" "$(grep -c '^gap_escalations:' "$target")" "gap_escalations 不应重复"
 }
 
 test_interactive_mode_accepts_short_words() {

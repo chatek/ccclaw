@@ -35,11 +35,17 @@ type SkillHit struct {
 }
 
 type GapSignal struct {
-	ID      string
-	Date    time.Time
-	Keyword string
-	Context string
-	Source  string
+	ID                    string
+	Date                  time.Time
+	Keyword               string
+	Context               string
+	Source                string
+	RelatedSkills         []string
+	EscalationStatus      string
+	EscalationFingerprint string
+	EscalationIssueNumber int
+	EscalationIssueURL    string
+	EscalationUpdatedAt   string
 }
 
 func ScanJournal(journalRoot string, since time.Time) ([]SkillHit, error) {
@@ -190,23 +196,38 @@ func scanFileForGapSignals(journalRoot, path string, day time.Time, keywords []s
 	gaps := make([]GapSignal, 0)
 	scanner := bufio.NewScanner(handle)
 	lineNo := 0
+	fileSkills := make([]string, 0)
+	fileSkillSeen := map[string]struct{}{}
 	for scanner.Scan() {
 		lineNo++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
 		}
+		lineSkills := extractSkillPaths(line)
+		for _, skillPath := range lineSkills {
+			if _, ok := fileSkillSeen[skillPath]; ok {
+				continue
+			}
+			fileSkillSeen[skillPath] = struct{}{}
+			fileSkills = append(fileSkills, skillPath)
+		}
 		lower := strings.ToLower(line)
 		for _, keyword := range keywords {
 			if !strings.Contains(lower, strings.ToLower(keyword)) {
 				continue
 			}
+			relatedSkills := lineSkills
+			if len(relatedSkills) == 0 {
+				relatedSkills = fileSkills
+			}
 			gaps = append(gaps, GapSignal{
-				ID:      buildGapID(day, relative, lineNo, keyword, line),
-				Date:    day,
-				Keyword: keyword,
-				Context: line,
-				Source:  relative,
+				ID:            buildGapID(day, relative, lineNo, keyword, line),
+				Date:          day,
+				Keyword:       keyword,
+				Context:       line,
+				Source:        relative,
+				RelatedSkills: append([]string(nil), relatedSkills...),
 			})
 			break
 		}
@@ -215,6 +236,28 @@ func scanFileForGapSignals(journalRoot, path string, day time.Time, keywords []s
 		return nil, fmt.Errorf("读取 journal 文件失败: %w", err)
 	}
 	return gaps, nil
+}
+
+func extractSkillPaths(text string) []string {
+	matches := skillPathPattern.FindAllString(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	paths := make([]string, 0, len(matches))
+	for _, match := range matches {
+		skillPath := normalizeSkillPath(match)
+		if skillPath == "" {
+			continue
+		}
+		if _, ok := seen[skillPath]; ok {
+			continue
+		}
+		seen[skillPath] = struct{}{}
+		paths = append(paths, skillPath)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func loadGapKeywords(kbDir string) ([]string, error) {
