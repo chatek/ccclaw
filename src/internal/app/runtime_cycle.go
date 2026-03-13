@@ -18,6 +18,20 @@ import (
 	"github.com/41490/ccclaw/internal/vcs"
 )
 
+const (
+	finalizeRetryBaseDelay   = 4 * time.Minute
+	finalizeRetryManualDelay = 1 * time.Hour
+	finalizeRetryMaxDelay    = 1 * time.Hour
+	maxFinalizeRetry         = 4
+)
+
+type finalizeFailureMode string
+
+const (
+	finalizeFailureRetry finalizeFailureMode = "retry"
+	finalizeFailurePause finalizeFailureMode = "pause"
+)
+
 func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
 	execEngine, err := rt.newExecutor()
 	if err != nil {
@@ -78,11 +92,13 @@ func (rt *Runtime) hydrateRepoSlots() error {
 			phase = storage.RepoSlotPhaseFinalizing
 		}
 		if err := rt.store.UpsertRepoSlot(&storage.RepoSlot{
-			TargetRepo:  task.TargetRepo,
-			TaskID:      task.TaskID,
-			SessionName: executor.SessionName(task.TaskID),
-			Phase:       phase,
-			LastProbeAt: time.Now().UTC(),
+			TargetRepo:    task.TargetRepo,
+			TaskID:        task.TaskID,
+			SessionName:   executor.SessionName(task.TaskID),
+			Phase:         phase,
+			CurrentStep:   defaultSlotStepForTask(task.State),
+			LastAdvanceAt: time.Now().UTC(),
+			LastProbeAt:   time.Now().UTC(),
 		}); err != nil {
 			return err
 		}
@@ -92,6 +108,9 @@ func (rt *Runtime) hydrateRepoSlots() error {
 
 func (rt *Runtime) advanceRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot) error {
 	if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
+		return nil
+	}
+	if slot.Phase == storage.RepoSlotPhaseFinalizeFailed && !slot.NextRetryAt.IsZero() && time.Now().UTC().Before(slot.NextRetryAt) {
 		return nil
 	}
 	switch slot.Phase {
@@ -115,7 +134,7 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 	status, err := manager.Status(slot.SessionName)
 	if err != nil {
 		if errors.Is(err, tmux.ErrSessionNotFound) {
-			slot.Phase = storage.RepoSlotPhasePaneDead
+			advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 			slot.CompletedAt = time.Now().UTC()
 			slot.LastError = "tmux 会话已退出，等待 ingest 收口"
 			return rt.store.UpsertRepoSlot(slot)
@@ -123,7 +142,7 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 		return err
 	}
 	if status.PaneDead {
-		slot.Phase = storage.RepoSlotPhasePaneDead
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 		slot.CompletedAt = time.Now().UTC()
 		slot.LastProbeAt = time.Now().UTC()
 		return rt.store.UpsertRepoSlot(slot)
@@ -198,11 +217,13 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 	result, runErr := execEngine.Run(ctx, target.LocalPath, fresh.TaskID, runOpts)
 	if result != nil && result.Pending {
 		slot := &storage.RepoSlot{
-			TargetRepo:  fresh.TargetRepo,
-			TaskID:      fresh.TaskID,
-			SessionName: result.SessionName,
-			Phase:       storage.RepoSlotPhaseRunning,
-			LastProbeAt: time.Now().UTC(),
+			TargetRepo:    fresh.TargetRepo,
+			TaskID:        fresh.TaskID,
+			SessionName:   result.SessionName,
+			Phase:         storage.RepoSlotPhaseRunning,
+			CurrentStep:   "execute",
+			LastAdvanceAt: time.Now().UTC(),
+			LastProbeAt:   time.Now().UTC(),
 		}
 		if err := rt.store.UpsertRepoSlot(slot); err != nil {
 			return err
@@ -215,12 +236,14 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 		result = &executor.Result{ResumeSessionID: runOpts.ResumeSessionID}
 	}
 	slot := &storage.RepoSlot{
-		TargetRepo:  fresh.TargetRepo,
-		TaskID:      fresh.TaskID,
-		SessionName: executor.SessionName(fresh.TaskID),
-		Phase:       storage.RepoSlotPhasePaneDead,
-		LastProbeAt: time.Now().UTC(),
-		CompletedAt: time.Now().UTC(),
+		TargetRepo:    fresh.TargetRepo,
+		TaskID:        fresh.TaskID,
+		SessionName:   executor.SessionName(fresh.TaskID),
+		Phase:         storage.RepoSlotPhasePaneDead,
+		CurrentStep:   "load_result",
+		LastAdvanceAt: time.Now().UTC(),
+		LastProbeAt:   time.Now().UTC(),
+		CompletedAt:   time.Now().UTC(),
 	}
 	if runErr != nil {
 		slot.LastError = strings.TrimSpace(runErr.Error())
@@ -334,9 +357,11 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 	}
 	if slot == nil {
 		slot = &storage.RepoSlot{
-			TargetRepo: updated.TargetRepo,
-			TaskID:     updated.TaskID,
-			Phase:      storage.RepoSlotPhaseFinalizing,
+			TargetRepo:    updated.TargetRepo,
+			TaskID:        updated.TaskID,
+			Phase:         storage.RepoSlotPhaseFinalizing,
+			CurrentStep:   "sync_target",
+			LastAdvanceAt: time.Now().UTC(),
 		}
 	}
 	if slot.SyncTarget == "" {
@@ -348,7 +373,8 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 	if slot.ReportIssue == "" {
 		slot.ReportIssue = storage.FinalizeStepPending
 	}
-	slot.Phase = storage.RepoSlotPhaseFinalizing
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, finalizeCurrentStep(slot))
+	slot.NextRetryAt = time.Time{}
 	if err := rt.store.UpsertRepoSlot(slot); err != nil {
 		return err
 	}
@@ -361,20 +387,23 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 	doneCommentID := updated.DoneCommentID
 	if slot.ReportIssue != storage.FinalizeStepOK {
 		if result != nil && rt.rep != nil {
+			slot.CurrentStep = "report_issue"
+			slot.LastAttemptAt = time.Now().UTC()
 			doneTask := *updated
 			doneTask.State = core.StateDone
 			comment := rt.reportSuccess(&doneTask, result.Duration, result.LogFile)
 			if comment == nil || comment.ID == 0 {
-				slot.Phase = storage.RepoSlotPhaseFinalizeFailed
 				slot.ReportIssue = storage.FinalizeStepFailed
-				slot.LastError = "Issue 完成回帖失败"
-				slot.Hints = []string{"请检查 GitHub Issue 评论权限与网络可达性", "确认 `gh auth status` 正常", "处理完成后重新执行一轮 ingest 补齐回帖"}
-				_ = rt.store.UpsertRepoSlot(slot)
-				return nil
+				return rt.handleFinalizeFailure(updated, slot, "report_issue", errors.New("Issue 完成回帖失败"), []string{
+					"请检查 GitHub Issue 评论权限与网络可达性",
+					"确认 `gh auth status` 正常",
+					"处理完成后重新执行一轮 ingest 补齐回帖",
+				})
 			}
 			doneCommentID = comment.ID
 		}
 		slot.ReportIssue = storage.FinalizeStepOK
+		markFinalizeStepDone(slot, "report_issue")
 		if err := rt.store.UpsertRepoSlot(slot); err != nil {
 			return err
 		}
@@ -401,30 +430,63 @@ func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result
 		return nil
 	}
 	if slot.SyncTarget != storage.FinalizeStepOK {
+		prepareFinalizeAttempt(slot, "sync_target")
 		state, hints, err := rt.syncFinalizeTarget(task)
 		slot.SyncTarget = state
 		if err != nil {
 			return rt.handleFinalizeFailure(task, slot, "target", err, hints)
 		}
+		markFinalizeStepDone(slot, "sync_target")
 	}
 	if slot.SyncHome != storage.FinalizeStepOK {
+		prepareFinalizeAttempt(slot, "sync_home")
 		state, hints, err := rt.syncFinalizeHome(task)
 		slot.SyncHome = state
 		if err != nil {
 			return rt.handleFinalizeFailure(task, slot, "home", err, hints)
 		}
+		markFinalizeStepDone(slot, "sync_home")
 	}
 	if slot.ReportIssue == storage.FinalizeStepOK {
 		return nil
 	}
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "report_issue")
 	slot.ReportIssue = storage.FinalizeStepPending
 	return rt.store.UpsertRepoSlot(slot)
 }
 
 func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot, step string, err error, hints []string) error {
-	slot.Phase = storage.RepoSlotPhaseFinalizeFailed
+	now := time.Now().UTC()
+	policy := classifyFinalizeFailure(err)
+	failureKey := buildFinalizeFailureKey(step, err)
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizeFailed, finalizeStepName(step))
 	slot.LastError = strings.TrimSpace(err.Error())
 	slot.Hints = append([]string(nil), hints...)
+	slot.LastAttemptAt = now
+	stepName := finalizeStepName(step)
+	if slot.FinalizeRetryStep != stepName {
+		slot.FinalizeRetryStep = stepName
+		slot.FinalizeRetryCount = 0
+	}
+	slot.FinalizeRetryCount++
+	if policy.mode == finalizeFailureRetry && slot.FinalizeRetryCount > maxFinalizeRetry {
+		slot.Hints = append(slot.Hints, "临时重试次数已耗尽，后续请按建议手工处理")
+		policy.mode = finalizeFailurePause
+		policy.delay = finalizeRetryManualDelay
+	}
+	slot.NextRetryAt = now.Add(policy.nextDelay(slot.FinalizeRetryCount))
+	switch policy.mode {
+	case finalizeFailureRetry:
+		slot.Hints = append(slot.Hints,
+			fmt.Sprintf("检测为临时抖动，系统将在 `%s` 后自动重试；当前已重试 `%d/%d`", policy.nextDelay(slot.FinalizeRetryCount).Round(time.Minute), slot.FinalizeRetryCount, maxFinalizeRetry),
+			fmt.Sprintf("下次自动重试时间: `%s`", slot.NextRetryAt.Format(time.RFC3339)),
+		)
+	default:
+		slot.Hints = append(slot.Hints,
+			"检测为需人工介入场景；为避免高频噪音，本轮只回帖一次并进入慢速复查",
+			fmt.Sprintf("下次慢速复查时间: `%s`", slot.NextRetryAt.Format(time.RFC3339)),
+		)
+	}
 	if saveErr := rt.store.UpsertRepoSlot(slot); saveErr != nil {
 		return saveErr
 	}
@@ -437,8 +499,11 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		return existing, nil
 	})
 	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("任务收尾失败[%s]: %s", step, slot.LastError))
-	if rt.rep != nil && slot.LastError != "" {
+	if rt.rep != nil && slot.LastError != "" && shouldReportFinalizeFailure(slot, failureKey, policy.mode) {
 		_ = rt.rep.ReportFinalizing(task, step, slot.LastError, slot.Hints)
+		slot.LastReportedAt = now
+		slot.LastReportedFailure = failureKey
+		_ = rt.store.UpsertRepoSlot(slot)
 	}
 	return nil
 }
@@ -548,7 +613,7 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 		status, err := manager.Status(slot.SessionName)
 		if err != nil {
 			if errors.Is(err, tmux.ErrSessionNotFound) {
-				slot.Phase = storage.RepoSlotPhasePaneDead
+				advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 				slot.CompletedAt = time.Now().UTC()
 				slot.LastProbeAt = time.Now().UTC()
 				slot.LastError = "tmux 会话已退出，等待 ingest 收口"
@@ -561,7 +626,7 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 			return err
 		}
 		if status.PaneDead {
-			slot.Phase = storage.RepoSlotPhasePaneDead
+			advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 			slot.CompletedAt = time.Now().UTC()
 			slot.LastProbeAt = time.Now().UTC()
 			if err := rt.store.UpsertRepoSlot(slot); err != nil {
@@ -658,7 +723,7 @@ func (rt *Runtime) restartRepoSlotTask(ctx context.Context, execEngine *executor
 		return err
 	}
 	runOpts := rt.buildExecutionOptions(task, target)
-	slot.Phase = storage.RepoSlotPhaseRestarting
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseRestarting, "restart_claude")
 	slot.RestartCount++
 	slot.LastError = strings.TrimSpace(reason)
 	slot.LastProbeAt = time.Now().UTC()
@@ -668,20 +733,202 @@ func (rt *Runtime) restartRepoSlotTask(ctx context.Context, execEngine *executor
 	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, "patrol 原地重启 Claude: "+strings.TrimSpace(reason))
 	result, runErr := execEngine.Run(ctx, target.LocalPath, task.TaskID, runOpts)
 	if runErr != nil {
-		slot.Phase = storage.RepoSlotPhasePaneDead
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 		slot.LastError = strings.TrimSpace(runErr.Error())
 		return rt.store.UpsertRepoSlot(slot)
 	}
 	if result != nil && result.Pending {
-		slot.Phase = storage.RepoSlotPhaseRunning
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseRunning, "execute")
 		slot.SessionName = result.SessionName
 		slot.LastProbeAt = time.Now().UTC()
 		return rt.store.UpsertRepoSlot(slot)
 	}
-	slot.Phase = storage.RepoSlotPhasePaneDead
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 	slot.CompletedAt = time.Now().UTC()
 	if result != nil {
 		slot.SessionName = result.SessionName
 	}
 	return rt.store.UpsertRepoSlot(slot)
+}
+
+func defaultSlotStepForTask(state core.State) string {
+	if state == core.StateFinalizing {
+		return "sync_target"
+	}
+	return "execute"
+}
+
+func advanceRepoSlotPhase(slot *storage.RepoSlot, phase storage.RepoSlotPhase, step string) {
+	if slot == nil {
+		return
+	}
+	slot.Phase = phase
+	slot.CurrentStep = strings.TrimSpace(step)
+	slot.LastAdvanceAt = time.Now().UTC()
+}
+
+func prepareFinalizeAttempt(slot *storage.RepoSlot, step string) {
+	if slot == nil {
+		return
+	}
+	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, step)
+	slot.LastAttemptAt = time.Now().UTC()
+	slot.NextRetryAt = time.Time{}
+}
+
+func markFinalizeStepDone(slot *storage.RepoSlot, completedStep string) {
+	if slot == nil {
+		return
+	}
+	slot.LastError = ""
+	slot.Hints = nil
+	slot.NextRetryAt = time.Time{}
+	slot.LastReportedAt = time.Time{}
+	slot.LastReportedFailure = ""
+	if strings.TrimSpace(slot.FinalizeRetryStep) == strings.TrimSpace(completedStep) {
+		slot.FinalizeRetryStep = ""
+		slot.FinalizeRetryCount = 0
+	}
+	switch strings.TrimSpace(completedStep) {
+	case "sync_target":
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "sync_home")
+	case "sync_home":
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "report_issue")
+	case "report_issue":
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "done")
+	}
+}
+
+func finalizeCurrentStep(slot *storage.RepoSlot) string {
+	if slot == nil {
+		return "sync_target"
+	}
+	if step := strings.TrimSpace(slot.CurrentStep); step != "" {
+		return step
+	}
+	if slot.SyncTarget != storage.FinalizeStepOK {
+		return "sync_target"
+	}
+	if slot.SyncHome != storage.FinalizeStepOK {
+		return "sync_home"
+	}
+	return "report_issue"
+}
+
+func finalizeStepName(step string) string {
+	switch strings.TrimSpace(step) {
+	case "target":
+		return "sync_target"
+	case "home":
+		return "sync_home"
+	case "report_issue":
+		return "report_issue"
+	default:
+		return strings.TrimSpace(step)
+	}
+}
+
+type finalizeFailurePolicy struct {
+	mode  finalizeFailureMode
+	delay time.Duration
+}
+
+func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
+	if p.mode == finalizeFailurePause {
+		return p.delay
+	}
+	delay := p.delay
+	for attempt := 1; attempt < retryCount; attempt++ {
+		delay *= 2
+		if delay >= finalizeRetryMaxDelay {
+			return finalizeRetryMaxDelay
+		}
+	}
+	if delay <= 0 {
+		return finalizeRetryBaseDelay
+	}
+	if delay > finalizeRetryMaxDelay {
+		return finalizeRetryMaxDelay
+	}
+	return delay
+}
+
+func classifyFinalizeFailure(err error) finalizeFailurePolicy {
+	if isTransientFinalizeError(err) {
+		return finalizeFailurePolicy{mode: finalizeFailureRetry, delay: finalizeRetryBaseDelay}
+	}
+	return finalizeFailurePolicy{mode: finalizeFailurePause, delay: finalizeRetryManualDelay}
+}
+
+func isTransientFinalizeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"timeout",
+		"timed out",
+		"temporary",
+		"temporarily",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"tls handshake timeout",
+		"context deadline exceeded",
+		"unexpected eof",
+		"eof",
+		"internal server error",
+		"bad gateway",
+		"service unavailable",
+		"gateway timeout",
+		"http 502",
+		"http 503",
+		"http 504",
+		"rate limit",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, marker := range []string{
+		"protected branch",
+		"branch protection",
+		"permission denied",
+		"authentication",
+		"not authorized",
+		"repository not found",
+		"仓库路径不能为空",
+		"请检查目标仓配置",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return errors.Is(err, vcs.ErrPushFailed)
+}
+
+func buildFinalizeFailureKey(step string, err error) string {
+	if err == nil {
+		return strings.TrimSpace(step)
+	}
+	return strings.TrimSpace(step) + "|" + strings.TrimSpace(err.Error())
+}
+
+func shouldReportFinalizeFailure(slot *storage.RepoSlot, failureKey string, mode finalizeFailureMode) bool {
+	if slot == nil {
+		return false
+	}
+	if slot.LastReportedFailure == failureKey {
+		return false
+	}
+	if mode == finalizeFailureRetry && slot.FinalizeRetryCount <= maxFinalizeRetry {
+		return false
+	}
+	return true
 }

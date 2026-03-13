@@ -31,20 +31,28 @@ const (
 )
 
 type RepoSlot struct {
-	TargetRepo   string            `json:"target_repo"`
-	TaskID       string            `json:"task_id"`
-	SessionName  string            `json:"session_name,omitempty"`
-	SessionID    string            `json:"session_id,omitempty"`
-	Phase        RepoSlotPhase     `json:"phase"`
-	RestartCount int               `json:"restart_count,omitempty"`
-	SyncTarget   FinalizeStepState `json:"sync_target,omitempty"`
-	SyncHome     FinalizeStepState `json:"sync_home,omitempty"`
-	ReportIssue  FinalizeStepState `json:"report_issue,omitempty"`
-	LastError    string            `json:"last_error,omitempty"`
-	Hints        []string          `json:"hints,omitempty"`
-	LastProbeAt  time.Time         `json:"last_probe_at,omitempty"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	CompletedAt  time.Time         `json:"completed_at,omitempty"`
+	TargetRepo          string            `json:"target_repo"`
+	TaskID              string            `json:"task_id"`
+	SessionName         string            `json:"session_name,omitempty"`
+	SessionID           string            `json:"session_id,omitempty"`
+	Phase               RepoSlotPhase     `json:"phase"`
+	CurrentStep         string            `json:"current_step,omitempty"`
+	RestartCount        int               `json:"restart_count,omitempty"`
+	FinalizeRetryStep   string            `json:"finalize_retry_step,omitempty"`
+	FinalizeRetryCount  int               `json:"finalize_retry_count,omitempty"`
+	SyncTarget          FinalizeStepState `json:"sync_target,omitempty"`
+	SyncHome            FinalizeStepState `json:"sync_home,omitempty"`
+	ReportIssue         FinalizeStepState `json:"report_issue,omitempty"`
+	LastError           string            `json:"last_error,omitempty"`
+	Hints               []string          `json:"hints,omitempty"`
+	LastProbeAt         time.Time         `json:"last_probe_at,omitempty"`
+	LastAttemptAt       time.Time         `json:"last_attempt_at,omitempty"`
+	LastAdvanceAt       time.Time         `json:"last_advance_at,omitempty"`
+	NextRetryAt         time.Time         `json:"next_retry_at,omitempty"`
+	LastReportedAt      time.Time         `json:"last_reported_at,omitempty"`
+	LastReportedFailure string            `json:"last_reported_failure,omitempty"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+	CompletedAt         time.Time         `json:"completed_at,omitempty"`
 }
 
 type RepoSlotStore struct {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/41490/ccclaw/internal/adapters/github"
+	"github.com/41490/ccclaw/internal/adapters/reporter"
 	"github.com/41490/ccclaw/internal/adapters/storage"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
@@ -1165,6 +1167,195 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 	}
 	if !strings.Contains(payload.Sessions.Error, "tmux") {
 		t.Fatalf("unexpected sessions payload: %+v", payload.Sessions)
+	}
+}
+
+func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         "21#body",
+		IdempotencyKey: "21#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    21,
+		IssueTitle:     "status slot json",
+		IssueAuthor:    "zoomq",
+		TaskClass:      core.TaskClassGeneral,
+		State:          core.StateFinalizing,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	if err := store.UpsertRepoSlot(&storage.RepoSlot{
+		TargetRepo:         task.TargetRepo,
+		TaskID:             task.TaskID,
+		Phase:              storage.RepoSlotPhaseFinalizeFailed,
+		CurrentStep:        "sync_home",
+		FinalizeRetryStep:  "sync_home",
+		FinalizeRetryCount: 2,
+		SyncTarget:         storage.FinalizeStepOK,
+		SyncHome:           storage.FinalizeStepFailed,
+		ReportIssue:        storage.FinalizeStepPending,
+		LastAdvanceAt:      time.Date(2026, 3, 13, 10, 0, 0, 0, time.UTC),
+		NextRetryAt:        time.Date(2026, 3, 13, 10, 8, 0, 0, time.UTC),
+		LastError:          "推送远端失败",
+	}); err != nil {
+		t.Fatalf("写入仓位失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  filepath.Join(tmpDir, "app"),
+				LogDir:  filepath.Join(tmpDir, "log"),
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+				EnvFile: filepath.Join(tmpDir, ".env"),
+			},
+			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Scheduler: config.SchedulerConfig{Mode: "none"},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.StatusWithOptions(&out, StatusOptions{JSON: true}); err != nil {
+		t.Fatalf("执行 status --json 失败: %v", err)
+	}
+	var payload struct {
+		Tasks struct {
+			Counts map[string]int `json:"counts"`
+		} `json:"tasks"`
+		Slots struct {
+			Total int `json:"total"`
+			Items []struct {
+				Phase              string `json:"phase"`
+				CurrentStep        string `json:"current_step"`
+				FinalizeRetryStep  string `json:"finalize_retry_step"`
+				FinalizeRetryCount int    `json:"finalize_retry_count"`
+				NextRetryAt        string `json:"next_retry_at"`
+			} `json:"items"`
+		} `json:"slots"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.Tasks.Counts[string(core.StateFinalizing)] != 1 {
+		t.Fatalf("expected FINALIZING count in %+v", payload.Tasks.Counts)
+	}
+	if payload.Slots.Total != 1 || len(payload.Slots.Items) != 1 {
+		t.Fatalf("unexpected slots payload: %+v", payload.Slots)
+	}
+	item := payload.Slots.Items[0]
+	if item.Phase != string(storage.RepoSlotPhaseFinalizeFailed) || item.CurrentStep != "sync_home" || item.FinalizeRetryStep != "sync_home" || item.FinalizeRetryCount != 2 || item.NextRetryAt == "" {
+		t.Fatalf("unexpected slot item: %+v", item)
+	}
+}
+
+func TestHandleFinalizeFailureBackoffSuppressesEarlyIssueNoise(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$@" >> "$CCCLAW_REPORTER_LOG"
+printf '{}\n'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 42),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 42),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    42,
+		IssueTitle:     "finalize retry",
+		State:          core.StateFinalizing,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	slot := &storage.RepoSlot{
+		TargetRepo: task.TargetRepo,
+		TaskID:     task.TaskID,
+		Phase:      storage.RepoSlotPhaseFinalizing,
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{StateDB: stateDB, KBDir: "/opt/ccclaw/kb"},
+		},
+		store: store,
+		rep: reporter.New(func(repo string) *github.Client {
+			return github.NewClient(repo, map[string]string{})
+		}),
+	}
+
+	transientErr := errors.New("context deadline exceeded")
+	for attempt := 1; attempt <= maxFinalizeRetry; attempt++ {
+		if err := rt.handleFinalizeFailure(task, slot, "target", transientErr, []string{"网络抖动"}); err != nil {
+			t.Fatalf("第 %d 次 handleFinalizeFailure 失败: %v", attempt, err)
+		}
+		payload, readErr := os.ReadFile(logPath)
+		if readErr == nil && strings.TrimSpace(string(payload)) != "" {
+			t.Fatalf("第 %d 次不应回帖，实际日志=%q", attempt, string(payload))
+		}
+		loaded, err := store.GetRepoSlot(task.TargetRepo)
+		if err != nil {
+			t.Fatalf("读取仓位失败: %v", err)
+		}
+		if loaded == nil || loaded.FinalizeRetryCount != attempt || loaded.NextRetryAt.IsZero() {
+			t.Fatalf("unexpected slot after attempt %d: %#v", attempt, loaded)
+		}
+		slot = loaded
+	}
+
+	if err := rt.handleFinalizeFailure(task, slot, "target", transientErr, []string{"网络抖动"}); err != nil {
+		t.Fatalf("耗尽后 handleFinalizeFailure 失败: %v", err)
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	if !strings.Contains(string(payload), "repos/41490/ccclaw/issues/42/comments") {
+		t.Fatalf("expected reporter log after retry exhausted, got %q", string(payload))
+	}
+	loaded, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() {
+		t.Fatalf("unexpected final slot: %#v", loaded)
 	}
 }
 

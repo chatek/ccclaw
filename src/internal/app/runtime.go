@@ -410,6 +410,11 @@ func (rt *Runtime) StatusWithOptions(out io.Writer, options StatusOptions) error
 		rt.logDebug("status", "检测到调度配置与生效状态不一致", "requested", schedulerSnapshot.Requested, "effective", schedulerSnapshot.Effective, "reason", schedulerSnapshot.Reason)
 	}
 	sessionSnapshot := rt.collectStatusSessions(tasks)
+	slotSnapshot, err := rt.collectStatusRepoSlots()
+	if err != nil {
+		rt.logError("status", "读取仓库槽位失败", "error", err)
+		return err
+	}
 	execSnapshot := rt.executorSnapshot()
 	tokenSummary, err := rt.store.TokenStats()
 	if err != nil {
@@ -451,7 +456,7 @@ func (rt *Runtime) StatusWithOptions(out io.Writer, options StatusOptions) error
 		)
 	}
 	alerts := rt.filterStatusAlerts(recentEvents, tasks)
-	snapshot := buildRuntimeStatusSnapshot(tasks, counts, schedulerSnapshot, execSnapshot, sessionSnapshot, tokenSummary, rtkComparison, alerts)
+	snapshot := buildRuntimeStatusSnapshot(tasks, counts, schedulerSnapshot, execSnapshot, sessionSnapshot, slotSnapshot, tokenSummary, rtkComparison, alerts)
 	if options.JSON {
 		if err := renderRuntimeStatusJSON(out, snapshot); err != nil {
 			rt.logError("status", "输出 JSON 运行态快照失败", "error", err)
@@ -488,6 +493,32 @@ type statusSessionSnapshot struct {
 	OrphanedSessions int                 `json:"orphaned_sessions"`
 	Error            string              `json:"error,omitempty"`
 	Items            []statusSessionItem `json:"items"`
+}
+
+type statusRepoSlotItem struct {
+	TargetRepo         string `json:"target_repo"`
+	TaskID             string `json:"task_id"`
+	Phase              string `json:"phase"`
+	CurrentStep        string `json:"current_step,omitempty"`
+	RestartCount       int    `json:"restart_count"`
+	FinalizeRetryStep  string `json:"finalize_retry_step,omitempty"`
+	FinalizeRetryCount int    `json:"finalize_retry_count"`
+	SyncTarget         string `json:"sync_target,omitempty"`
+	SyncHome           string `json:"sync_home,omitempty"`
+	ReportIssue        string `json:"report_issue,omitempty"`
+	LastProbeAt        string `json:"last_probe_at,omitempty"`
+	LastAttemptAt      string `json:"last_attempt_at,omitempty"`
+	LastAdvanceAt      string `json:"last_advance_at,omitempty"`
+	NextRetryAt        string `json:"next_retry_at,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+	CompletedAt        string `json:"completed_at,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+}
+
+type statusRepoSlotSnapshot struct {
+	Total  int                  `json:"total"`
+	Counts map[string]int       `json:"counts"`
+	Items  []statusRepoSlotItem `json:"items"`
 }
 
 type statusAlert struct {
@@ -558,6 +589,7 @@ type runtimeStatusSnapshot struct {
 	Scheduler   scheduler.StatusSnapshot `json:"scheduler"`
 	Executor    executorSnapshot         `json:"executor"`
 	Sessions    statusSessionSnapshot    `json:"sessions"`
+	Slots       statusRepoSlotSnapshot   `json:"slots"`
 	Tasks       statusTasksSnapshot      `json:"tasks"`
 	Tokens      statusTokenSnapshot      `json:"tokens"`
 	Alerts      []statusAlert            `json:"alerts"`
@@ -637,6 +669,45 @@ func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapsh
 	return snapshot
 }
 
+func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
+	snapshot := statusRepoSlotSnapshot{Counts: map[string]int{}}
+	slots, err := rt.store.ListRepoSlots()
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.Total = len(slots)
+	for _, slot := range slots {
+		if slot == nil {
+			continue
+		}
+		phase := strings.TrimSpace(string(slot.Phase))
+		if phase == "" {
+			phase = "unknown"
+		}
+		snapshot.Counts[phase]++
+		snapshot.Items = append(snapshot.Items, statusRepoSlotItem{
+			TargetRepo:         slot.TargetRepo,
+			TaskID:             slot.TaskID,
+			Phase:              phase,
+			CurrentStep:        slot.CurrentStep,
+			RestartCount:       slot.RestartCount,
+			FinalizeRetryStep:  slot.FinalizeRetryStep,
+			FinalizeRetryCount: slot.FinalizeRetryCount,
+			SyncTarget:         string(slot.SyncTarget),
+			SyncHome:           string(slot.SyncHome),
+			ReportIssue:        string(slot.ReportIssue),
+			LastProbeAt:        formatRFC3339(slot.LastProbeAt),
+			LastAttemptAt:      formatRFC3339(slot.LastAttemptAt),
+			LastAdvanceAt:      formatRFC3339(slot.LastAdvanceAt),
+			NextRetryAt:        formatRFC3339(slot.NextRetryAt),
+			UpdatedAt:          formatRFC3339(slot.UpdatedAt),
+			CompletedAt:        formatRFC3339(slot.CompletedAt),
+			LastError:          slot.LastError,
+		})
+	}
+	return snapshot, nil
+}
+
 func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*core.Task) []statusAlert {
 	taskRefs := make(map[string]string, len(tasks))
 	for _, task := range tasks {
@@ -668,7 +739,7 @@ func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*cor
 	return alerts
 }
 
-func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, schedulerSnapshot scheduler.StatusSnapshot, execSnapshot executorSnapshot, sessionSnapshot statusSessionSnapshot, tokenSummary *storage.TokenStatsSummary, rtkComparison *storage.RTKComparison, alerts []statusAlert) runtimeStatusSnapshot {
+func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, schedulerSnapshot scheduler.StatusSnapshot, execSnapshot executorSnapshot, sessionSnapshot statusSessionSnapshot, slotSnapshot statusRepoSlotSnapshot, tokenSummary *storage.TokenStatsSummary, rtkComparison *storage.RTKComparison, alerts []statusAlert) runtimeStatusSnapshot {
 	taskItems := make([]statusTaskItem, 0, len(tasks))
 	for _, task := range tasks {
 		taskItems = append(taskItems, statusTaskItem{
@@ -687,7 +758,7 @@ func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, s
 		})
 	}
 	stateCounts := map[string]int{}
-	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
+	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateFinalizing, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
 		stateCounts[string(state)] = counts[state]
 	}
 	return runtimeStatusSnapshot{
@@ -695,6 +766,7 @@ func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, s
 		Scheduler:   schedulerSnapshot,
 		Executor:    execSnapshot,
 		Sessions:    sessionSnapshot,
+		Slots:       slotSnapshot,
 		Tasks: statusTasksSnapshot{
 			Total:  len(tasks),
 			Counts: stateCounts,
@@ -771,9 +843,56 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 	}
 	_, _ = fmt.Fprintln(out)
 
+	_, _ = fmt.Fprintln(out, "仓位快照:")
+	_, _ = fmt.Fprintf(out, "  仓位总数: %d\n", snapshot.Slots.Total)
+	if snapshot.Slots.Total == 0 {
+		_, _ = fmt.Fprintln(out, "  当前无仓位")
+	} else {
+		order := []string{
+			string(storage.RepoSlotPhaseRunning),
+			string(storage.RepoSlotPhaseRestarting),
+			string(storage.RepoSlotPhasePaneDead),
+			string(storage.RepoSlotPhaseFinalizing),
+			string(storage.RepoSlotPhaseFinalizeFailed),
+		}
+		for _, phase := range order {
+			if count := snapshot.Slots.Counts[phase]; count > 0 {
+				_, _ = fmt.Fprintf(out, "  %-15s %d\n", phase, count)
+			}
+		}
+		_, _ = fmt.Fprintln(out)
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "TARGET\tPHASE\tSTEP\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
+		for _, item := range snapshot.Slots.Items {
+			nextRetry := item.NextRetryAt
+			if nextRetry == "" {
+				nextRetry = "-"
+			}
+			lastError := trimStatusText(item.LastError, 36)
+			if lastError == "" {
+				lastError = "-"
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
+				item.TargetRepo,
+				item.Phase,
+				emptyStatusValue(item.CurrentStep),
+				item.RestartCount,
+				emptyStatusValue(item.FinalizeRetryStep),
+				item.FinalizeRetryCount,
+				nextRetry,
+				item.TaskID,
+				lastError,
+			)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	_, _ = fmt.Fprintln(out)
+
 	_, _ = fmt.Fprintln(out, "任务概览:")
 	_, _ = fmt.Fprintf(out, "  任务总数: %d\n", snapshot.Tasks.Total)
-	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
+	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateFinalizing, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
 		_, _ = fmt.Fprintf(out, "  %-8s %d\n", state, snapshot.Tasks.Counts[string(state)])
 	}
 	if snapshot.Tasks.Total == 0 {
@@ -856,6 +975,14 @@ func trimStatusText(value string, limit int) string {
 		return value[:limit]
 	}
 	return value[:limit-3] + "..."
+}
+
+func emptyStatusValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func (rt *Runtime) executorSnapshot() executorSnapshot {
