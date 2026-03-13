@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+claude_bin="${CCCLAW_CLAUDE_BIN:-}"
+if [[ -z "$claude_bin" ]]; then
+  claude_bin="$(command -v claude || true)"
+fi
+
+if [[ -n "$claude_bin" && -x "$claude_bin" ]]; then
+  exec "$claude_bin" "$@"
+fi
+
+printf 'ccclaude: 未找到 Claude 可执行文件，请设置 CCCLAW_CLAUDE_BIN 或确保 claude 在 PATH 中\n' >&2
+exit 127
