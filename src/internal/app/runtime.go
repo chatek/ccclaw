@@ -326,11 +326,11 @@ func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 				rt.logInfo("patrol", "发现已完成但会话已退出的任务", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
 				continue
 			}
-			if err := rt.markTaskDead(task, fmt.Sprintf("tmux 会话 %s 已丢失，且未找到结果文件", artifacts.SessionName), artifacts.LogFile); err != nil {
+			if err := rt.markTaskDead(task, fmt.Sprintf("tmux 会话 %s 已丢失，且未找到结构化结果或诊断文件", artifacts.SessionName), artifacts.LogFile); err != nil {
 				rt.logError("patrol", "标记丢失会话任务失败", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "error", err)
 				return err
 			}
-			rt.logWarning("patrol", "tmux 会话已丢失且无结果文件", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
+			rt.logWarning("patrol", "tmux 会话已丢失且无结构化结果或诊断文件", "issue", rt.issueRef(task.IssueRepo, task.IssueNumber), "session_name", artifacts.SessionName)
 			timedOut++
 			continue
 		}
@@ -1766,19 +1766,26 @@ func enrichDiagnosticResult(execEngine *executor.Executor, taskID string, result
 	}
 	artifacts := execEngine.ArtifactPaths(taskID)
 	if result == nil {
-		diagnostic := readDiagnosticTail(artifacts.LogFile, 12)
+		diagnostic := readDiagnosticTail(artifacts.DiagnosticFile, 12)
+		if diagnostic == "" {
+			diagnostic = readDiagnosticTail(artifacts.LogFile, 12)
+		}
 		if diagnostic == "" {
 			return nil
 		}
 		return &executor.Result{
-			Output:     diagnostic,
-			LogFile:    artifacts.LogFile,
-			ResultFile: artifacts.ResultFile,
-			MetaFile:   artifacts.MetaFile,
+			Output:         diagnostic,
+			LogFile:        artifacts.LogFile,
+			ResultFile:     artifacts.ResultFile,
+			DiagnosticFile: artifacts.DiagnosticFile,
+			MetaFile:       artifacts.MetaFile,
 		}
 	}
 	if strings.TrimSpace(result.Output) == "" {
-		result.Output = readDiagnosticTail(result.LogFile, 12)
+		result.Output = readDiagnosticTail(result.DiagnosticFile, 12)
+		if strings.TrimSpace(result.Output) == "" {
+			result.Output = readDiagnosticTail(result.LogFile, 12)
+		}
 	}
 	return result
 }

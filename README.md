@@ -757,6 +757,12 @@ CLI 约定：
 - `[scheduler.logs].retention_days` 与 `max_files` 只作用于带 ccclaw 归档头的受管文件，不会清理归档目录中的人工文件
 - `[scheduler.logs].compress = true` 时，最新一次归档保留明文，历史受管 `.log` 会自动压缩为 `.log.gz`
 
+运行产物约定：
+
+- `~/.ccclaw/var/results/<task>.json` 只承载结构化 JSON 结果；成功时写入，失败或协议异常时保持为空
+- `~/.ccclaw/var/results/<task>.diag.txt` 单独承载诊断文本；当结构化结果缺失或解析失败时，`patrol` / 回帖链路优先读取这里
+- `~/.ccclaw/log/<task>.log` 保留执行期汇总日志，作为诊断文件之后的最后兜底现场
+
 ## 日常使用流程
 
 1. 绑定工作任务仓库

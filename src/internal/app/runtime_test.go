@@ -1383,7 +1383,7 @@ exit 0
 	}
 }
 
-func TestPatrolReportsRawDiagnosticWhenResultIsNotJSON(t *testing.T) {
+func TestPatrolFallsBackToDiagnosticFileWhenStructuredResultMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -1450,8 +1450,11 @@ exit 0
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatalf("创建日志目录失败: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(resultDir, "34_body.json"), []byte("ccclaude: exec: claude: not found\n"), 0o644); err != nil {
-		t.Fatalf("写入结果文件失败: %v", err)
+	if err := os.WriteFile(filepath.Join(resultDir, "34_body.json"), []byte(""), 0o644); err != nil {
+		t.Fatalf("写入结构化结果文件失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "34_body.diag.txt"), []byte("ccclaude: exec: claude: not found\n"), 0o644); err != nil {
+		t.Fatalf("写入诊断文件失败: %v", err)
 	}
 
 	rt := &Runtime{
@@ -1490,6 +1493,9 @@ exit 0
 	}
 	if !strings.Contains(loaded.ErrorMsg, "claude: not found") {
 		t.Fatalf("预期保留真实诊断输出，实际为 %q", loaded.ErrorMsg)
+	}
+	if !strings.Contains(loaded.ErrorMsg, "结构化结果缺失") {
+		t.Fatalf("预期明确区分结构化结果缺失，实际为 %q", loaded.ErrorMsg)
 	}
 }
 
@@ -1557,6 +1563,9 @@ exit 0
 	}
 	if err := os.WriteFile(filepath.Join(resultDir, "35_body.json"), []byte(""), 0o644); err != nil {
 		t.Fatalf("写入空结果文件失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resultDir, "35_body.diag.txt"), []byte(""), 0o644); err != nil {
+		t.Fatalf("写入空诊断文件失败: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(logDir, "35_body.log"), []byte("ccclaude: 未找到 Claude 可执行文件\n"), 0o644); err != nil {
 		t.Fatalf("写入日志失败: %v", err)

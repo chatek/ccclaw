@@ -140,8 +140,8 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	if result.PromptFile == "" || result.MetaFile == "" {
 		t.Fatalf("预期返回 prompt/meta 路径，实际为 %#v", result)
 	}
-	if !strings.Contains(manager.spec.Command, "2>&1 | tee") {
-		t.Fatalf("预期 tmux 命令同时采集 stderr，实际为 %q", manager.spec.Command)
+	if !strings.Contains(manager.spec.Command, ".diag.txt") || !strings.Contains(manager.spec.Command, "2> >(") {
+		t.Fatalf("预期 tmux 命令把诊断输出写入独立文件，实际为 %q", manager.spec.Command)
 	}
 }
 
@@ -179,7 +179,44 @@ func TestExecutorRuntimeEnvDiscoversLocalBins(t *testing.T) {
 	}
 }
 
-func TestLoadResultFallsBackToRawOutput(t *testing.T) {
+func TestExecutorRunMovesInvalidStdoutIntoDiagnosticFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude-invalid.sh")
+	script := "#!/bin/sh\nprintf 'ccclaude: exec: claude: not found\\n'\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	result, runErr := execEngine.Run(context.Background(), tmpDir, "10#body", RunOptions{Prompt: "test prompt"})
+	if runErr == nil {
+		t.Fatal("预期返回解析错误")
+	}
+	if result == nil || !strings.Contains(result.Output, "claude: not found") {
+		t.Fatalf("预期回退到诊断输出，实际为 %#v", result)
+	}
+
+	artifacts := execEngine.ArtifactPaths("10#body")
+	structuredPayload, err := os.ReadFile(artifacts.ResultFile)
+	if err != nil {
+		t.Fatalf("读取结构化结果文件失败: %v", err)
+	}
+	if strings.TrimSpace(string(structuredPayload)) != "" {
+		t.Fatalf("预期结构化结果文件为空，实际为 %q", string(structuredPayload))
+	}
+	diagnosticPayload, err := os.ReadFile(artifacts.DiagnosticFile)
+	if err != nil {
+		t.Fatalf("读取诊断文件失败: %v", err)
+	}
+	if !strings.Contains(string(diagnosticPayload), "claude: not found") {
+		t.Fatalf("预期诊断文件保留原始输出，实际为 %q", string(diagnosticPayload))
+	}
+}
+
+func TestLoadResultFallsBackToDiagnosticFile(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		raw  string
@@ -210,6 +247,20 @@ func TestLoadResultFallsBackToRawOutput(t *testing.T) {
 			}
 			if result == nil || !strings.Contains(result.Output, tc.want) {
 				t.Fatalf("预期保留原始诊断输出，实际为 %#v", result)
+			}
+			structuredPayload, err := os.ReadFile(artifacts.ResultFile)
+			if err != nil {
+				t.Fatalf("读取结构化结果文件失败: %v", err)
+			}
+			if strings.TrimSpace(string(structuredPayload)) != "" {
+				t.Fatalf("预期无效结构化结果已被清空，实际为 %q", string(structuredPayload))
+			}
+			diagnosticPayload, err := os.ReadFile(artifacts.DiagnosticFile)
+			if err != nil {
+				t.Fatalf("读取诊断文件失败: %v", err)
+			}
+			if !strings.Contains(string(diagnosticPayload), tc.want) {
+				t.Fatalf("预期诊断文件保留输出，实际为 %q", string(diagnosticPayload))
 			}
 		})
 	}

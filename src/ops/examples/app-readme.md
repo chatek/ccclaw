@@ -74,6 +74,15 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-run.timer ccclaw-patrol
 - 默认级别读取 `scheduler.logs.level`
 - 默认保留策略读取 `scheduler.logs.retention_days`、`max_files`、`compress`
 
+## 运行产物
+
+- 结构化结果：`~/.ccclaw/var/results/<task>.json`
+  - 只保留机器可解析 JSON
+- 诊断输出：`~/.ccclaw/var/results/<task>.diag.txt`
+  - 当结构化结果缺失或解析失败时，`patrol` / 回帖链路优先读取这里
+- 汇总日志：`~/.ccclaw/log/<task>.log`
+  - 作为诊断文件之后的最后兜底现场
+
 ## 配置说明
 
 - 普通配置：`~/.ccclaw/ops/config/config.toml`

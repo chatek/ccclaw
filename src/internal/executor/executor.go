@@ -24,6 +24,7 @@ type Result struct {
 	Duration        time.Duration
 	LogFile         string
 	ResultFile      string
+	DiagnosticFile  string
 	MetaFile        string
 	PromptFile      string
 	SessionID       string
@@ -103,10 +104,11 @@ func (e *Executor) Run(parent context.Context, repoPath, taskID string, opts Run
 func (e *Executor) ArtifactPaths(taskID string) Result {
 	safe := safeTaskID(taskID)
 	return Result{
-		SessionName: sessionName(taskID),
-		LogFile:     filepath.Join(e.logDir, safe+".log"),
-		ResultFile:  filepath.Join(e.resultDir, safe+".json"),
-		MetaFile:    filepath.Join(e.resultDir, safe+".meta.json"),
+		SessionName:    sessionName(taskID),
+		LogFile:        filepath.Join(e.logDir, safe+".log"),
+		ResultFile:     filepath.Join(e.resultDir, safe+".json"),
+		DiagnosticFile: filepath.Join(e.resultDir, safe+".diag.txt"),
+		MetaFile:       filepath.Join(e.resultDir, safe+".meta.json"),
 	}
 }
 
@@ -116,26 +118,34 @@ func (e *Executor) LoadResult(taskID string) (*Result, error) {
 	if metaErr != nil {
 		return nil, metaErr
 	}
-	payload, err := os.ReadFile(artifacts.ResultFile)
-	if err != nil {
-		return nil, fmt.Errorf("读取结果文件失败: %w", err)
+	resultPayload, err := os.ReadFile(artifacts.ResultFile)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("读取结构化结果文件失败: %w", err)
 	}
-	result, parseErr := parseClaudeResult(payload, 0, artifacts.LogFile, artifacts.ResultFile)
+	diagnosticPayload, diagnosticErr := os.ReadFile(artifacts.DiagnosticFile)
+	if diagnosticErr != nil && !os.IsNotExist(diagnosticErr) {
+		return nil, fmt.Errorf("读取诊断文件失败: %w", diagnosticErr)
+	}
+	result, parseErr := parseClaudeResult(resultPayload, 0, artifacts.LogFile, artifacts.ResultFile)
 	if result != nil {
 		e.applyArtifactMetadata(result, artifacts, meta)
 	}
 	if parseErr == nil {
 		return result, nil
 	}
-	if result != nil {
-		return result, parseErr
+	diagnosticPayload, sanitizeErr := e.normalizeDiagnosticArtifacts(artifacts, resultPayload, diagnosticPayload, parseErr)
+	if sanitizeErr != nil {
+		return nil, sanitizeErr
 	}
-	fallback := fallbackResultFromRaw(payload, artifacts.LogFile, artifacts.ResultFile)
+	fallback := fallbackResultFromRaw(diagnosticPayload, artifacts.LogFile, artifacts.ResultFile, artifacts.DiagnosticFile)
 	if fallback != nil {
 		e.applyArtifactMetadata(fallback, artifacts, meta)
-		return fallback, parseErr
+		return fallback, wrapStructuredResultError(resultPayload, parseErr, true)
 	}
-	return result, parseErr
+	if result != nil {
+		return result, wrapStructuredResultError(resultPayload, parseErr, false)
+	}
+	return nil, wrapStructuredResultError(resultPayload, parseErr, false)
 }
 
 func (e *Executor) Timeout() time.Duration {
@@ -157,13 +167,19 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧结果失败: %w", err)
 	}
+	if err := os.Remove(artifacts.DiagnosticFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧诊断失败: %w", err)
+	}
 	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
+	}
+	if err := e.initializeArtifactFiles(artifacts); err != nil {
+		return nil, err
 	}
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
 	}
-	launchCommand := e.buildTMuxCommand(taskID, opts, artifacts.ResultFile, artifacts.LogFile)
+	launchCommand := e.buildTMuxCommand(taskID, opts, artifacts.ResultFile, artifacts.DiagnosticFile, artifacts.LogFile)
 	if err := e.tmuxManager.Launch(tmux.SessionSpec{
 		Name:    artifacts.SessionName,
 		WorkDir: repoPath,
@@ -176,9 +192,16 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	return &artifacts, nil
 }
 
-func (e *Executor) buildTMuxCommand(taskID string, opts RunOptions, resultFile, logFile string) string {
+func (e *Executor) buildTMuxCommand(taskID string, opts RunOptions, resultFile, diagnosticFile, logFile string) string {
 	commandLine := shellJoin(e.commandWithEnv(taskID, opts, ""))
-	script := fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s %s", commandLine, shellQuote(resultFile), shellQuote(logFile))
+	script := fmt.Sprintf(
+		"set -o pipefail; %s 1> >(tee %s >> %s) 2> >(tee %s >> %s >&2)",
+		commandLine,
+		shellQuote(resultFile),
+		shellQuote(logFile),
+		shellQuote(diagnosticFile),
+		shellQuote(logFile),
+	)
 	return fmt.Sprintf("bash -lc %s", shellQuote(script))
 }
 
@@ -196,8 +219,14 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧结果失败: %w", err)
 	}
+	if err := os.Remove(artifacts.DiagnosticFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧诊断失败: %w", err)
+	}
 	if err := os.Remove(artifacts.MetaFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧元数据失败: %w", err)
+	}
+	if err := e.initializeArtifactFiles(artifacts); err != nil {
+		return nil, err
 	}
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
@@ -209,6 +238,12 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	}
 	defer logHandle.Close()
 
+	diagnosticHandle, err := os.OpenFile(artifacts.DiagnosticFile, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("打开诊断文件失败: %w", err)
+	}
+	defer diagnosticHandle.Close()
+
 	args := e.commandArgs(opts)
 	cmd := exec.CommandContext(ctx, e.command[0], args...)
 	cmd.Dir = repoPath
@@ -217,16 +252,16 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = io.MultiWriter(logHandle, &stdout)
-	cmd.Stderr = io.MultiWriter(logHandle, &stderr)
+	cmd.Stderr = io.MultiWriter(logHandle, diagnosticHandle, &stderr)
 
 	start := time.Now()
 	runErr := cmd.Run()
 	duration := time.Since(start)
 	exitCode := 0
-	if writeErr := os.WriteFile(artifacts.ResultFile, stdout.Bytes(), 0o644); writeErr != nil {
-		return nil, fmt.Errorf("写入结果文件失败: %w", writeErr)
-	}
 	result, parseErr := parseClaudeResult(stdout.Bytes(), duration, artifacts.LogFile, artifacts.ResultFile)
+	if persistErr := e.persistStructuredArtifacts(artifacts, stdout.Bytes(), stderr.Bytes(), parseErr); persistErr != nil {
+		return nil, persistErr
+	}
 	if result != nil {
 		e.applyArtifactMetadata(result, artifacts, meta)
 	}
@@ -236,7 +271,7 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 			exitCode = exitErr.ExitCode()
 		}
 		if result == nil {
-			result = &Result{Output: strings.TrimSpace(stdout.String() + stderr.String()), Duration: duration}
+			result = &Result{Output: strings.TrimSpace(string(joinDiagnosticPayloads(stdout.Bytes(), stderr.Bytes()))), Duration: duration}
 			e.applyArtifactMetadata(result, artifacts, meta)
 		}
 		result.ExitCode = exitCode
@@ -251,7 +286,7 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 			return result, parseErr
 		}
 		fallback := &Result{
-			Output:   strings.TrimSpace(stdout.String() + stderr.String()),
+			Output:   strings.TrimSpace(string(joinDiagnosticPayloads(stdout.Bytes(), stderr.Bytes()))),
 			ExitCode: exitCode,
 			Duration: duration,
 		}
@@ -398,6 +433,7 @@ func (e *Executor) applyArtifactMetadata(result *Result, artifacts Result, meta 
 	result.SessionName = artifacts.SessionName
 	result.LogFile = artifacts.LogFile
 	result.ResultFile = artifacts.ResultFile
+	result.DiagnosticFile = artifacts.DiagnosticFile
 	result.MetaFile = artifacts.MetaFile
 	result.PromptFile = meta.PromptFile
 	result.RTKEnabled = e.resolveRTKEnabled(meta)
@@ -461,16 +497,107 @@ func (e *Executor) inferRTKEnabled() bool {
 	return false
 }
 
-func fallbackResultFromRaw(raw []byte, logFile, resultFile string) *Result {
+func fallbackResultFromRaw(raw []byte, logFile, resultFile, diagnosticFile string) *Result {
 	text := strings.TrimSpace(string(raw))
 	if text == "" {
 		return nil
 	}
 	return &Result{
-		Output:     text,
-		LogFile:    logFile,
-		ResultFile: resultFile,
+		Output:         text,
+		LogFile:        logFile,
+		ResultFile:     resultFile,
+		DiagnosticFile: diagnosticFile,
 	}
+}
+
+func (e *Executor) initializeArtifactFiles(artifacts Result) error {
+	for _, item := range []struct {
+		path string
+		name string
+	}{
+		{path: artifacts.ResultFile, name: "结构化结果文件"},
+		{path: artifacts.DiagnosticFile, name: "诊断文件"},
+	} {
+		if err := os.WriteFile(item.path, nil, 0o644); err != nil {
+			return fmt.Errorf("初始化%s失败: %w", item.name, err)
+		}
+	}
+	return nil
+}
+
+func (e *Executor) persistStructuredArtifacts(artifacts Result, stdoutPayload, stderrPayload []byte, parseErr error) error {
+	if parseErr == nil {
+		if err := os.WriteFile(artifacts.ResultFile, stdoutPayload, 0o644); err != nil {
+			return fmt.Errorf("写入结构化结果文件失败: %w", err)
+		}
+		if err := os.WriteFile(artifacts.DiagnosticFile, stderrPayload, 0o644); err != nil {
+			return fmt.Errorf("写入诊断文件失败: %w", err)
+		}
+		return nil
+	}
+	if err := os.WriteFile(artifacts.ResultFile, nil, 0o644); err != nil {
+		return fmt.Errorf("清空结构化结果文件失败: %w", err)
+	}
+	if err := os.WriteFile(artifacts.DiagnosticFile, joinDiagnosticPayloads(stdoutPayload, stderrPayload), 0o644); err != nil {
+		return fmt.Errorf("写入诊断文件失败: %w", err)
+	}
+	return nil
+}
+
+func (e *Executor) normalizeDiagnosticArtifacts(artifacts Result, resultPayload, diagnosticPayload []byte, parseErr error) ([]byte, error) {
+	trimmedResult := bytes.TrimSpace(resultPayload)
+	trimmedDiagnostic := bytes.TrimSpace(diagnosticPayload)
+	if len(trimmedResult) == 0 {
+		return diagnosticPayload, nil
+	}
+	if parseErr == nil {
+		return diagnosticPayload, nil
+	}
+	merged := joinDiagnosticPayloads(resultPayload, diagnosticPayload)
+	if !bytes.Equal(bytes.TrimSpace(merged), trimmedDiagnostic) {
+		if err := os.WriteFile(artifacts.DiagnosticFile, merged, 0o644); err != nil {
+			return nil, fmt.Errorf("回写诊断文件失败: %w", err)
+		}
+	}
+	if err := os.WriteFile(artifacts.ResultFile, nil, 0o644); err != nil {
+		return nil, fmt.Errorf("清空无效结构化结果文件失败: %w", err)
+	}
+	return merged, nil
+}
+
+func wrapStructuredResultError(resultPayload []byte, parseErr error, hasDiagnostic bool) error {
+	trimmed := bytes.TrimSpace(resultPayload)
+	if len(trimmed) == 0 {
+		if hasDiagnostic {
+			return fmt.Errorf("结构化结果缺失，已回退诊断文件")
+		}
+		return fmt.Errorf("结构化结果缺失")
+	}
+	if parseErr == nil {
+		if hasDiagnostic {
+			return fmt.Errorf("结构化结果缺失，已回退诊断文件")
+		}
+		return fmt.Errorf("结构化结果缺失")
+	}
+	if hasDiagnostic {
+		return fmt.Errorf("结构化结果解析失败: %w；已回退诊断文件", parseErr)
+	}
+	return fmt.Errorf("结构化结果解析失败: %w", parseErr)
+}
+
+func joinDiagnosticPayloads(chunks ...[]byte) []byte {
+	parts := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		text := strings.TrimSpace(string(chunk))
+		if text == "" {
+			continue
+		}
+		parts = append(parts, text)
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return []byte(strings.Join(parts, "\n"))
 }
 
 func configuredOrDiscoveredBinary(secrets map[string]string, envKey, name string) string {
