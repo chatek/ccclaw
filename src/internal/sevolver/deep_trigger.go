@@ -94,7 +94,7 @@ func MaybeTriggerDeepAnalysis(cfg Config, gaps []GapSignal) (*DeepAnalysisDecisi
 	created, err := client.CreateIssue(
 		fmt.Sprintf(deepAnalysisIssueTitle, dateFloor(cfg.deepAnalysisNow()).Format("2006-01-02")),
 		renderDeepAnalysisIssueBody(cfg, plan, gaps),
-		filterLabels(strings.TrimSpace(cfg.IssueLabel)),
+		filterLabels(strings.TrimSpace(cfg.IssueLabel), "sevolver"),
 	)
 	if err != nil {
 		return nil, err
@@ -224,6 +224,7 @@ func renderDeepAnalysisIssueBody(cfg Config, plan deepAnalysisPlan, backlog []Ga
 	lines := []string{
 		fmt.Sprintf(deepAnalysisMarkerTemplate, plan.Fingerprint),
 		fmt.Sprintf("target_repo: %s", targetRepo),
+		"task_class: sevolver_deep_analysis",
 		"",
 		"## 背景",
 		fmt.Sprintf("- 触发日期: %s", dateFloor(cfg.deepAnalysisNow()).Format("2006-01-02")),

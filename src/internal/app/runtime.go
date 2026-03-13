@@ -63,6 +63,10 @@ type StatsOptions struct {
 	Limit             int
 }
 
+type StatusOptions struct {
+	JSON bool
+}
+
 const (
 	defaultStatsLimit      = 20
 	journalManagedStartTag = "<!-- ccclaw:managed:start -->"
@@ -230,7 +234,7 @@ func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 			return err
 		}
 		_ = rt.store.AppendEvent(fresh.TaskID, core.EventStarted, "开始执行任务")
-		rt.logInfo("run", "开始执行任务", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "task_id", fresh.TaskID, "retry", fresh.RetryCount)
+		rt.logInfo("run", "开始执行任务", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "task_id", fresh.TaskID, "task_class", fresh.TaskClass, "retry", fresh.RetryCount)
 		if strings.TrimSpace(runOpts.ResumeSessionID) != "" {
 			_ = rt.store.AppendEvent(fresh.TaskID, core.EventUpdated, fmt.Sprintf("检测到失败重试，尝试恢复 session %s", runOpts.ResumeSessionID))
 			rt.logInfo("run", "尝试恢复已有 session", "issue", rt.issueRef(fresh.IssueRepo, fresh.IssueNumber), "session_id", runOpts.ResumeSessionID)
@@ -560,6 +564,10 @@ func limitDailyRTKComparisons(items []storage.DailyRTKComparison, limit int) ([]
 }
 
 func (rt *Runtime) Status(out io.Writer) error {
+	return rt.StatusWithOptions(out, StatusOptions{})
+}
+
+func (rt *Runtime) StatusWithOptions(out io.Writer, options StatusOptions) error {
 	defer rt.store.Close()
 	rt.logInfo("status", "开始生成运行态快照", "log_level", rt.runtimeLogLevel())
 	tasks, err := rt.store.ListTasks()
@@ -571,8 +579,10 @@ func (rt *Runtime) Status(out io.Writer) error {
 	for _, task := range tasks {
 		counts[task.State]++
 	}
-	probe := rt.inspectScheduler()
-	diagnosis := diagnoseScheduler(probe, probe.Requested)
+	schedulerSnapshot, err := scheduler.CollectStatus(rt.cfg)
+	if err != nil {
+		rt.logDebug("status", "检测到调度配置与生效状态不一致", "requested", schedulerSnapshot.Requested, "effective", schedulerSnapshot.Effective, "reason", schedulerSnapshot.Reason)
+	}
 	sessionSnapshot := rt.collectStatusSessions(tasks)
 	execSnapshot := rt.executorSnapshot()
 	tokenSummary, err := rt.store.TokenStats()
@@ -614,154 +624,117 @@ func (rt *Runtime) Status(out io.Writer) error {
 			sessionSnapshot.OrphanedSessions,
 		)
 	}
-
-	_, _ = fmt.Fprintln(out, "当前快照")
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "调度快照:")
-	_, _ = fmt.Fprintf(out, "  配置请求: %s\n", probe.Requested)
-	_, _ = fmt.Fprintf(out, "  当前生效: %s\n", diagnosis.Effective)
-	_, _ = fmt.Fprintf(out, "  当前说明: %s\n", diagnosis.Reason)
-	if diagnosis.Repair != "" {
-		_, _ = fmt.Fprintf(out, "  修复建议: %s\n", diagnosis.Repair)
-	}
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "执行器快照:")
-	_, _ = fmt.Fprintf(out, "  入口配置: %s\n", execSnapshot.LauncherRequested)
-	_, _ = fmt.Fprintf(out, "  入口解析: %s\n", formatResolvedBinary(execSnapshot.LauncherRequested, execSnapshot.LauncherResolved, execSnapshot.LauncherError))
-	_, _ = fmt.Fprintf(out, "  Claude 解析: %s\n", formatResolvedBinary(execSnapshot.ClaudeRequested, execSnapshot.ClaudeResolved, execSnapshot.ClaudeError))
-	_, _ = fmt.Fprintf(out, "  RTK 解析: %s\n", formatResolvedBinary(execSnapshot.RTKRequested, execSnapshot.RTKResolved, execSnapshot.RTKError))
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "会话快照:")
-	_, _ = fmt.Fprintf(out, "  运行中任务: %d\n", sessionSnapshot.RunningTasks)
-	if sessionSnapshot.Error != "" {
-		_, _ = fmt.Fprintf(out, "  tmux 状态: %s\n", sessionSnapshot.Error)
-	} else {
-		_, _ = fmt.Fprintf(out, "  tmux 会话: %d\n", sessionSnapshot.TotalSessions)
-		_, _ = fmt.Fprintf(out, "  会话健康: 正常=%d 接近超时=%d 超时=%d 已退出=%d 丢失=%d 孤儿=%d\n",
-			sessionSnapshot.HealthySessions,
-			sessionSnapshot.WarningSessions,
-			sessionSnapshot.TimeoutSessions,
-			sessionSnapshot.DeadSessions,
-			sessionSnapshot.MissingSessions,
-			sessionSnapshot.OrphanedSessions,
-		)
-		if len(sessionSnapshot.Items) > 0 {
-			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "ISSUE\tSESSION\tAGE\tHEALTH\tTITLE")
-			for _, item := range sessionSnapshot.Items {
-				_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%s\n", item.IssueRepo, item.IssueNumber, item.SessionName, item.Age, item.Health, item.Title)
-			}
-			if err := w.Flush(); err != nil {
-				return err
-			}
-		}
-	}
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "任务概览:")
-	_, _ = fmt.Fprintf(out, "  任务总数: %d\n", len(tasks))
-	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
-		_, _ = fmt.Fprintf(out, "  %-8s %d\n", state, counts[state])
-	}
-	if len(tasks) == 0 {
-		_, _ = fmt.Fprintln(out, "  当前无任务")
-	} else {
-		_, _ = fmt.Fprintln(out)
-		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tTARGET\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
-		for _, task := range tasks {
-			title := task.IssueTitle
-			if len(title) > 46 {
-				title = title[:43] + "..."
-			}
-			targetRepo := task.TargetRepo
-			if targetRepo == "" {
-				targetRepo = "-"
-			}
-			_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%t\t%d\t%s\n", task.IssueRepo, task.IssueNumber, task.State, targetRepo, task.IssueAuthor, task.Approved, task.RetryCount, title)
-		}
-		if err := w.Flush(); err != nil {
+	alerts := rt.filterStatusAlerts(recentEvents, tasks)
+	snapshot := buildRuntimeStatusSnapshot(tasks, counts, schedulerSnapshot, execSnapshot, sessionSnapshot, tokenSummary, rtkComparison, alerts)
+	if options.JSON {
+		if err := renderRuntimeStatusJSON(out, snapshot); err != nil {
+			rt.logError("status", "输出 JSON 运行态快照失败", "error", err)
 			return err
 		}
-	}
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "Token 快照:")
-	if tokenSummary.Runs == 0 {
-		_, _ = fmt.Fprintln(out, "  未检测到 token 使用记录")
-	} else {
-		_, _ = fmt.Fprintf(out, "  累计执行: %d runs / %d sessions\n", tokenSummary.Runs, tokenSummary.Sessions)
-		_, _ = fmt.Fprintf(out, "  累计 tokens: input=%d output=%d cache_create=%d cache_read=%d\n", tokenSummary.InputTokens, tokenSummary.OutputTokens, tokenSummary.CacheCreate, tokenSummary.CacheRead)
-		_, _ = fmt.Fprintf(out, "  累计成本(USD): %.4f\n", tokenSummary.CostUSD)
-		if !tokenSummary.LastUsedAt.IsZero() {
-			_, _ = fmt.Fprintf(out, "  最近记录: %s\n", tokenSummary.LastUsedAt.Format(time.RFC3339))
-		}
-		if rtkComparison.RTKRuns > 0 || rtkComparison.PlainRuns > 0 {
-			_, _ = fmt.Fprintf(out, "  RTK 对比样本: rtk=%d plain=%d\n", rtkComparison.RTKRuns, rtkComparison.PlainRuns)
-			if rtkComparison.RTKRuns > 0 && rtkComparison.PlainRuns > 0 {
-				_, _ = fmt.Fprintf(out, "  RTK 估算节省: %.2f%%\n", rtkComparison.SavingsPercent)
-			}
-		}
-		_, _ = fmt.Fprintln(out, "  详情请执行: ccclaw stats --rtk-comparison")
-	}
-	_, _ = fmt.Fprintln(out)
-
-	_, _ = fmt.Fprintln(out, "最近异常:")
-	alerts := rt.filterStatusAlerts(recentEvents, tasks)
-	if len(alerts) == 0 {
-		_, _ = fmt.Fprintln(out, "  最近 7 天无失败/超时告警")
-		rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", 0, "scheduler_effective", diagnosis.Effective)
+		rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", len(alerts), "scheduler_effective", schedulerSnapshot.Effective, "format", "json")
 		return nil
 	}
-	for _, alert := range alerts {
-		_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", alert.CreatedAt.Format(time.RFC3339), alert.IssueRef, alert.EventType, alert.Detail)
+	if err := renderRuntimeStatusHuman(out, snapshot); err != nil {
+		rt.logError("status", "输出运行态快照失败", "error", err)
+		return err
 	}
-	rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", len(alerts), "scheduler_effective", diagnosis.Effective)
+	rt.logInfo("status", "运行态快照已输出", "tasks", len(tasks), "alerts", len(alerts), "scheduler_effective", schedulerSnapshot.Effective, "format", "human")
 	return nil
 }
 
 type statusSessionItem struct {
-	IssueRepo   string
-	IssueNumber int
-	SessionName string
-	Age         string
-	Health      string
-	Title       string
+	IssueRepo   string `json:"issue_repo"`
+	IssueNumber int    `json:"issue_number"`
+	SessionName string `json:"session_name"`
+	Age         string `json:"age"`
+	Health      string `json:"health"`
+	Title       string `json:"title"`
 }
 
 type statusSessionSnapshot struct {
-	RunningTasks     int
-	TotalSessions    int
-	HealthySessions  int
-	WarningSessions  int
-	TimeoutSessions  int
-	DeadSessions     int
-	MissingSessions  int
-	OrphanedSessions int
-	Error            string
-	Items            []statusSessionItem
+	RunningTasks     int                 `json:"running_tasks"`
+	TotalSessions    int                 `json:"total_sessions"`
+	HealthySessions  int                 `json:"healthy_sessions"`
+	WarningSessions  int                 `json:"warning_sessions"`
+	TimeoutSessions  int                 `json:"timeout_sessions"`
+	DeadSessions     int                 `json:"dead_sessions"`
+	MissingSessions  int                 `json:"missing_sessions"`
+	OrphanedSessions int                 `json:"orphaned_sessions"`
+	Error            string              `json:"error,omitempty"`
+	Items            []statusSessionItem `json:"items"`
 }
 
 type statusAlert struct {
-	IssueRef  string
-	EventType core.EventType
-	Detail    string
-	CreatedAt time.Time
+	IssueRef  string         `json:"issue_ref"`
+	EventType core.EventType `json:"event_type"`
+	Detail    string         `json:"detail"`
+	CreatedAt string         `json:"created_at"`
 }
 
 type executorSnapshot struct {
-	LauncherRequested string
-	LauncherResolved  string
-	LauncherError     string
-	ClaudeRequested   string
-	ClaudeResolved    string
-	ClaudeError       string
-	RTKRequested      string
-	RTKResolved       string
-	RTKError          string
+	LauncherRequested string `json:"launcher_requested"`
+	LauncherResolved  string `json:"launcher_resolved,omitempty"`
+	LauncherError     string `json:"launcher_error,omitempty"`
+	ClaudeRequested   string `json:"claude_requested"`
+	ClaudeResolved    string `json:"claude_resolved,omitempty"`
+	ClaudeError       string `json:"claude_error,omitempty"`
+	RTKRequested      string `json:"rtk_requested"`
+	RTKResolved       string `json:"rtk_resolved,omitempty"`
+	RTKError          string `json:"rtk_error,omitempty"`
+}
+
+type statusTaskItem struct {
+	TaskID        string `json:"task_id"`
+	IssueRepo     string `json:"issue_repo"`
+	IssueNumber   int    `json:"issue_number"`
+	State         string `json:"state"`
+	TaskClass     string `json:"task_class,omitempty"`
+	TargetRepo    string `json:"target_repo,omitempty"`
+	Author        string `json:"author"`
+	Approved      bool   `json:"approved"`
+	RetryCount    int    `json:"retry_count"`
+	Title         string `json:"title"`
+	LastSessionID string `json:"last_session_id,omitempty"`
+	ErrorMsg      string `json:"error_msg,omitempty"`
+}
+
+type statusTasksSnapshot struct {
+	Total  int              `json:"total"`
+	Counts map[string]int   `json:"counts"`
+	Items  []statusTaskItem `json:"items"`
+}
+
+type statusRTKComparisonSnapshot struct {
+	RTKRuns         int     `json:"rtk_runs"`
+	PlainRuns       int     `json:"plain_runs"`
+	RTKAvgCostUSD   float64 `json:"rtk_avg_cost_usd"`
+	PlainAvgCostUSD float64 `json:"plain_avg_cost_usd"`
+	RTKAvgTokens    float64 `json:"rtk_avg_tokens"`
+	PlainAvgTokens  float64 `json:"plain_avg_tokens"`
+	SavingsPercent  float64 `json:"savings_percent"`
+}
+
+type statusTokenSnapshot struct {
+	Runs          int                         `json:"runs"`
+	Sessions      int                         `json:"sessions"`
+	InputTokens   int                         `json:"input_tokens"`
+	OutputTokens  int                         `json:"output_tokens"`
+	CacheCreate   int                         `json:"cache_create"`
+	CacheRead     int                         `json:"cache_read"`
+	CostUSD       float64                     `json:"cost_usd"`
+	FirstUsedAt   string                      `json:"first_used_at,omitempty"`
+	LastUsedAt    string                      `json:"last_used_at,omitempty"`
+	RTKComparison statusRTKComparisonSnapshot `json:"rtk_comparison"`
+}
+
+type runtimeStatusSnapshot struct {
+	GeneratedAt string                   `json:"generated_at"`
+	Scheduler   scheduler.StatusSnapshot `json:"scheduler"`
+	Executor    executorSnapshot         `json:"executor"`
+	Sessions    statusSessionSnapshot    `json:"sessions"`
+	Tasks       statusTasksSnapshot      `json:"tasks"`
+	Tokens      statusTokenSnapshot      `json:"tokens"`
+	Alerts      []statusAlert            `json:"alerts"`
 }
 
 func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapshot {
@@ -860,13 +833,192 @@ func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*cor
 			IssueRef:  issueRef,
 			EventType: item.EventType,
 			Detail:    trimStatusText(strings.ReplaceAll(item.Detail, "\n", " "), 88),
-			CreatedAt: item.CreatedAt,
+			CreatedAt: formatRFC3339(item.CreatedAt),
 		})
 		if len(alerts) == 5 {
 			break
 		}
 	}
 	return alerts
+}
+
+func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, schedulerSnapshot scheduler.StatusSnapshot, execSnapshot executorSnapshot, sessionSnapshot statusSessionSnapshot, tokenSummary *storage.TokenStatsSummary, rtkComparison *storage.RTKComparison, alerts []statusAlert) runtimeStatusSnapshot {
+	taskItems := make([]statusTaskItem, 0, len(tasks))
+	for _, task := range tasks {
+		taskItems = append(taskItems, statusTaskItem{
+			TaskID:        task.TaskID,
+			IssueRepo:     task.IssueRepo,
+			IssueNumber:   task.IssueNumber,
+			State:         string(task.State),
+			TaskClass:     string(task.TaskClass),
+			TargetRepo:    task.TargetRepo,
+			Author:        task.IssueAuthor,
+			Approved:      task.Approved,
+			RetryCount:    task.RetryCount,
+			Title:         task.IssueTitle,
+			LastSessionID: task.LastSessionID,
+			ErrorMsg:      task.ErrorMsg,
+		})
+	}
+	stateCounts := map[string]int{}
+	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
+		stateCounts[string(state)] = counts[state]
+	}
+	return runtimeStatusSnapshot{
+		GeneratedAt: formatRFC3339(time.Now()),
+		Scheduler:   schedulerSnapshot,
+		Executor:    execSnapshot,
+		Sessions:    sessionSnapshot,
+		Tasks: statusTasksSnapshot{
+			Total:  len(tasks),
+			Counts: stateCounts,
+			Items:  taskItems,
+		},
+		Tokens: statusTokenSnapshot{
+			Runs:         tokenSummary.Runs,
+			Sessions:     tokenSummary.Sessions,
+			InputTokens:  tokenSummary.InputTokens,
+			OutputTokens: tokenSummary.OutputTokens,
+			CacheCreate:  tokenSummary.CacheCreate,
+			CacheRead:    tokenSummary.CacheRead,
+			CostUSD:      tokenSummary.CostUSD,
+			FirstUsedAt:  formatRFC3339(tokenSummary.FirstUsedAt),
+			LastUsedAt:   formatRFC3339(tokenSummary.LastUsedAt),
+			RTKComparison: statusRTKComparisonSnapshot{
+				RTKRuns:         rtkComparison.RTKRuns,
+				PlainRuns:       rtkComparison.PlainRuns,
+				RTKAvgCostUSD:   rtkComparison.RTKAvgCostUSD,
+				PlainAvgCostUSD: rtkComparison.PlainAvgCostUSD,
+				RTKAvgTokens:    rtkComparison.RTKAvgTokens,
+				PlainAvgTokens:  rtkComparison.PlainAvgTokens,
+				SavingsPercent:  rtkComparison.SavingsPercent,
+			},
+		},
+		Alerts: alerts,
+	}
+}
+
+func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) error {
+	_, _ = fmt.Fprintln(out, "当前快照")
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "调度快照:")
+	_, _ = fmt.Fprintf(out, "  配置请求: %s\n", snapshot.Scheduler.Requested)
+	_, _ = fmt.Fprintf(out, "  当前生效: %s\n", snapshot.Scheduler.Effective)
+	_, _ = fmt.Fprintf(out, "  当前说明: %s\n", snapshot.Scheduler.Reason)
+	if snapshot.Scheduler.Repair != "" {
+		_, _ = fmt.Fprintf(out, "  修复建议: %s\n", snapshot.Scheduler.Repair)
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "执行器快照:")
+	_, _ = fmt.Fprintf(out, "  入口配置: %s\n", snapshot.Executor.LauncherRequested)
+	_, _ = fmt.Fprintf(out, "  入口解析: %s\n", formatResolvedBinary(snapshot.Executor.LauncherRequested, snapshot.Executor.LauncherResolved, snapshot.Executor.LauncherError))
+	_, _ = fmt.Fprintf(out, "  Claude 解析: %s\n", formatResolvedBinary(snapshot.Executor.ClaudeRequested, snapshot.Executor.ClaudeResolved, snapshot.Executor.ClaudeError))
+	_, _ = fmt.Fprintf(out, "  RTK 解析: %s\n", formatResolvedBinary(snapshot.Executor.RTKRequested, snapshot.Executor.RTKResolved, snapshot.Executor.RTKError))
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "会话快照:")
+	_, _ = fmt.Fprintf(out, "  运行中任务: %d\n", snapshot.Sessions.RunningTasks)
+	if snapshot.Sessions.Error != "" {
+		_, _ = fmt.Fprintf(out, "  tmux 状态: %s\n", snapshot.Sessions.Error)
+	} else {
+		_, _ = fmt.Fprintf(out, "  tmux 会话: %d\n", snapshot.Sessions.TotalSessions)
+		_, _ = fmt.Fprintf(out, "  会话健康: 正常=%d 接近超时=%d 超时=%d 已退出=%d 丢失=%d 孤儿=%d\n",
+			snapshot.Sessions.HealthySessions,
+			snapshot.Sessions.WarningSessions,
+			snapshot.Sessions.TimeoutSessions,
+			snapshot.Sessions.DeadSessions,
+			snapshot.Sessions.MissingSessions,
+			snapshot.Sessions.OrphanedSessions,
+		)
+		if len(snapshot.Sessions.Items) > 0 {
+			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "ISSUE\tSESSION\tAGE\tHEALTH\tTITLE")
+			for _, item := range snapshot.Sessions.Items {
+				_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%s\n", item.IssueRepo, item.IssueNumber, item.SessionName, item.Age, item.Health, item.Title)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+		}
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "任务概览:")
+	_, _ = fmt.Fprintf(out, "  任务总数: %d\n", snapshot.Tasks.Total)
+	for _, state := range []core.State{core.StateNew, core.StateRunning, core.StateBlocked, core.StateFailed, core.StateDone, core.StateDead} {
+		_, _ = fmt.Fprintf(out, "  %-8s %d\n", state, snapshot.Tasks.Counts[string(state)])
+	}
+	if snapshot.Tasks.Total == 0 {
+		_, _ = fmt.Fprintln(out, "  当前无任务")
+	} else {
+		_, _ = fmt.Fprintln(out)
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "ISSUE\tSTATE\tCLASS\tTARGET\tAUTHOR\tAPPROVED\tRETRY\tTITLE")
+		for _, item := range snapshot.Tasks.Items {
+			title := item.Title
+			if len(title) > 46 {
+				title = title[:43] + "..."
+			}
+			targetRepo := item.TargetRepo
+			if targetRepo == "" {
+				targetRepo = "-"
+			}
+			taskClass := item.TaskClass
+			if taskClass == "" {
+				taskClass = string(core.TaskClassGeneral)
+			}
+			_, _ = fmt.Fprintf(w, "%s#%d\t%s\t%s\t%s\t%s\t%t\t%d\t%s\n", item.IssueRepo, item.IssueNumber, item.State, taskClass, targetRepo, item.Author, item.Approved, item.RetryCount, title)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "Token 快照:")
+	if snapshot.Tokens.Runs == 0 {
+		_, _ = fmt.Fprintln(out, "  未检测到 token 使用记录")
+	} else {
+		_, _ = fmt.Fprintf(out, "  累计执行: %d runs / %d sessions\n", snapshot.Tokens.Runs, snapshot.Tokens.Sessions)
+		_, _ = fmt.Fprintf(out, "  累计 tokens: input=%d output=%d cache_create=%d cache_read=%d\n", snapshot.Tokens.InputTokens, snapshot.Tokens.OutputTokens, snapshot.Tokens.CacheCreate, snapshot.Tokens.CacheRead)
+		_, _ = fmt.Fprintf(out, "  累计成本(USD): %.4f\n", snapshot.Tokens.CostUSD)
+		if snapshot.Tokens.LastUsedAt != "" {
+			_, _ = fmt.Fprintf(out, "  最近记录: %s\n", snapshot.Tokens.LastUsedAt)
+		}
+		if snapshot.Tokens.RTKComparison.RTKRuns > 0 || snapshot.Tokens.RTKComparison.PlainRuns > 0 {
+			_, _ = fmt.Fprintf(out, "  RTK 对比样本: rtk=%d plain=%d\n", snapshot.Tokens.RTKComparison.RTKRuns, snapshot.Tokens.RTKComparison.PlainRuns)
+			if snapshot.Tokens.RTKComparison.RTKRuns > 0 && snapshot.Tokens.RTKComparison.PlainRuns > 0 {
+				_, _ = fmt.Fprintf(out, "  RTK 估算节省: %.2f%%\n", snapshot.Tokens.RTKComparison.SavingsPercent)
+			}
+		}
+		_, _ = fmt.Fprintln(out, "  详情请执行: ccclaw stats --rtk-comparison")
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintln(out, "最近异常:")
+	if len(snapshot.Alerts) == 0 {
+		_, _ = fmt.Fprintln(out, "  最近 7 天无失败/超时告警")
+		return nil
+	}
+	for _, alert := range snapshot.Alerts {
+		_, _ = fmt.Fprintf(out, "  %s %s %s %s\n", alert.CreatedAt, alert.IssueRef, alert.EventType, alert.Detail)
+	}
+	return nil
+}
+
+func renderRuntimeStatusJSON(out io.Writer, snapshot runtimeStatusSnapshot) error {
+	encoder := json.NewEncoder(out)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(snapshot)
+}
+
+func formatRFC3339(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339)
 }
 
 func trimStatusText(value string, limit int) string {
@@ -1078,7 +1230,8 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		approved = true
 	}
 	targetRepo, routeReasons := rt.resolveTargetRepo(issueRepo, issue.Body)
-	rt.logDebug("issue", "完成 Issue 评估", "issue", rt.issueRef(issueRepo, issue.Number), "from_run", fromRun, "trusted", trusted, "permission", permission, "approved", approved, "target_repo", targetRepo)
+	taskClass := core.InferTaskClass(issue.Title, issue.Body, github.LabelNames(issue.Labels))
+	rt.logDebug("issue", "完成 Issue 评估", "issue", rt.issueRef(issueRepo, issue.Number), "from_run", fromRun, "trusted", trusted, "permission", permission, "approved", approved, "task_class", taskClass, "target_repo", targetRepo)
 	blockReasons := make([]string, 0, 2)
 	if !strings.EqualFold(strings.TrimSpace(issue.State), "open") {
 		blockReasons = append(blockReasons, fmt.Sprintf("Issue 当前状态为 `%s`，等待人工重新打开", issue.State))
@@ -1118,6 +1271,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	existing.IssueAuthorPermission = permission
 	existing.Labels = labels
 	existing.Intent = core.InferIntent(labels)
+	existing.TaskClass = taskClass
 	existing.RiskLevel = core.InferRisk(labels)
 	existing.Approved = approved
 	existing.TargetRepo = targetRepo
@@ -1141,7 +1295,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	}
 	if previousState == "" {
 		eventType := core.EventCreated
-		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t target=%s", existing.IssueAuthor, permission, approved, displayTargetRepo(targetRepo))
+		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t class=%s target=%s", existing.IssueAuthor, permission, approved, existing.TaskClass, displayTargetRepo(targetRepo))
 		if existing.State == core.StateBlocked {
 			eventType = core.EventBlocked
 			detail = blockReasonText(blockReasons)
@@ -1150,7 +1304,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		if existing.State == core.StateBlocked {
 			rt.logWarning("issue", "Issue 已阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
 		} else {
-			rt.logInfo("issue", "Issue 已入队", "issue", rt.issueRef(issueRepo, issue.Number), "state", existing.State, "target_repo", existing.TargetRepo)
+			rt.logInfo("issue", "Issue 已入队", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", existing.TaskClass, "state", existing.State, "target_repo", existing.TargetRepo)
 		}
 		if existing.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(existing, blockReasonText(blockReasons))
@@ -1168,7 +1322,7 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		if existing.State == core.StateBlocked {
 			rt.logWarning("issue", "Issue 状态变更为阻塞", "issue", rt.issueRef(issueRepo, issue.Number), "reason", detail)
 		} else {
-			rt.logInfo("issue", "Issue 状态已更新", "issue", rt.issueRef(issueRepo, issue.Number), "from", previousState, "to", existing.State)
+			rt.logInfo("issue", "Issue 状态已更新", "issue", rt.issueRef(issueRepo, issue.Number), "task_class", existing.TaskClass, "from", previousState, "to", existing.State)
 		}
 		if existing.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(existing, blockReasonText(blockReasons))
@@ -1180,8 +1334,8 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 }
 
 func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) string {
-	keywords := make([]string, 0, len(task.Labels)+3)
-	keywords = append(keywords, string(task.Intent), string(task.RiskLevel), task.IssueTitle)
+	keywords := make([]string, 0, len(task.Labels)+4)
+	keywords = append(keywords, string(task.Intent), string(task.TaskClass), string(task.RiskLevel), task.IssueTitle)
 	keywords = append(keywords, task.Labels...)
 	matches := rt.memoryIndex(target).Match(keywords, 6)
 	reportFile := filepath.ToSlash(filepath.Join("docs", "reports", core.SafeReportFileName(time.Now(), task.IssueNumber, task.IssueTitle)))
@@ -1193,7 +1347,7 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 	sb.WriteString(fmt.Sprintf("## 目标仓库\n- repo: %s\n- local_path: %s\n- kb_path: %s\n\n", target.Repo, target.LocalPath, target.KBPath))
 	sb.WriteString(fmt.Sprintf("## Issue %s#%d: %s\n\n%s\n\n", task.IssueRepo, task.IssueNumber, task.IssueTitle, task.IssueBody))
 	sb.WriteString("## 元数据\n")
-	sb.WriteString(fmt.Sprintf("- 发起者: %s\n- 发起者权限: %s\n- 风险等级: %s\n- 意图: %s\n- 标签: %s\n", task.IssueAuthor, task.IssueAuthorPermission, task.RiskLevel, task.Intent, strings.Join(task.Labels, ", ")))
+	sb.WriteString(fmt.Sprintf("- 发起者: %s\n- 发起者权限: %s\n- 风险等级: %s\n- 意图: %s\n- 任务分类: %s\n- 标签: %s\n", task.IssueAuthor, task.IssueAuthorPermission, task.RiskLevel, task.Intent, task.TaskClass, strings.Join(task.Labels, ", ")))
 	if task.ApprovalActor != "" {
 		sb.WriteString(fmt.Sprintf("- 审批人: %s\n", task.ApprovalActor))
 	}
@@ -1207,6 +1361,7 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 		}
 		sb.WriteString("- 使用方式: 以上仅为索引摘要；仅在确有必要时再按路径打开原文细节\n")
 	}
+	appendTaskTemplatePrompt(&sb, task)
 	sb.WriteString("\n## 交付要求\n")
 	sb.WriteString("- 优先修改根因，不要做表面补丁\n")
 	sb.WriteString("- 保持改动最小且可验证\n")
@@ -1533,325 +1688,12 @@ func (rt *Runtime) reportSuccess(task *core.Task, duration time.Duration, logFil
 	_ = rt.rep.ReportSuccess(task, duration, logFile)
 }
 
-type schedulerProbe struct {
-	Requested        string
-	SystemdUserDir   string
-	SystemdInstalled bool
-	SystemdActive    bool
-	SystemdReason    string
-	CronActive       bool
-	CronReason       string
-}
-
-type schedulerDiagnosis struct {
-	Effective string
-	Reason    string
-	Repair    string
-	Context   []string
-}
-
 func (rt *Runtime) describeSchedulerStatus() (string, error) {
 	return scheduler.DescribeStatus(rt.cfg)
 }
 
 func (rt *Runtime) SchedulerStatus() (string, error) {
 	return rt.describeSchedulerStatus()
-}
-
-func (rt *Runtime) inspectScheduler() schedulerProbe {
-	probe := schedulerProbe{
-		Requested:      strings.TrimSpace(rt.cfg.Scheduler.Mode),
-		SystemdUserDir: rt.cfg.Scheduler.SystemdUserDir,
-	}
-	if probe.Requested == "" {
-		probe.Requested = "none"
-	}
-	probe.SystemdInstalled = rt.hasSystemdUnitFiles(probe.SystemdUserDir)
-	probe.SystemdActive, probe.SystemdReason = rt.detectSystemdTimers()
-	probe.CronActive, probe.CronReason = rt.detectCronEntries()
-	return probe
-}
-
-func summarizeScheduler(probe schedulerProbe) (string, error) {
-	requested := probe.Requested
-	if requested == "" {
-		requested = "none"
-	}
-	diagnosis := diagnoseScheduler(probe, requested)
-
-	detail := fmt.Sprintf("request=%s effective=%s reason=%s", requested, diagnosis.Effective, diagnosis.Reason)
-	for _, item := range diagnosis.Context {
-		detail += " " + item
-	}
-	if diagnosis.Repair != "" {
-		detail += fmt.Sprintf(" repair=%s", diagnosis.Repair)
-	}
-
-	switch requested {
-	case "none":
-		if diagnosis.Effective != "none" {
-			return detail, fmt.Errorf("配置要求 none，但当前检测到 %s 调度仍在生效", diagnosis.Effective)
-		}
-		return detail, nil
-	case "systemd":
-		if diagnosis.Effective != "systemd" {
-			return detail, fmt.Errorf("配置要求 systemd，但当前检测到 %s", diagnosis.Effective)
-		}
-		return detail, nil
-	case "cron":
-		if diagnosis.Effective != "cron" {
-			return detail, fmt.Errorf("配置要求 cron，但当前检测到 %s", diagnosis.Effective)
-		}
-		return detail, nil
-	case "auto":
-		if diagnosis.Effective == "none" || diagnosis.Effective == "systemd+cron" {
-			return detail, fmt.Errorf("自动调度未处于单一可用状态")
-		}
-		return detail, nil
-	default:
-		return detail, fmt.Errorf("未知调度模式: %s", requested)
-	}
-}
-
-func diagnoseScheduler(probe schedulerProbe, requested string) schedulerDiagnosis {
-	diagnosis := schedulerDiagnosis{
-		Effective: "none",
-		Reason:    "未检测到生效中的 systemd timer 或受控 crontab",
-	}
-
-	switch {
-	case probe.SystemdActive && probe.CronActive:
-		diagnosis.Effective = "systemd+cron"
-		diagnosis.Reason = "同时检测到 systemd 与 cron 调度，存在重复执行风险"
-		diagnosis.Repair = "请只保留一种调度方式；若保留 systemd，请删除 crontab 中的 ccclaw 规则"
-	case probe.SystemdActive:
-		diagnosis.Effective = "systemd"
-		diagnosis.Reason = fallbackReason(probe.SystemdReason, "已检测到启用中的 user systemd timer")
-	case probe.CronActive:
-		diagnosis.Effective = "cron"
-		diagnosis.Reason = fallbackReason(probe.CronReason, "已检测到受控 crontab ingest/run/patrol/journal 规则")
-	case probe.SystemdInstalled:
-		diagnosis.Reason = summarizeInstalledButInactiveSystemd(probe.SystemdUserDir, probe.SystemdReason)
-		diagnosis.Repair = systemdRepairHint(probe.SystemdReason, true)
-	default:
-		diagnosis.Reason = summarizeUnavailableScheduler(requested, probe.SystemdReason, probe.CronReason)
-		switch requested {
-		case "cron":
-			diagnosis.Repair = cronRepairHint(probe.CronReason)
-		case "systemd", "auto":
-			diagnosis.Repair = systemdRepairHint(probe.SystemdReason, false)
-		}
-	}
-
-	if shouldAppendSchedulerContext(probe, requested, diagnosis.Effective) {
-		diagnosis.Context = schedulerContext(probe)
-	}
-	return diagnosis
-}
-
-func fallbackReason(reason, fallback string) string {
-	if strings.TrimSpace(reason) == "" {
-		return fallback
-	}
-	return reason
-}
-
-func summarizeInstalledButInactiveSystemd(unitDir, reason string) string {
-	if isUserBusUnavailable(reason) {
-		return fmt.Sprintf("已写入 user systemd 单元目录 %s，但当前会话无法连接 user bus", unitDir)
-	}
-	if strings.Contains(reason, "is-enabled") {
-		return fmt.Sprintf("已写入 user systemd 单元目录 %s，但 timer 尚未启用", unitDir)
-	}
-	if strings.Contains(reason, "is-active") {
-		return fmt.Sprintf("已写入 user systemd 单元目录 %s，但 timer 当前未处于运行态", unitDir)
-	}
-	return fmt.Sprintf("已写入 user systemd 单元目录 %s，但未检测到启用中的 timer", unitDir)
-}
-
-func summarizeUnavailableScheduler(requested, systemdReason, cronReason string) string {
-	switch requested {
-	case "systemd", "auto":
-		switch {
-		case systemdReason != "":
-			if isUserBusUnavailable(systemdReason) {
-				return "当前会话无法连接 user systemd 总线"
-			}
-			if strings.Contains(systemdReason, "未找到 systemctl") {
-				return "当前环境缺少 systemctl，无法使用 user systemd"
-			}
-			return systemdReason
-		case cronReason != "":
-			return cronReason
-		default:
-			return "未检测到可用的 user systemd 或受控 crontab"
-		}
-	case "cron":
-		switch {
-		case cronReason != "":
-			if strings.Contains(cronReason, "未找到 crontab") {
-				return "当前环境缺少 crontab，无法使用 cron 调度"
-			}
-			return cronReason
-		case systemdReason != "":
-			return systemdReason
-		default:
-			return "未检测到受控 crontab 规则"
-		}
-	default:
-		switch {
-		case systemdReason != "":
-			return systemdReason
-		case cronReason != "":
-			return cronReason
-		default:
-			return "未检测到生效中的 systemd timer 或受控 crontab"
-		}
-	}
-}
-
-func systemdRepairHint(reason string, installed bool) string {
-	timers := strings.Join(scheduler.ManagedSystemdTimers(), " ")
-	services := strings.Join(managedSystemdServiceUnits(), " -u ")
-	switch {
-	case strings.TrimSpace(reason) == "":
-		if installed {
-			return "请执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
-		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
-	case strings.Contains(reason, "未找到 systemctl"):
-		return "当前环境缺少 systemctl；请安装 systemd 组件，或改用 cron/none"
-	case isUserBusUnavailable(reason):
-		return "请在用户登录会话中执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers + "；若仍失败，请先确认 user bus 已建立"
-	case strings.Contains(reason, "is-enabled"), strings.Contains(reason, "disabled"), strings.Contains(reason, "not-found"):
-		return "请执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
-	case strings.Contains(reason, "is-active"), strings.Contains(reason, "inactive"), strings.Contains(reason, "failed"):
-		return "请执行 systemctl --user restart " + timers + "，并检查 journalctl --user -u " + services
-	default:
-		if installed {
-			return "请检查 user systemd 状态后重新执行 daemon-reload / enable --now"
-		}
-		return "请检查 user systemd 可用性，并按需执行 systemctl --user daemon-reload && systemctl --user enable --now " + timers
-	}
-}
-
-func cronRepairHint(reason string) string {
-	switch {
-	case strings.TrimSpace(reason) == "":
-		return "请补充受控 crontab 规则，确保 ingest/run/patrol/journal 四条任务都已写入"
-	case strings.Contains(reason, "未找到 crontab"):
-		return "当前环境缺少 crontab；请安装 cron/cronie，或执行 `ccclaw scheduler disable-cron` 后改用 systemd/none"
-	case strings.Contains(reason, "未配置 crontab"), strings.Contains(reason, "未检测到受控 crontab 规则"):
-		return "请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"
-	default:
-		return "请检查当前用户 crontab，或重新执行 `ccclaw scheduler enable-cron` 修复受控规则"
-	}
-}
-
-func shouldAppendSchedulerContext(probe schedulerProbe, requested, effective string) bool {
-	if effective == "systemd+cron" {
-		return true
-	}
-	if probe.SystemdInstalled && !probe.SystemdActive {
-		return true
-	}
-	return requested != effective
-}
-
-func schedulerContext(probe schedulerProbe) []string {
-	context := make([]string, 0, 2)
-	if reason := strings.TrimSpace(probe.SystemdReason); reason != "" {
-		context = append(context, "systemd="+reason)
-	}
-	if reason := strings.TrimSpace(probe.CronReason); reason != "" {
-		context = append(context, "cron="+reason)
-	}
-	return context
-}
-
-func isUserBusUnavailable(reason string) bool {
-	return strings.Contains(reason, "No medium found") ||
-		strings.Contains(reason, "Failed to connect to bus") ||
-		strings.Contains(reason, "连接到总线失败") ||
-		strings.Contains(reason, "user bus")
-}
-
-func (rt *Runtime) hasSystemdUnitFiles(unitDir string) bool {
-	if unitDir == "" {
-		return false
-	}
-	required := []string{
-		"ccclaw-ingest.service",
-		"ccclaw-ingest.timer",
-		"ccclaw-run.service",
-		"ccclaw-run.timer",
-		"ccclaw-patrol.service",
-		"ccclaw-patrol.timer",
-		"ccclaw-journal.service",
-		"ccclaw-journal.timer",
-		"ccclaw-archive.service",
-		"ccclaw-archive.timer",
-		"ccclaw-sevolver.service",
-		"ccclaw-sevolver.timer",
-	}
-	for _, name := range required {
-		if _, err := os.Stat(filepath.Join(unitDir, name)); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-func (rt *Runtime) detectSystemdTimers() (bool, string) {
-	if err := requireCommand("systemctl"); err != nil {
-		return false, err.Error()
-	}
-	units := scheduler.ManagedSystemdTimers()
-	for _, unit := range units {
-		if _, err := systemctlUser("is-enabled", unit); err != nil {
-			return false, err.Error()
-		}
-		if _, err := systemctlUser("is-active", unit); err != nil {
-			return false, err.Error()
-		}
-	}
-	return true, strings.Join(units, ", ") + " 已启用且运行中"
-}
-
-func managedSystemdServiceUnits() []string {
-	services := make([]string, 0, len(scheduler.ManagedSystemdTimers()))
-	for _, timer := range scheduler.ManagedSystemdTimers() {
-		services = append(services, strings.TrimSuffix(timer, ".timer")+".service")
-	}
-	return services
-}
-
-func (rt *Runtime) detectCronEntries() (bool, string) {
-	if err := requireCommand("crontab"); err != nil {
-		return false, err.Error()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "crontab", "-l")
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return false, "执行 `crontab -l` 超时"
-	}
-	if err != nil {
-		text := strings.TrimSpace(string(output))
-		if strings.Contains(text, "no crontab for") || strings.Contains(text, "没有 crontab") {
-			return false, "未配置 crontab"
-		}
-		if text == "" {
-			text = err.Error()
-		}
-		return false, text
-	}
-	content := string(output)
-	if scheduler.ContainsManagedCron(content, rt.cfg) {
-		return true, "已检测到受控 crontab ingest/run/patrol/journal 规则"
-	}
-	return false, "未检测到受控 crontab 规则"
 }
 
 func (rt *Runtime) checkDisk() error {
@@ -1987,6 +1829,23 @@ func displayTargetRepo(repo string) string {
 		return "-"
 	}
 	return repo
+}
+
+func appendTaskTemplatePrompt(sb *strings.Builder, task *core.Task) {
+	if sb == nil || task == nil {
+		return
+	}
+	switch task.TaskClass {
+	case core.TaskClassSevolverDeepAnalysis:
+		sb.WriteString("\n## 专项模板\n")
+		sb.WriteString("- 本任务属于 `sevolver_deep_analysis`，是由 sevolver 自动升级的自进化分析单。\n")
+		sb.WriteString("- 先按 issue 中的 gap 样本与 fingerprint 收敛根因，禁止把样本逐条当成独立 bug 机械修补。\n")
+		sb.WriteString("- 优先判断问题落点属于 `internal/sevolver`、`kb/skills/`、`kb/assay/` 还是 `ingest/run` 执行链路。\n")
+		sb.WriteString("- 若需补知识资产，必须同步考虑 `gap-signals`、skill frontmatter 和后续闭环状态。\n")
+	case core.TaskClassSevolver:
+		sb.WriteString("\n## 专项模板\n")
+		sb.WriteString("- 本任务属于 `sevolver` 自进化链路相关事项，修改时优先保持长期闭环与可观测性。\n")
+	}
 }
 
 func (rt *Runtime) describeTargetRouting() string {

@@ -26,6 +26,7 @@ var runtimeLogFixedKeys = []string{
 	"entry",
 	"task_id",
 	"issue",
+	"task_class",
 	"target_repo",
 	"session_id",
 }

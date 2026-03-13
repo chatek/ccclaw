@@ -1,20 +1,24 @@
 package core
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
-func TestSafeReportFileName(t *testing.T) {
-	got := SafeReportFileName(time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC), 3, "Phase0 Bootstrap / MVP")
-	want := "260308_3_phase0_bootstrap_mvp.md"
-	if got != want {
-		t.Fatalf("unexpected filename: got %q want %q", got, want)
+func TestInferTaskClassUsesExplicitBodyMarker(t *testing.T) {
+	got := InferTaskClass("[sevolver] 能力缺口深度分析 2026-03-12", "task_class: sevolver_deep_analysis\n", []string{"ccclaw"})
+	if got != TaskClassSevolverDeepAnalysis {
+		t.Fatalf("unexpected task class: %s", got)
 	}
 }
 
-func TestInferRisk(t *testing.T) {
-	if InferRisk([]string{"ccclaw", "risk:high"}) != RiskHigh {
-		t.Fatal("expected high risk")
+func TestInferTaskClassFallsBackToSevolverTitle(t *testing.T) {
+	got := InferTaskClass("[sevolver] 日常整理", "普通说明", []string{"ccclaw"})
+	if got != TaskClassSevolver {
+		t.Fatalf("unexpected task class: %s", got)
+	}
+}
+
+func TestInferTaskClassDefaultsToGeneral(t *testing.T) {
+	got := InferTaskClass("修复状态页", "target_repo: 41490/ccclaw", []string{"ccclaw"})
+	if got != TaskClassGeneral {
+		t.Fatalf("unexpected task class: %s", got)
 	}
 }

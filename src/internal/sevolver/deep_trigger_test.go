@@ -86,10 +86,13 @@ func TestMaybeTriggerDeepAnalysisCreatesIssue(t *testing.T) {
 	if !strings.Contains(client.lastBody, "target_repo: 41490/ccclaw") {
 		t.Fatalf("expected target repo in issue body: %s", client.lastBody)
 	}
+	if !strings.Contains(client.lastBody, "task_class: sevolver_deep_analysis") {
+		t.Fatalf("expected task class in issue body: %s", client.lastBody)
+	}
 	if !strings.Contains(client.lastBody, "gap-1") {
 		t.Fatalf("expected gap details in issue body: %s", client.lastBody)
 	}
-	if len(client.lastLabels) != 1 || client.lastLabels[0] != "ccclaw" {
+	if len(client.lastLabels) != 2 || client.lastLabels[0] != "ccclaw" || client.lastLabels[1] != "sevolver" {
 		t.Fatalf("unexpected labels: %#v", client.lastLabels)
 	}
 }

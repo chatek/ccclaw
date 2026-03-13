@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/executor"
 	"github.com/41490/ccclaw/internal/memory"
+	"github.com/41490/ccclaw/internal/scheduler"
 )
 
 func TestParseTargetRepo(t *testing.T) {
@@ -175,6 +177,100 @@ esac
 	if task.TargetRepo != "41490/work" {
 		t.Fatalf("expected issue repo to become target repo: %#v", task)
 	}
+	if task.TaskClass != core.TaskClassGeneral {
+		t.Fatalf("expected general task class, got %#v", task)
+	}
+}
+
+func TestSyncIssueClassifiesSevolverDeepAnalysis(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+
+	script := filepath.Join(fakeBin, "gh")
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "api" ]]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/ccclaw/collaborators/ZoomQuiet/permission")
+    printf '{"permission":"admin"}\n'
+    ;;
+  "repos/41490/ccclaw/issues/36/comments?per_page=100")
+    printf '[]\n'
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+
+	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{
+				ControlRepo: "41490/ccclaw",
+				IssueLabel:  "ccclaw",
+			},
+			Paths: config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Approval: config.ApprovalConfig{
+				Words:             []string{"approve"},
+				RejectWords:       []string{"reject"},
+				MinimumPermission: "maintain",
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: "/opt/src/ccclaw",
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store:   store,
+		ghCache: map[string]*github.Client{},
+	}
+
+	issue := github.Issue{
+		Repo:   "41490/ccclaw",
+		Number: 36,
+		Title:  "[sevolver] 能力缺口深度分析 2026-03-12",
+		Body: `<!-- ccclaw:sevolver:deep-analysis:fingerprint=sg-demo -->
+target_repo: 41490/ccclaw
+task_class: sevolver_deep_analysis
+`,
+		State:     "open",
+		Labels:    []github.Label{{Name: "ccclaw"}, {Name: "sevolver"}},
+		User:      github.User{Login: "ZoomQuiet"},
+		CreatedAt: time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC),
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("syncIssue failed: %v", err)
+	}
+
+	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Repo, issue.Number))
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected task to be created")
+	}
+	if task.TaskClass != core.TaskClassSevolverDeepAnalysis {
+		t.Fatalf("unexpected task class: %#v", task)
+	}
 }
 
 func TestSyncIssueRejectCommandOverridesTrustedAuthor(t *testing.T) {
@@ -280,7 +376,7 @@ esac
 }
 
 func TestSummarizeSchedulerNoneModePasses(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "none",
 		CronReason: "未检测到受控 crontab 规则",
 	})
@@ -293,7 +389,7 @@ func TestSummarizeSchedulerNoneModePasses(t *testing.T) {
 }
 
 func TestSummarizeSchedulerAutoDegradeFails(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:     "auto",
 		SystemdReason: "Failed to connect to bus: No medium found",
 		CronReason:    "未检测到受控 crontab 规则",
@@ -313,7 +409,7 @@ func TestSummarizeSchedulerAutoDegradeFails(t *testing.T) {
 }
 
 func TestSummarizeSchedulerSystemdNeedsRepair(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:        "systemd",
 		SystemdUserDir:   "/tmp/systemd-user",
 		SystemdInstalled: true,
@@ -334,7 +430,7 @@ func TestSummarizeSchedulerSystemdNeedsRepair(t *testing.T) {
 }
 
 func TestSummarizeSchedulerCronPasses(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "cron",
 		CronActive: true,
 		CronReason: "已检测到受控 crontab ingest/run/patrol/journal 规则",
@@ -348,7 +444,7 @@ func TestSummarizeSchedulerCronPasses(t *testing.T) {
 }
 
 func TestSummarizeSchedulerDoubleSchedulingFails(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:     "auto",
 		SystemdActive: true,
 		SystemdReason: "systemd active",
@@ -367,7 +463,7 @@ func TestSummarizeSchedulerDoubleSchedulingFails(t *testing.T) {
 }
 
 func TestSummarizeSchedulerCronMissingCommand(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "cron",
 		CronReason: "未找到 crontab: exec: \"crontab\": executable file not found in $PATH",
 	})
@@ -383,7 +479,7 @@ func TestSummarizeSchedulerCronMissingCommand(t *testing.T) {
 }
 
 func TestSummarizeSchedulerCronMissingManagedEntries(t *testing.T) {
-	detail, err := summarizeScheduler(schedulerProbe{
+	detail, err := summarizeSchedulerProbe(t, scheduler.Probe{
 		Requested:  "cron",
 		CronReason: "未检测到受控 crontab 规则",
 	})
@@ -393,6 +489,13 @@ func TestSummarizeSchedulerCronMissingManagedEntries(t *testing.T) {
 	if want := "repair=请执行 `ccclaw scheduler enable-cron` 补齐 ingest/run/patrol/journal 四条受控规则"; !strings.Contains(detail, want) {
 		t.Fatalf("expected cron repair %q in %q", want, detail)
 	}
+}
+
+func summarizeSchedulerProbe(t *testing.T, probe scheduler.Probe) (string, error) {
+	t.Helper()
+
+	snapshot, err := scheduler.CollectStatusFromProbe(probe)
+	return snapshot.Detail(), err
 }
 
 func TestStatsRendersSummaryAndTaskTable(t *testing.T) {
@@ -816,6 +919,7 @@ exit 0
 		"会话快照:",
 		"会话健康: 正常=0 接近超时=1 超时=0 已退出=0 丢失=0 孤儿=1",
 		"#10",
+		"general",
 		"warning",
 		"任务总数: 3",
 		"Token 快照:",
@@ -828,6 +932,113 @@ exit 0
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
 		}
+	}
+}
+
+func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         "20#body",
+		IdempotencyKey: "20#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    20,
+		IssueTitle:     "status json",
+		IssueAuthor:    "zoomq",
+		TaskClass:      core.TaskClassGeneral,
+		State:          core.StateRunning,
+		LastSessionID:  "sess-20",
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	if err := store.RecordTokenUsage(storage.TokenUsageRecord{
+		TaskID:     task.TaskID,
+		SessionID:  task.LastSessionID,
+		PromptFile: "/tmp/20.md",
+		Usage:      core.TokenUsage{InputTokens: 11, OutputTokens: 7},
+		CostUSD:    0.12,
+		RTKEnabled: false,
+		RecordedAt: time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("写入 token 记录失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  filepath.Join(tmpDir, "app"),
+				LogDir:  filepath.Join(tmpDir, "log"),
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+				EnvFile: filepath.Join(tmpDir, ".env"),
+			},
+			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Scheduler: config.SchedulerConfig{Mode: "none"},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+
+	var out bytes.Buffer
+	if err := rt.StatusWithOptions(&out, StatusOptions{JSON: true}); err != nil {
+		t.Fatalf("执行 status --json 失败: %v", err)
+	}
+	var payload struct {
+		GeneratedAt string `json:"generated_at"`
+		Scheduler   struct {
+			Requested      string `json:"requested"`
+			Effective      string `json:"effective"`
+			MatchesRequest bool   `json:"matches_request"`
+		} `json:"scheduler"`
+		Tasks struct {
+			Total  int            `json:"total"`
+			Counts map[string]int `json:"counts"`
+			Items  []struct {
+				TaskID    string `json:"task_id"`
+				Title     string `json:"title"`
+				TaskClass string `json:"task_class"`
+			} `json:"items"`
+		} `json:"tasks"`
+		Tokens struct {
+			Runs        int    `json:"runs"`
+			LastUsedAt  string `json:"last_used_at"`
+			InputTokens int    `json:"input_tokens"`
+		} `json:"tokens"`
+		Sessions struct {
+			Error string `json:"error"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &payload); err != nil {
+		t.Fatalf("解析 JSON 失败: %v; output=%q", err, out.String())
+	}
+	if payload.GeneratedAt == "" {
+		t.Fatalf("expected generated_at in %q", out.String())
+	}
+	if payload.Scheduler.Requested != "none" || payload.Scheduler.Effective != "none" || !payload.Scheduler.MatchesRequest {
+		t.Fatalf("unexpected scheduler payload: %+v", payload.Scheduler)
+	}
+	if payload.Tasks.Total != 1 || payload.Tasks.Counts[string(core.StateRunning)] != 1 || len(payload.Tasks.Items) != 1 || payload.Tasks.Items[0].TaskID != task.TaskID {
+		t.Fatalf("unexpected tasks payload: %+v", payload.Tasks)
+	}
+	if payload.Tasks.Items[0].TaskClass != string(core.TaskClassGeneral) {
+		t.Fatalf("unexpected task class payload: %+v", payload.Tasks.Items[0])
+	}
+	if payload.Tokens.Runs != 1 || payload.Tokens.InputTokens != 11 || payload.Tokens.LastUsedAt == "" {
+		t.Fatalf("unexpected tokens payload: %+v", payload.Tokens)
+	}
+	if !strings.Contains(payload.Sessions.Error, "tmux") {
+		t.Fatalf("unexpected sessions payload: %+v", payload.Sessions)
 	}
 }
 
@@ -1482,6 +1693,7 @@ SECRET-LONG-BODY
 		IssueAuthor: "ZoomQuiet",
 		Labels:      []string{"ccclaw"},
 		Intent:      core.IntentFix,
+		TaskClass:   core.TaskClassGeneral,
 		RiskLevel:   core.RiskLow,
 	}
 	target := &config.TargetConfig{
@@ -1499,6 +1711,38 @@ SECRET-LONG-BODY
 	for _, unwanted := range []string{"SECRET-LONG-BODY", "这份全局知识不应进入 prompt"} {
 		if strings.Contains(prompt, unwanted) {
 			t.Fatalf("did not expect %q in prompt: %q", unwanted, prompt)
+		}
+	}
+}
+
+func TestBuildPromptUsesSevolverDeepAnalysisTemplate(t *testing.T) {
+	rt := &Runtime{}
+	task := &core.Task{
+		ControlRepo: "41490/ccclaw",
+		IssueRepo:   "41490/ccclaw",
+		IssueNumber: 36,
+		IssueTitle:  "[sevolver] 能力缺口深度分析 2026-03-12",
+		IssueBody:   "task_class: sevolver_deep_analysis",
+		IssueAuthor: "ZoomQuiet",
+		Labels:      []string{"ccclaw", "sevolver"},
+		Intent:      core.IntentResearch,
+		TaskClass:   core.TaskClassSevolverDeepAnalysis,
+		RiskLevel:   core.RiskLow,
+	}
+	target := &config.TargetConfig{
+		Repo:      "41490/ccclaw",
+		LocalPath: "/opt/src/ccclaw",
+		KBPath:    t.TempDir(),
+	}
+
+	prompt := rt.buildPrompt(task, target)
+	for _, want := range []string{
+		"任务分类: sevolver_deep_analysis",
+		"本任务属于 `sevolver_deep_analysis`",
+		"gap 样本与 fingerprint",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected %q in prompt: %q", want, prompt)
 		}
 	}
 }

@@ -20,6 +20,7 @@ func TestStateStorePersistsTaskSnapshot(t *testing.T) {
 		TargetRepo:     "41490/ccclaw",
 		IssueNumber:    42,
 		IssueTitle:     "phase1 state",
+		TaskClass:      core.TaskClassSevolverDeepAnalysis,
 		State:          core.StateRunning,
 		LastSessionID:  "sess-42",
 		UpdatedAt:      time.Date(2026, 3, 12, 11, 0, 0, 0, time.UTC),
@@ -34,7 +35,7 @@ func TestStateStorePersistsTaskSnapshot(t *testing.T) {
 	if loaded == nil {
 		t.Fatal("expected persisted task")
 	}
-	if loaded.LastSessionID != "sess-42" || loaded.State != core.StateRunning {
+	if loaded.LastSessionID != "sess-42" || loaded.State != core.StateRunning || loaded.TaskClass != core.TaskClassSevolverDeepAnalysis {
 		t.Fatalf("unexpected task snapshot: %#v", loaded)
 	}
 	tasks, err := store.ListTasks()

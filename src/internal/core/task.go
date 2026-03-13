@@ -47,6 +47,14 @@ const (
 	IntentRelease  Intent = "release"
 )
 
+type TaskClass string
+
+const (
+	TaskClassGeneral              TaskClass = "general"
+	TaskClassSevolver             TaskClass = "sevolver"
+	TaskClassSevolverDeepAnalysis TaskClass = "sevolver_deep_analysis"
+)
+
 const MaxRetry = 3
 
 type Task struct {
@@ -63,6 +71,7 @@ type Task struct {
 	IssueAuthorPermission string
 	Labels                []string
 	Intent                Intent
+	TaskClass             TaskClass
 	RiskLevel             RiskLevel
 	Approved              bool
 	ApprovalCommand       string
@@ -117,6 +126,64 @@ func InferRisk(labels []string) RiskLevel {
 		}
 	}
 	return RiskLow
+}
+
+func InferTaskClass(title, body string, labels []string) TaskClass {
+	if raw := parseBodyField(body, "task_class"); raw != "" {
+		if explicit := normalizeTaskClass(raw); explicit != "" {
+			return explicit
+		}
+	}
+
+	lowerTitle := strings.ToLower(strings.TrimSpace(title))
+	if strings.HasPrefix(lowerTitle, "[sevolver]") {
+		if strings.Contains(title, "能力缺口深度分析") || strings.Contains(strings.ToLower(body), "ccclaw:sevolver:deep-analysis:fingerprint=") {
+			return TaskClassSevolverDeepAnalysis
+		}
+		return TaskClassSevolver
+	}
+
+	for _, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label), "sevolver") {
+			return TaskClassSevolver
+		}
+	}
+	return TaskClassGeneral
+}
+
+func normalizeTaskClass(raw string) TaskClass {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(TaskClassSevolverDeepAnalysis):
+		return TaskClassSevolverDeepAnalysis
+	case string(TaskClassSevolver):
+		return TaskClassSevolver
+	case string(TaskClassGeneral):
+		return TaskClassGeneral
+	default:
+		return ""
+	}
+}
+
+func parseBodyField(body, field string) string {
+	field = strings.ToLower(strings.TrimSpace(field))
+	if field == "" {
+		return ""
+	}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(parts[0])) != field {
+			continue
+		}
+		return strings.TrimSpace(parts[1])
+	}
+	return ""
 }
 
 func SafeReportFileName(now time.Time, issueNumber int, title string) string {
