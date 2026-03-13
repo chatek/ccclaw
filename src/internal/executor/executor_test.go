@@ -90,6 +90,13 @@ func TestExecutorRunReturnsStructuredErrorResult(t *testing.T) {
 	if result.PromptFile == "" {
 		t.Fatalf("预期返回 prompt 归档路径，实际为 %#v", result)
 	}
+	payload, err := os.ReadFile(result.ResultFile)
+	if err != nil {
+		t.Fatalf("读取结构化结果文件失败: %v", err)
+	}
+	if !strings.Contains(string(payload), `"subtype":"error_max_turns"`) {
+		t.Fatalf("预期结构化结果文件保留错误 JSON，实际为 %q", string(payload))
+	}
 }
 
 func TestExecutorRunForcesPlainClaudeMode(t *testing.T) {
@@ -140,8 +147,8 @@ func TestExecutorRunLaunchesTMuxSession(t *testing.T) {
 	if result.PromptFile == "" || result.MetaFile == "" {
 		t.Fatalf("预期返回 prompt/meta 路径，实际为 %#v", result)
 	}
-	if !strings.Contains(manager.spec.Command, ".diag.txt") || !strings.Contains(manager.spec.Command, "2> >(") {
-		t.Fatalf("预期 tmux 命令把诊断输出写入独立文件，实际为 %q", manager.spec.Command)
+	if !strings.Contains(manager.spec.Command, ".diag.txt") || !strings.Contains(manager.spec.Command, ".stdout.txt") || !strings.Contains(manager.spec.Command, "2> >(") {
+		t.Fatalf("预期 tmux 命令把 stdout/诊断分别写入暂存文件，实际为 %q", manager.spec.Command)
 	}
 }
 
@@ -263,5 +270,83 @@ func TestLoadResultFallsBackToDiagnosticFile(t *testing.T) {
 				t.Fatalf("预期诊断文件保留输出，实际为 %q", string(diagnosticPayload))
 			}
 		})
+	}
+}
+
+func TestLoadResultPromotesTMuxStdoutFileToStructuredResult(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	artifacts := execEngine.ArtifactPaths("10#body")
+	rawJSON := `{"type":"result","subtype":"success","session_id":"sess-10","duration_ms":2000,"result":"任务完成","total_cost_usd":0.15,"usage":{"input_tokens":50,"output_tokens":20}}`
+	if err := os.WriteFile(artifacts.StdoutFile, []byte(rawJSON), 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存文件失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("10#body")
+	if loadErr != nil {
+		t.Fatalf("预期成功提升 stdout 暂存，实际失败: %v", loadErr)
+	}
+	if result == nil || result.SessionID != "sess-10" || result.Output != "任务完成" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	structuredPayload, err := os.ReadFile(artifacts.ResultFile)
+	if err != nil {
+		t.Fatalf("读取结构化结果文件失败: %v", err)
+	}
+	if strings.TrimSpace(string(structuredPayload)) != rawJSON {
+		t.Fatalf("预期结构化结果文件已提升 stdout JSON，实际为 %q", string(structuredPayload))
+	}
+	if _, err := os.Stat(artifacts.StdoutFile); !os.IsNotExist(err) {
+		t.Fatalf("预期 stdout 暂存文件已清理，实际 err=%v", err)
+	}
+}
+
+func TestLoadResultMovesInvalidTMuxStdoutIntoDiagnosticFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	artifacts := execEngine.ArtifactPaths("10#body")
+	if err := os.WriteFile(artifacts.StdoutFile, []byte("ccclaude: exec: claude: not found\n"), 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存文件失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("10#body")
+	if loadErr == nil {
+		t.Fatal("预期返回结构化结果缺失错误")
+	}
+	if result == nil || !strings.Contains(result.Output, "claude: not found") {
+		t.Fatalf("预期回退到诊断输出，实际为 %#v", result)
+	}
+	structuredPayload, err := os.ReadFile(artifacts.ResultFile)
+	if err != nil {
+		t.Fatalf("读取结构化结果文件失败: %v", err)
+	}
+	if strings.TrimSpace(string(structuredPayload)) != "" {
+		t.Fatalf("预期结构化结果文件保持为空，实际为 %q", string(structuredPayload))
+	}
+	diagnosticPayload, err := os.ReadFile(artifacts.DiagnosticFile)
+	if err != nil {
+		t.Fatalf("读取诊断文件失败: %v", err)
+	}
+	if !strings.Contains(string(diagnosticPayload), "claude: not found") {
+		t.Fatalf("预期诊断文件吸收 stdout 暂存，实际为 %q", string(diagnosticPayload))
+	}
+	if _, err := os.Stat(artifacts.StdoutFile); !os.IsNotExist(err) {
+		t.Fatalf("预期 stdout 暂存文件已清理，实际 err=%v", err)
 	}
 }

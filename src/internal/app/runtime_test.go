@@ -1257,7 +1257,7 @@ func TestDescribeExecutorIncludesResolvedBinaryPaths(t *testing.T) {
 	}
 }
 
-func TestPatrolFinalizesDeadTMuxSession(t *testing.T) {
+func TestPatrolFinalizesDeadTMuxSessionFromStdoutStagingFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -1327,10 +1327,10 @@ exit 0
 	if err := os.MkdirAll(resultDir, 0o755); err != nil {
 		t.Fatalf("创建结果目录失败: %v", err)
 	}
-	resultPath := filepath.Join(resultDir, "10_body.json")
+	resultPath := filepath.Join(resultDir, "10_body.stdout.txt")
 	resultJSON := `{"type":"result","subtype":"success","session_id":"sess-10","duration_ms":2000,"result":"任务完成","total_cost_usd":0.15,"usage":{"input_tokens":50,"output_tokens":20}}`
 	if err := os.WriteFile(resultPath, []byte(resultJSON), 0o644); err != nil {
-		t.Fatalf("写入结果文件失败: %v", err)
+		t.Fatalf("写入 stdout 暂存文件失败: %v", err)
 	}
 
 	logDir := filepath.Join(tmpDir, "app", "log")
@@ -1373,6 +1373,16 @@ exit 0
 	}
 	if loaded == nil || loaded.State != core.StateDone || loaded.LastSessionID != "sess-10" {
 		t.Fatalf("unexpected task after patrol: %#v", loaded)
+	}
+	promotedPayload, err := os.ReadFile(filepath.Join(resultDir, "10_body.json"))
+	if err != nil {
+		t.Fatalf("读取提升后的结构化结果文件失败: %v", err)
+	}
+	if strings.TrimSpace(string(promotedPayload)) != resultJSON {
+		t.Fatalf("预期 patrol 已提升 stdout 暂存为结构化结果，实际为 %q", string(promotedPayload))
+	}
+	if _, err := os.Stat(filepath.Join(resultDir, "10_body.stdout.txt")); !os.IsNotExist(err) {
+		t.Fatalf("预期 stdout 暂存文件已清理，实际 err=%v", err)
 	}
 	summary, err := store.TokenStats()
 	if err != nil {
