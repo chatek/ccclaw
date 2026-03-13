@@ -1,0 +1,25 @@
+{
+  "schema_version": "stream_event_contract/v1",
+  "task_id": "restart_error",
+  "session_id": "sess-46-c",
+  "event_count": 6,
+  "started_at": "2026-03-13T19:00:00Z",
+  "updated_at": "2026-03-13T19:00:08Z",
+  "last_event": "error",
+  "restart_count": 1,
+  "current_step": "load_result",
+  "error": "执行器退出码=1",
+  "usage": {
+    "input_tokens": 500,
+    "output_tokens": 120,
+    "cache_creation_input_tokens": 80,
+    "cache_read_input_tokens": 20
+  },
+  "mapping": {
+    "repo_slot_phase": "pane_dead",
+    "repo_slot_step": "load_result",
+    "task_state": "FAILED",
+    "task_event": "FAILED",
+    "task_event_detail": "执行器退出码=1"
+  }
+}

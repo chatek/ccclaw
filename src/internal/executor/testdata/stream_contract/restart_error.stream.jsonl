@@ -1,0 +1,6 @@
+{"event":"started","timestamp":"2026-03-13T19:00:00Z","session_id":"sess-46-b","message":"任务开始","step":"execute"}
+{"event":"progress","timestamp":"2026-03-13T19:00:03Z","session_id":"sess-46-b","message":"分析失败上下文","step":"analyze"}
+{"event":"restarted","timestamp":"2026-03-13T19:00:04Z","session_id":"sess-46-b","message":"命中上下文阈值，触发 fresh restart"}
+{"event":"started","timestamp":"2026-03-13T19:00:06Z","session_id":"sess-46-c","message":"重启后恢复执行","step":"execute"}
+{"event":"usage","timestamp":"2026-03-13T19:00:07Z","session_id":"sess-46-c","usage":{"input_tokens":500,"output_tokens":120,"cache_creation_input_tokens":80,"cache_read_input_tokens":20}}
+{"event":"error","timestamp":"2026-03-13T19:00:08Z","session_id":"sess-46-c","error":"执行器退出码=1"}

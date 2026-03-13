@@ -1,0 +1,5 @@
+{"event":"started","timestamp":"2026-03-13T18:00:00Z","session_id":"sess-46-a","message":"任务开始","step":"execute"}
+{"event":"progress","timestamp":"2026-03-13T18:00:01Z","session_id":"sess-46-a","message":"读取 issue 约束","step":"analyze_issue"}
+{"event":"usage","timestamp":"2026-03-13T18:00:02Z","session_id":"sess-46-a","usage":{"input_tokens":1200,"output_tokens":300,"cache_creation_input_tokens":100,"cache_read_input_tokens":50},"total_cost_usd":0.12}
+{"event":"progress","timestamp":"2026-03-13T18:00:03Z","session_id":"sess-46-a","message":"写入代码与测试","step":"implement"}
+{"event":"result","timestamp":"2026-03-13T18:00:04Z","session_id":"sess-46-a","result":"任务已完成，已生成工程报告","total_cost_usd":0.42}

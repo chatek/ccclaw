@@ -24,6 +24,8 @@ type Result struct {
 	Duration        time.Duration
 	LogFile         string
 	ResultFile      string
+	StreamFile      string
+	EventFile       string
 	DiagnosticFile  string
 	StdoutFile      string
 	MetaFile        string
@@ -108,6 +110,8 @@ func (e *Executor) ArtifactPaths(taskID string) Result {
 		SessionName:    sessionName(taskID),
 		LogFile:        filepath.Join(e.logDir, safe+".log"),
 		ResultFile:     filepath.Join(e.resultDir, safe+".json"),
+		StreamFile:     filepath.Join(e.resultDir, safe+".stream.jsonl"),
+		EventFile:      filepath.Join(e.resultDir, safe+".event.json"),
 		DiagnosticFile: filepath.Join(e.resultDir, safe+".diag.txt"),
 		StdoutFile:     filepath.Join(e.resultDir, safe+".stdout.txt"),
 		MetaFile:       filepath.Join(e.resultDir, safe+".meta.json"),
@@ -183,6 +187,12 @@ func (e *Executor) launchTMux(repoPath, taskID string, opts RunOptions) (*Result
 	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧结果失败: %w", err)
 	}
+	if err := os.Remove(artifacts.StreamFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧流式事件失败: %w", err)
+	}
+	if err := os.Remove(artifacts.EventFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧事件快照失败: %w", err)
+	}
 	if err := os.Remove(artifacts.DiagnosticFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧诊断失败: %w", err)
 	}
@@ -237,6 +247,12 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	}
 	if err := os.Remove(artifacts.ResultFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧结果失败: %w", err)
+	}
+	if err := os.Remove(artifacts.StreamFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧流式事件失败: %w", err)
+	}
+	if err := os.Remove(artifacts.EventFile); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("清理旧事件快照失败: %w", err)
 	}
 	if err := os.Remove(artifacts.DiagnosticFile); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("清理旧诊断失败: %w", err)
@@ -455,6 +471,8 @@ func (e *Executor) applyArtifactMetadata(result *Result, artifacts Result, meta 
 	result.SessionName = artifacts.SessionName
 	result.LogFile = artifacts.LogFile
 	result.ResultFile = artifacts.ResultFile
+	result.StreamFile = artifacts.StreamFile
+	result.EventFile = artifacts.EventFile
 	result.DiagnosticFile = artifacts.DiagnosticFile
 	result.StdoutFile = artifacts.StdoutFile
 	result.MetaFile = artifacts.MetaFile

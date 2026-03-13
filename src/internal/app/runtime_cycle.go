@@ -110,6 +110,7 @@ func (rt *Runtime) advanceRepoSlot(ctx context.Context, execEngine *executor.Exe
 	if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
 		return nil
 	}
+	rt.observeStreamEventContract(execEngine, slot)
 	if slot.Phase == storage.RepoSlotPhaseFinalizeFailed && !slot.NextRetryAt.IsZero() && time.Now().UTC().Before(slot.NextRetryAt) {
 		return nil
 	}
@@ -804,6 +805,69 @@ func (rt *Runtime) restartRepoSlotTask(ctx context.Context, execEngine *executor
 		slot.SessionName = result.SessionName
 	}
 	return rt.store.UpsertRepoSlot(slot)
+}
+
+func (rt *Runtime) observeStreamEventContract(execEngine *executor.Executor, slot *storage.RepoSlot) {
+	if rt == nil || execEngine == nil || slot == nil || strings.TrimSpace(slot.TaskID) == "" {
+		return
+	}
+	snapshot, err := execEngine.LoadStreamEventSnapshot(slot.TaskID)
+	if err != nil {
+		rt.logWarning("stream", "读取 stream-json 事件快照失败", "task_id", slot.TaskID, "target_repo", slot.TargetRepo, "error", err)
+		return
+	}
+	if snapshot == nil || snapshot.EventCount == 0 {
+		return
+	}
+	slotPhase, slotStep, taskState, taskEvent, detail := mapStreamSnapshot(snapshot)
+	rt.logDebug(
+		"stream",
+		"stream-json 映射快照",
+		"task_id", slot.TaskID,
+		"target_repo", slot.TargetRepo,
+		"events", snapshot.EventCount,
+		"last_event", snapshot.LastEvent,
+		"slot_phase", slotPhase,
+		"slot_step", slotStep,
+		"task_state", taskState,
+		"task_event", taskEvent,
+		"detail", detail,
+	)
+}
+
+func mapStreamSnapshot(snapshot *executor.StreamEventSnapshot) (storage.RepoSlotPhase, string, core.State, core.EventType, string) {
+	if snapshot == nil {
+		return "", "", "", "", ""
+	}
+	slotPhase := storage.RepoSlotPhaseRunning
+	switch storage.RepoSlotPhase(snapshot.Mapping.RepoSlotPhase) {
+	case storage.RepoSlotPhaseRunning, storage.RepoSlotPhasePaneDead, storage.RepoSlotPhaseRestarting, storage.RepoSlotPhaseFinalizing:
+		slotPhase = storage.RepoSlotPhase(snapshot.Mapping.RepoSlotPhase)
+	}
+	slotStep := strings.TrimSpace(snapshot.Mapping.RepoSlotStep)
+	if slotStep == "" {
+		slotStep = strings.TrimSpace(snapshot.CurrentStep)
+	}
+	taskState := snapshot.Mapping.TaskState
+	switch taskState {
+	case core.StateRunning, core.StateFinalizing, core.StateFailed, core.StateDone, core.StateDead:
+	default:
+		taskState = core.StateRunning
+	}
+	taskEvent := snapshot.Mapping.TaskEvent
+	switch taskEvent {
+	case core.EventStarted, core.EventUpdated, core.EventFailed, core.EventDone, core.EventDead, core.EventWarning:
+	default:
+		taskEvent = core.EventUpdated
+	}
+	detail := strings.TrimSpace(snapshot.Mapping.TaskEventDetail)
+	if detail == "" {
+		detail = strings.TrimSpace(snapshot.Error)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(snapshot.Result)
+	}
+	return slotPhase, slotStep, taskState, taskEvent, detail
 }
 
 func defaultSlotStepForTask(state core.State) string {

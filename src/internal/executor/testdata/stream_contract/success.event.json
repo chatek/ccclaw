@@ -1,0 +1,25 @@
+{
+  "schema_version": "stream_event_contract/v1",
+  "task_id": "success",
+  "session_id": "sess-46-a",
+  "event_count": 5,
+  "started_at": "2026-03-13T18:00:00Z",
+  "updated_at": "2026-03-13T18:00:04Z",
+  "last_event": "result",
+  "current_step": "sync_target",
+  "result": "任务已完成，已生成工程报告",
+  "usage": {
+    "input_tokens": 1200,
+    "output_tokens": 300,
+    "cache_creation_input_tokens": 100,
+    "cache_read_input_tokens": 50
+  },
+  "cost_usd": 0.42,
+  "mapping": {
+    "repo_slot_phase": "finalizing",
+    "repo_slot_step": "sync_target",
+    "task_state": "FINALIZING",
+    "task_event": "UPDATED",
+    "task_event_detail": "任务已完成，已生成工程报告"
+  }
+}

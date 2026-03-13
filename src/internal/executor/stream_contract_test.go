@@ -1,0 +1,110 @@
+package executor
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestAggregateStreamEventsWithFixtures(t *testing.T) {
+	fixtures, err := filepath.Glob(filepath.Join("testdata", "stream_contract", "*.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 fixtures 失败: %v", err)
+	}
+	if len(fixtures) == 0 {
+		t.Fatal("预期存在 stream-json fixtures")
+	}
+	for _, streamPath := range fixtures {
+		name := strings.TrimSuffix(filepath.Base(streamPath), ".stream.jsonl")
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(streamPath)
+			if err != nil {
+				t.Fatalf("读取 fixture 失败: %v", err)
+			}
+			events, err := ParseStreamJSONL(raw)
+			if err != nil {
+				t.Fatalf("解析 stream fixture 失败: %v", err)
+			}
+			snapshot := AggregateStreamEvents(name, events)
+			if snapshot == nil || snapshot.EventCount != len(events) {
+				t.Fatalf("unexpected snapshot: %#v", snapshot)
+			}
+			replayed := AggregateStreamEvents(name, events)
+			if !reflect.DeepEqual(snapshot, replayed) {
+				t.Fatalf("同一批 fixtures 重放结果不一致:\nfirst=%#v\nsecond=%#v", snapshot, replayed)
+			}
+
+			wantPayload, err := os.ReadFile(filepath.Join("testdata", "stream_contract", name+".event.json"))
+			if err != nil {
+				t.Fatalf("读取期望快照失败: %v", err)
+			}
+			wantSnapshot, err := UnmarshalStreamEventSnapshot(wantPayload)
+			if err != nil {
+				t.Fatalf("解析期望快照失败: %v", err)
+			}
+			if !reflect.DeepEqual(snapshot, wantSnapshot) {
+				t.Fatalf("聚合快照不符合契约:\nwant=%#v\ngot=%#v", wantSnapshot, snapshot)
+			}
+
+			gotPayload, err := MarshalStreamEventSnapshot(snapshot)
+			if err != nil {
+				t.Fatalf("序列化聚合快照失败: %v", err)
+			}
+			wantCanonical, err := MarshalStreamEventSnapshot(wantSnapshot)
+			if err != nil {
+				t.Fatalf("序列化期望快照失败: %v", err)
+			}
+			if string(gotPayload) != string(wantCanonical) {
+				t.Fatalf("聚合快照输出不稳定:\nwant=%s\ngot=%s", string(wantCanonical), string(gotPayload))
+			}
+		})
+	}
+}
+
+func TestExecutorLoadStreamEventSnapshotRebuildsFromRaw(t *testing.T) {
+	tmpDir := t.TempDir()
+	execEngine, err := New([]string{"/bin/sh"}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join("testdata", "stream_contract", "success.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 fixture 失败: %v", err)
+	}
+	artifacts := execEngine.ArtifactPaths("stream#46")
+	if err := os.WriteFile(artifacts.StreamFile, raw, 0o644); err != nil {
+		t.Fatalf("写入 stream 原始流失败: %v", err)
+	}
+
+	snapshot, err := execEngine.LoadStreamEventSnapshot("stream#46")
+	if err != nil {
+		t.Fatalf("重建 stream 快照失败: %v", err)
+	}
+	if snapshot == nil || snapshot.EventCount == 0 || snapshot.Mapping.RepoSlotPhase != StreamSlotPhaseFinalizing {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+	if _, err := os.Stat(artifacts.EventFile); err != nil {
+		t.Fatalf("预期写入事件快照文件: %v", err)
+	}
+
+	reloaded, err := execEngine.LoadStreamEventSnapshot("stream#46")
+	if err != nil {
+		t.Fatalf("读取已缓存 stream 快照失败: %v", err)
+	}
+	if !reflect.DeepEqual(snapshot, reloaded) {
+		t.Fatalf("读取事件快照不一致:\nfirst=%#v\nsecond=%#v", snapshot, reloaded)
+	}
+}
+
+func TestParseStreamJSONLRejectsUnknownEvent(t *testing.T) {
+	_, err := ParseStreamJSONL([]byte(`{"event":"noop","timestamp":"2026-03-13T20:00:00Z"}`))
+	if err == nil {
+		t.Fatal("预期拒绝未知事件")
+	}
+	if !strings.Contains(err.Error(), "无法识别事件类型") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
