@@ -7,12 +7,21 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	ghadapter "github.com/41490/ccclaw/internal/adapters/github"
 )
 
 const (
 	gapEscalationStatusEscalated = "escalated"
 	gapEscalationStatusResolved  = "resolved"
 	gapEscalationStatusConverged = "converged"
+
+	closeReasonFixed            = "fixed"
+	closeReasonDuplicate        = "duplicate"
+	closeReasonExternalResolved = "external_resolved"
+	closeReasonArchived         = "archived"
+	closeReasonCannotReproduce  = "cannot_reproduce"
+	closeReasonUnknown          = "closed"
 )
 
 type DeepAnalysisBackfillResult struct {
@@ -21,9 +30,11 @@ type DeepAnalysisBackfillResult struct {
 }
 
 type DeepAnalysisResolutionResult struct {
-	GapIDs       []string
-	SkillPaths   []string
-	IssueNumbers []int
+	GapIDs              []string
+	SkillPaths          []string
+	IssueNumbers        []int
+	IssueCloseReasons   map[int]string
+	CloseReasonCounters map[string]int
 }
 
 func BackfillDeepAnalysisEscalation(kbDir string, backlog []GapSignal, decision *DeepAnalysisDecision, hits []SkillHit, now time.Time) (*DeepAnalysisBackfillResult, error) {
@@ -126,7 +137,13 @@ func ResolveClosedDeepAnalysisEscalations(cfg Config, backlog []GapSignal, now t
 		return updatedBacklog, result, nil
 	}
 
-	closedIssues := map[int]struct{}{}
+	type commentReader interface {
+		ListComments(number int) ([]ghadapter.Comment, error)
+	}
+
+	closedIssues := map[int]string{}
+	result.IssueCloseReasons = map[int]string{}
+	result.CloseReasonCounters = map[string]int{}
 	for _, issueNumber := range issueNumbers {
 		issue, err := client.GetIssue(issueNumber)
 		if err != nil {
@@ -135,7 +152,18 @@ func ResolveClosedDeepAnalysisEscalations(cfg Config, backlog []GapSignal, now t
 		if issue == nil || !strings.EqualFold(strings.TrimSpace(issue.State), "closed") {
 			continue
 		}
-		closedIssues[issueNumber] = struct{}{}
+		var comments []ghadapter.Comment
+		if reader, ok := client.(commentReader); ok {
+			items, commentErr := reader.ListComments(issueNumber)
+			if commentErr != nil {
+				return updatedBacklog, result, fmt.Errorf("读取 deep-analysis issue #%d 评论失败: %w", issueNumber, commentErr)
+			}
+			comments = items
+		}
+		closeReason := inferIssueCloseReason(issue, comments)
+		closedIssues[issueNumber] = closeReason
+		result.IssueCloseReasons[issueNumber] = closeReason
+		result.CloseReasonCounters[closeReason]++
 		result.IssueNumbers = append(result.IssueNumbers, issueNumber)
 	}
 	if len(closedIssues) == 0 {
@@ -149,16 +177,19 @@ func ResolveClosedDeepAnalysisEscalations(cfg Config, backlog []GapSignal, now t
 		if !strings.EqualFold(strings.TrimSpace(gap.EscalationStatus), gapEscalationStatusEscalated) {
 			continue
 		}
-		if _, ok := closedIssues[gap.EscalationIssueNumber]; !ok {
+		closeReason, ok := closedIssues[gap.EscalationIssueNumber]
+		if !ok {
 			continue
 		}
 		gap.EscalationStatus = gapEscalationStatusResolved
+		gap.EscalationCloseReason = closeReason
 		gap.EscalationUpdatedAt = dateFloor(now).Format("2006-01-02")
 		result.GapIDs = append(result.GapIDs, gap.ID)
 		key := resolutionKey(gap.EscalationFingerprint, gap.EscalationIssueNumber)
 		target := resolutionTargets[key]
 		target.Fingerprint = strings.TrimSpace(gap.EscalationFingerprint)
 		target.IssueNumber = gap.EscalationIssueNumber
+		target.CloseReason = closeReason
 		target.GapIDs = append(target.GapIDs, gap.ID)
 		resolutionTargets[key] = target
 	}
@@ -267,4 +298,121 @@ func resolveSkillGapEscalations(kbDir string, targets []skillGapEscalation, now 
 
 func resolutionKey(fingerprint string, issueNumber int) string {
 	return strings.TrimSpace(fingerprint) + "|" + fmt.Sprintf("%09d", issueNumber)
+}
+
+func inferIssueCloseReason(issue *ghadapter.Issue, comments []ghadapter.Comment) string {
+	if issue == nil {
+		return closeReasonUnknown
+	}
+	if reason := parseCloseReasonFromText(issue.Body); reason != "" {
+		return reason
+	}
+	if reason := parseCloseReasonFromLabels(issue.Labels); reason != "" {
+		return reason
+	}
+	if len(comments) == 0 {
+		return closeReasonUnknown
+	}
+	if done := ghadapter.FindDoneComment(comments, 0); done != nil {
+		if reason := parseCloseReasonFromText(done.Body); reason != "" {
+			return reason
+		}
+	}
+	for idx := len(comments) - 1; idx >= 0; idx-- {
+		if reason := parseCloseReasonFromText(comments[idx].Body); reason != "" {
+			return reason
+		}
+	}
+	return closeReasonUnknown
+}
+
+func parseCloseReasonFromLabels(labels []ghadapter.Label) string {
+	for _, label := range labels {
+		if reason := normalizeCloseReason(label.Name); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+func parseCloseReasonFromText(raw string) string {
+	text := strings.TrimSpace(strings.ReplaceAll(raw, "\r\n", "\n"))
+	if text == "" {
+		return ""
+	}
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "close_reason:"):
+			if reason := normalizeCloseReason(strings.TrimSpace(trimmed[len("close_reason:"):])); reason != "" {
+				return reason
+			}
+		case strings.HasPrefix(lower, "state_reason:"):
+			if reason := normalizeCloseReason(strings.TrimSpace(trimmed[len("state_reason:"):])); reason != "" {
+				return reason
+			}
+		}
+	}
+	return normalizeCloseReason(text)
+}
+
+func normalizeCloseReason(raw string) string {
+	lower := strings.ToLower(strings.TrimSpace(raw))
+	if lower == "" {
+		return ""
+	}
+	candidates := []struct {
+		keywords []string
+		reason   string
+	}{
+		{
+			keywords: []string{
+				"close_reason=fixed", "close_reason: fixed", "state_reason=fixed", "state_reason: fixed",
+				"已修复", "修复完成", "fixed", "resolved", "done",
+			},
+			reason: closeReasonFixed,
+		},
+		{
+			keywords: []string{
+				"close_reason=duplicate", "close_reason: duplicate", "state_reason=duplicate", "state_reason: duplicate",
+				"重复问题", "重复", "duplicate", "dup",
+			},
+			reason: closeReasonDuplicate,
+		},
+		{
+			keywords: []string{
+				"close_reason=external_resolved", "close_reason: external_resolved", "state_reason=external_resolved", "state_reason: external_resolved",
+				"外部依赖已解除", "外部依赖", "upstream fixed", "external resolved", "external dependency",
+			},
+			reason: closeReasonExternalResolved,
+		},
+		{
+			keywords: []string{
+				"close_reason=archived", "close_reason: archived", "state_reason=archived", "state_reason: archived",
+				"归档不做", "归档", "不做", "not planned", "wontfix", "won't fix", "invalid",
+			},
+			reason: closeReasonArchived,
+		},
+		{
+			keywords: []string{
+				"close_reason=cannot_reproduce", "close_reason: cannot_reproduce", "state_reason=cannot_reproduce", "state_reason: cannot_reproduce",
+				"无法复现", "cannot reproduce", "not reproducible", "no repro",
+			},
+			reason: closeReasonCannotReproduce,
+		},
+	}
+	for _, item := range candidates {
+		for _, keyword := range item.keywords {
+			if strings.Contains(lower, keyword) {
+				return item.reason
+			}
+		}
+	}
+	switch lower {
+	case closeReasonFixed, closeReasonDuplicate, closeReasonExternalResolved, closeReasonArchived, closeReasonCannotReproduce:
+		return lower
+	default:
+		return ""
+	}
 }

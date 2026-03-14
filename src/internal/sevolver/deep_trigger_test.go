@@ -9,13 +9,14 @@ import (
 )
 
 type fakeDeepAnalysisClient struct {
-	openIssues   []ghadapter.Issue
-	issuesByID   map[int]ghadapter.Issue
-	createdIssue *ghadapter.Issue
-	createCalls  int
-	lastTitle    string
-	lastBody     string
-	lastLabels   []string
+	openIssues      []ghadapter.Issue
+	issuesByID      map[int]ghadapter.Issue
+	commentsByIssue map[int][]ghadapter.Comment
+	createdIssue    *ghadapter.Issue
+	createCalls     int
+	lastTitle       string
+	lastBody        string
+	lastLabels      []string
 }
 
 func (f *fakeDeepAnalysisClient) ListOpenIssues(label string, limit int) ([]ghadapter.Issue, error) {
@@ -39,6 +40,11 @@ func (f *fakeDeepAnalysisClient) GetIssue(number int) (*ghadapter.Issue, error) 
 		return &copy, nil
 	}
 	return &ghadapter.Issue{Repo: "41490/ccclaw", Number: number, State: "open"}, nil
+}
+
+func (f *fakeDeepAnalysisClient) ListComments(number int) ([]ghadapter.Comment, error) {
+	items := f.commentsByIssue[number]
+	return append([]ghadapter.Comment(nil), items...), nil
 }
 
 func TestShouldTriggerDeepAnalysisConsecutiveDays(t *testing.T) {

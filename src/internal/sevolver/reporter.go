@@ -3,6 +3,7 @@ package sevolver
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -39,6 +40,9 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 	}
 	if len(result.ResolvedIssues) > 0 {
 		lines = append(lines, fmt.Sprintf("- 收敛关闭 issue: %d", len(result.ResolvedIssues)))
+	}
+	if len(result.ResolvedReasonCounters) > 0 {
+		lines = append(lines, fmt.Sprintf("- 收敛关闭分类: %s", formatCloseReasonCounters(result.ResolvedReasonCounters)))
 	}
 	if len(result.ResolvedGapIDs) > 0 {
 		lines = append(lines, fmt.Sprintf("- 收敛回写 gap: %d", len(result.ResolvedGapIDs)))
@@ -103,9 +107,24 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		if len(result.ResolvedIssues) > 0 {
 			values := make([]string, 0, len(result.ResolvedIssues))
 			for _, issueNumber := range result.ResolvedIssues {
-				values = append(values, fmt.Sprintf("#%d", issueNumber))
+				reason := strings.TrimSpace(result.ResolvedIssueReasons[issueNumber])
+				if reason == "" {
+					values = append(values, fmt.Sprintf("#%d", issueNumber))
+					continue
+				}
+				values = append(values, fmt.Sprintf("#%d(%s)", issueNumber, closeReasonLabel(reason)))
 			}
 			lines = append(lines, fmt.Sprintf("- 已关闭 Issue: %s", strings.Join(values, ", ")))
+		}
+		if len(result.ResolvedReasonCounters) > 0 {
+			reasons := make([]string, 0, len(result.ResolvedReasonCounters))
+			for reason := range result.ResolvedReasonCounters {
+				reasons = append(reasons, reason)
+			}
+			sort.Strings(reasons)
+			for _, reason := range reasons {
+				lines = append(lines, fmt.Sprintf("- 关闭分类 %s: %d", closeReasonLabel(reason), result.ResolvedReasonCounters[reason]))
+			}
 		}
 		if len(result.ResolvedGapIDs) > 0 {
 			lines = append(lines, fmt.Sprintf("- 已标记 resolved 的 gap: %s", strings.Join(result.ResolvedGapIDs, ", ")))
@@ -127,4 +146,21 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		return "", err
 	}
 	return path, nil
+}
+
+func closeReasonLabel(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case closeReasonFixed:
+		return "已修复"
+	case closeReasonDuplicate:
+		return "重复问题"
+	case closeReasonExternalResolved:
+		return "外部依赖已解除"
+	case closeReasonArchived:
+		return "归档不做"
+	case closeReasonCannotReproduce:
+		return "无法复现"
+	default:
+		return "其他关闭"
+	}
 }

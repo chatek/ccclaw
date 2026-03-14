@@ -66,7 +66,12 @@ content
 		ControlRepo: "41490/ccclaw",
 		IssueClient: &fakeDeepAnalysisClient{
 			issuesByID: map[int]ghadapter.Issue{
-				88: {Repo: "41490/ccclaw", Number: 88, State: "closed"},
+				88: {
+					Repo:   "41490/ccclaw",
+					Number: 88,
+					State:  "closed",
+					Labels: []ghadapter.Label{{Name: "fixed"}},
+				},
 			},
 		},
 		Now: now,
@@ -85,6 +90,12 @@ content
 	}
 	if len(result.ResolvedSkills) != 1 || result.ResolvedSkills[0] != "skills/L1/demo/CLAUDE.md" {
 		t.Fatalf("expected resolved skill, got %#v", result.ResolvedSkills)
+	}
+	if result.ResolvedIssueReasons[88] != closeReasonFixed {
+		t.Fatalf("expected fixed reason, got %#v", result.ResolvedIssueReasons)
+	}
+	if result.ResolvedReasonCounters[closeReasonFixed] != 1 {
+		t.Fatalf("expected fixed reason counter, got %#v", result.ResolvedReasonCounters)
 	}
 	if result.DeepAnalysis == nil || result.DeepAnalysis.Triggered {
 		t.Fatalf("expected resolved backlog to skip deep-analysis trigger, got %#v", result.DeepAnalysis)

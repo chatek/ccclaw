@@ -157,6 +157,10 @@ func ApplySkillGapEscalationResolution(skillFile string, targets []skillGapEscal
 				meta.GapEscalations[idx].Status = gapEscalationStatusConverged
 				changed = true
 			}
+			if normalized := strings.TrimSpace(target.CloseReason); normalized != "" && meta.GapEscalations[idx].CloseReason != normalized {
+				meta.GapEscalations[idx].CloseReason = normalized
+				changed = true
+			}
 			updatedAt := dateFloor(now).Format("2006-01-02")
 			if meta.GapEscalations[idx].UpdatedAt != updatedAt {
 				meta.GapEscalations[idx].UpdatedAt = updatedAt

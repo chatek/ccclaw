@@ -143,6 +143,9 @@ func renderGapSignalBody(items []GapSignal) string {
 		if strings.TrimSpace(item.EscalationUpdatedAt) != "" {
 			lines = append(lines, "  escalation_updated_at: "+strings.TrimSpace(item.EscalationUpdatedAt))
 		}
+		if strings.TrimSpace(item.EscalationCloseReason) != "" {
+			lines = append(lines, "  escalation_close_reason: "+strings.TrimSpace(item.EscalationCloseReason))
+		}
 		if idx < len(items)-1 {
 			lines = append(lines, "")
 		}
@@ -203,6 +206,8 @@ func parseGapSignalMetadata(item *GapSignal, line string) {
 		item.EscalationIssueURL = value
 	case "escalation_updated_at":
 		item.EscalationUpdatedAt = value
+	case "escalation_close_reason":
+		item.EscalationCloseReason = value
 	}
 }
 
@@ -234,6 +239,9 @@ func mergeGapSignal(current, incoming GapSignal) GapSignal {
 	}
 	if strings.TrimSpace(current.EscalationUpdatedAt) == "" {
 		current.EscalationUpdatedAt = incoming.EscalationUpdatedAt
+	}
+	if strings.TrimSpace(current.EscalationCloseReason) == "" {
+		current.EscalationCloseReason = incoming.EscalationCloseReason
 	}
 	return current
 }

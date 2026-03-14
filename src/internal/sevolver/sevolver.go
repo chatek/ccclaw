@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,22 +26,24 @@ type Config struct {
 }
 
 type Result struct {
-	Now             time.Time
-	WindowStart     time.Time
-	Hits            []SkillHit
-	Gaps            []GapSignal
-	TaskEventGaps   []GapSignal
-	Dormant         []string
-	Deprecated      []string
-	ReportPath      string
-	GapFilePath     string
-	DeepAnalysis    *DeepAnalysisDecision
-	EscalatedGapIDs []string
-	EscalatedSkills []string
-	ResolvedGapIDs  []string
-	ResolvedSkills  []string
-	ResolvedIssues  []int
-	Errors          []string
+	Now                    time.Time
+	WindowStart            time.Time
+	Hits                   []SkillHit
+	Gaps                   []GapSignal
+	TaskEventGaps          []GapSignal
+	Dormant                []string
+	Deprecated             []string
+	ReportPath             string
+	GapFilePath            string
+	DeepAnalysis           *DeepAnalysisDecision
+	EscalatedGapIDs        []string
+	EscalatedSkills        []string
+	ResolvedGapIDs         []string
+	ResolvedSkills         []string
+	ResolvedIssues         []int
+	ResolvedIssueReasons   map[int]string
+	ResolvedReasonCounters map[string]int
+	Errors                 []string
 }
 
 func Run(cfg Config, out io.Writer) (*Result, error) {
@@ -128,6 +131,8 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 		result.ResolvedGapIDs = append([]string(nil), resolution.GapIDs...)
 		result.ResolvedSkills = append([]string(nil), resolution.SkillPaths...)
 		result.ResolvedIssues = append([]int(nil), resolution.IssueNumbers...)
+		result.ResolvedIssueReasons = cloneIssueReasonMap(resolution.IssueCloseReasons)
+		result.ResolvedReasonCounters = cloneReasonCounterMap(resolution.CloseReasonCounters)
 	}
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("深度分析收敛回写失败: %v", err))
@@ -166,7 +171,14 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 			}
 		}
 		if len(result.ResolvedIssues) > 0 || len(result.ResolvedGapIDs) > 0 || len(result.ResolvedSkills) > 0 {
-			_, _ = fmt.Fprintf(out, "sevolver: deep_analysis_resolved issues=%d gaps=%d skills=%d\n", len(result.ResolvedIssues), len(result.ResolvedGapIDs), len(result.ResolvedSkills))
+			_, _ = fmt.Fprintf(
+				out,
+				"sevolver: deep_analysis_resolved issues=%d gaps=%d skills=%d reasons=%s\n",
+				len(result.ResolvedIssues),
+				len(result.ResolvedGapIDs),
+				len(result.ResolvedSkills),
+				formatCloseReasonCounters(result.ResolvedReasonCounters),
+			)
 		}
 		if result.ReportPath != "" {
 			_, _ = fmt.Fprintf(out, "sevolver: report=%s\n", result.ReportPath)
@@ -203,4 +215,42 @@ func mergeGapSignals(groups ...[]GapSignal) []GapSignal {
 	}
 	sortGapSignals(items)
 	return items
+}
+
+func cloneIssueReasonMap(input map[int]string) map[int]string {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[int]string, len(input))
+	for issue, reason := range input {
+		cloned[issue] = reason
+	}
+	return cloned
+}
+
+func cloneReasonCounterMap(input map[string]int) map[string]int {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]int, len(input))
+	for reason, count := range input {
+		cloned[reason] = count
+	}
+	return cloned
+}
+
+func formatCloseReasonCounters(counters map[string]int) string {
+	if len(counters) == 0 {
+		return "-"
+	}
+	reasons := make([]string, 0, len(counters))
+	for reason := range counters {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s=%d", reason, counters[reason]))
+	}
+	return strings.Join(parts, ",")
 }
