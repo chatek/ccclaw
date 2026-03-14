@@ -44,6 +44,8 @@ gap_escalations: []
 - `gap_escalations` 记录 gap 被升级为 deep-analysis issue 后的处理状态
 - `gap_escalations[].status: escalated` 表示该缺口已升级处理中
 - `gap_escalations[].status: converged` 表示关联 deep-analysis issue 已关闭，skill 侧已完成收敛回写
+- `gap_escalations[].close_reason` 记录 deep-analysis issue 关闭原因，供后续判断是已修复、重复问题还是外部收敛
+- `gap_escalations[].issue_number`、`issue_url`、`updated_at`、`gap_ids` 视为 sevolver 可维护字段，人工补充时不得破坏结构
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

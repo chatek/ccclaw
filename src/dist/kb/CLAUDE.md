@@ -23,6 +23,7 @@
 - 月度或阶段性整理时，再把下级 `summary.md` 链接到上一级 `summary.md`
 - 回忆时优先读取根 `summary.md`、年份 `summary.md`、月份 `summary.md`，按需下钻
 - 升级会刷新本文件的受管区块；本机补充请写到保留区块
+- `sevolver` 每日会读取 `journal/`、扫描缺口、生成报告，并可能把 deep-analysis Issue 结果回写到 `skills/`；目录组织必须支持这种渐进式汇总
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->

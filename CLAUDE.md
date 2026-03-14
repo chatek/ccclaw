@@ -23,6 +23,15 @@
 - 安装时任务仓库绑定支持 `remote|local`
 - 升级仅允许无损刷新关键 `kb/**/CLAUDE.md`，不得覆盖用户记忆
 
+## 当前架构基线
+
+- 执行默认走 `daemon`，`tmux` 只作为 debug attach、旧链路兼容与 patrol 补偿手段
+- Claude 输出协议默认走 `stream-json`，运行产物固定包含 `*.stream.jsonl`、`*.event.json` 与兼容 `*.json`
+- 运行态事实统一沉淀到 `state.db + JSONL/hashchain`，`stats/status/journal/sevolver` 共享同一份存储口径
+- `sevolver` 已负责 skill 生命周期维护、gap 聚合、deep-analysis Issue 升级、关闭原因回填与收敛回写
+- `status` 与 `stats` 需要同时保留人类可读输出和 JSON 输出，并显式展示 `sevolver` / `sevolver_deep_analysis` 聚合
+- 调度后端以 `systemd --user` 优先，可降级到受控 `cron` 或 `none`
+
 ## 全局底线
 
 - 未拍板问题先回 Issue 讨论，禁止脑补

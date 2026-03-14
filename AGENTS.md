@@ -13,6 +13,15 @@
 - `ccclaw` 无参数与 `-h|--help` 默认输出帮助，`-V|--version` 输出版本
 - 版本号统一使用 `yy.mm.dd.HHMM`
 
+## 当前架构基线
+
+- 当前阶段以 `phase0.5` 为准，默认执行模式是 `daemon`
+- `tmux` 仅保留 debug attach、旧链路兼容与 patrol 补偿用途，不再作为默认执行内核
+- 执行输出以 `stream-json` 为事实基线，运行态产物统一保留 `*.stream.jsonl`、`*.event.json` 与兼容 `*.json`
+- `stats` 与 `status` 的聚合口径统一由 `src/internal/adapters/storage/` 提供，禁止在 CLI 或调用层重复拼装并行统计逻辑
+- `sevolver` 负责 skill 生命周期维护、gap 聚合、deep-analysis Issue 升级与关闭收敛回写；相关字段变更必须同步 `kb/**/CLAUDE.md`
+- 调度后端以 `systemd --user` 为优先，支持 `cron|none` 降级；安装、升级、排障文档必须同时覆盖三种状态
+
 ## 目录约束
 
 - 根目录只保留项目说明、治理文件、开发文档

@@ -20,6 +20,7 @@
 - 新实验完成后，先补原始记录，再回填主题 `summary.md`
 - 对重复出现的问题，总结成最短复现路径与最小检查清单
 - 当实验结论进入稳定阶段，链接到 `designs/` 或 `skills/` 对应文档
+- 对 `daemon/tmux`、`stream-json`、`status/stats`、`sevolver` 收敛链路的观测，优先沉淀到本目录，便于后续排障复盘直接复用
 <!-- ccclaw:managed:end -->
 
 <!-- ccclaw:user:start -->
