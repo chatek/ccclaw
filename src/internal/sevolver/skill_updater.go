@@ -32,6 +32,7 @@ type skillMeta struct {
 type skillGapEscalation struct {
 	Fingerprint string   `yaml:"fingerprint"`
 	Status      string   `yaml:"status,omitempty"`
+	CloseReason string   `yaml:"close_reason,omitempty"`
 	IssueNumber int      `yaml:"issue_number,omitempty"`
 	IssueURL    string   `yaml:"issue_url,omitempty"`
 	UpdatedAt   string   `yaml:"updated_at,omitempty"`
