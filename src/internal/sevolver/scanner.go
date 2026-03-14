@@ -46,6 +46,7 @@ type GapSignal struct {
 	EscalationIssueNumber int
 	EscalationIssueURL    string
 	EscalationUpdatedAt   string
+	EscalationCloseReason string   // 关闭原因子分类
 }
 
 func ScanJournal(journalRoot string, since time.Time) ([]SkillHit, error) {
