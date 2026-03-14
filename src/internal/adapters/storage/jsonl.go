@@ -42,16 +42,26 @@ func newJSONLStore(varDir string) *JSONLStore {
 }
 
 func (s *JSONLStore) AppendEvent(taskID string, eventType core.EventType, detail string) error {
-	return s.AppendEventAt(taskID, eventType, detail, time.Time{})
+	return s.AppendEventWithMeta(taskID, eventType, detail, EventGapMeta{})
+}
+
+func (s *JSONLStore) AppendEventWithMeta(taskID string, eventType core.EventType, detail string, meta EventGapMeta) error {
+	return s.AppendEventAtWithMeta(taskID, eventType, detail, time.Time{}, meta)
 }
 
 func (s *JSONLStore) AppendEventAt(taskID string, eventType core.EventType, detail string, createdAt time.Time) error {
+	return s.AppendEventAtWithMeta(taskID, eventType, detail, createdAt, EventGapMeta{})
+}
+
+func (s *JSONLStore) AppendEventAtWithMeta(taskID string, eventType core.EventType, detail string, createdAt time.Time, meta EventGapMeta) error {
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
 	}
 	year, week := createdAt.ISOWeek()
 	path := s.eventFile(year, week)
 	lockPath := path + ".lock"
+	inferred := inferEventGapMeta(eventType, detail)
+	resolved := inferred.merge(meta)
 	return withFileLock(lockPath, func() error {
 		lastSeq, lastHash, err := lastJSONLState[EventRecord](path)
 		if err != nil {
@@ -62,12 +72,18 @@ func (s *JSONLStore) AppendEventAt(taskID string, eventType core.EventType, deta
 			prevHash = GenesisHash(year, week)
 		}
 		record := EventRecord{
-			Seq:       lastSeq + 1,
-			TaskID:    taskID,
-			EventType: eventType,
-			Detail:    detail,
-			CreatedAt: createdAt.UTC(),
-			PrevHash:  prevHash,
+			Seq:             lastSeq + 1,
+			TaskID:          taskID,
+			EventType:       eventType,
+			Detail:          detail,
+			GapKeyword:      resolved.GapKeyword,
+			GapScope:        resolved.GapScope,
+			GapSource:       resolved.GapSource,
+			RootCauseHint:   resolved.RootCauseHint,
+			GapAggregatable: resolved.GapAggregatable,
+			GapEscalatable:  resolved.GapEscalatable,
+			CreatedAt:       createdAt.UTC(),
+			PrevHash:        prevHash,
 		}
 		record.Hash, err = ComputeHash(taskID, string(eventType), record.CreatedAt.UTC().Format(timeLayout), detail, prevHash)
 		if err != nil {
@@ -209,7 +225,10 @@ func readJSONL[T any](path string) ([]T, error) {
 	return items, nil
 }
 
-func lastJSONLState[T interface{ GetSeq() int64; GetHash() string }](path string) (int64, string, error) {
+func lastJSONLState[T interface {
+	GetSeq() int64
+	GetHash() string
+}](path string) (int64, string, error) {
 	items, err := readJSONL[T](path)
 	if err != nil {
 		return 0, "", err

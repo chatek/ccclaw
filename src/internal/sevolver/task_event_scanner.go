@@ -48,13 +48,8 @@ func scanTaskEventsForGapsFromStore(store *storage.Store, kbDir string, since ti
 		if day.IsZero() {
 			continue
 		}
-		context := strings.TrimSpace(record.Detail)
-		if context == "" {
-			context = string(record.EventType)
-		} else {
-			context = fmt.Sprintf("%s | %s", record.EventType, context)
-		}
-		source := fmt.Sprintf("task_events/%s/%s#%d", strings.ToLower(string(record.EventType)), record.TaskID, record.Seq)
+		context := buildTaskEventGapContext(record)
+		source := buildTaskEventGapSource(record)
 		gaps = append(gaps, GapSignal{
 			ID:      buildGapID(day, source, 0, keyword, context),
 			Date:    day,
@@ -77,6 +72,12 @@ func isTaskEventGapCandidate(eventType core.EventType) bool {
 }
 
 func matchTaskEventKeyword(record storage.EventRecord, keywords []string) string {
+	if strings.TrimSpace(record.GapKeyword) != "" {
+		if !record.GapAggregatable {
+			return ""
+		}
+		return strings.TrimSpace(record.GapKeyword)
+	}
 	detail := strings.ToLower(strings.TrimSpace(record.Detail))
 	for _, keyword := range keywords {
 		if strings.Contains(detail, strings.ToLower(keyword)) {
@@ -91,4 +92,28 @@ func matchTaskEventKeyword(record storage.EventRecord, keywords []string) string
 	default:
 		return ""
 	}
+}
+
+func buildTaskEventGapContext(record storage.EventRecord) string {
+	parts := []string{string(record.EventType)}
+	rootCause := strings.TrimSpace(record.RootCauseHint)
+	detail := strings.TrimSpace(record.Detail)
+	if rootCause != "" {
+		parts = append(parts, "root_cause="+rootCause)
+	}
+	if detail != "" && detail != rootCause {
+		parts = append(parts, detail)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func buildTaskEventGapSource(record storage.EventRecord) string {
+	if source := strings.TrimSpace(record.GapSource); source != "" {
+		return source
+	}
+	scope := strings.TrimSpace(record.GapScope)
+	if scope == "" {
+		scope = strings.ToLower(string(record.EventType))
+	}
+	return fmt.Sprintf("task_events/%s/%s#%d", scope, record.TaskID, record.Seq)
 }

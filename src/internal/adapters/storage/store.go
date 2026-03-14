@@ -117,13 +117,19 @@ type JournalTaskSummary struct {
 }
 
 type EventRecord struct {
-	Seq       int64          `json:"seq"`
-	TaskID    string         `json:"task_id"`
-	EventType core.EventType `json:"event_type"`
-	Detail    string         `json:"detail"`
-	CreatedAt time.Time      `json:"ts"`
-	PrevHash  string         `json:"prev_hash"`
-	Hash      string         `json:"hash"`
+	Seq             int64          `json:"seq"`
+	TaskID          string         `json:"task_id"`
+	EventType       core.EventType `json:"event_type"`
+	Detail          string         `json:"detail"`
+	GapKeyword      string         `json:"gap_keyword,omitempty"`
+	GapScope        string         `json:"gap_scope,omitempty"`
+	GapSource       string         `json:"gap_source,omitempty"`
+	RootCauseHint   string         `json:"root_cause_hint,omitempty"`
+	GapAggregatable bool           `json:"gap_aggregatable,omitempty"`
+	GapEscalatable  bool           `json:"gap_escalatable,omitempty"`
+	CreatedAt       time.Time      `json:"ts"`
+	PrevHash        string         `json:"prev_hash"`
+	Hash            string         `json:"hash"`
 }
 
 func (r EventRecord) GetSeq() int64 {
@@ -187,6 +193,10 @@ func (s *Store) AppendEvent(taskID string, eventType core.EventType, detail stri
 	return s.jsonl.AppendEvent(taskID, eventType, detail)
 }
 
+func (s *Store) AppendEventStructured(taskID string, eventType core.EventType, detail string, meta EventGapMeta) error {
+	return s.jsonl.AppendEventWithMeta(taskID, eventType, detail, meta)
+}
+
 func (s *Store) GetRepoSlot(targetRepo string) (*RepoSlot, error) {
 	return s.slots.Get(targetRepo)
 }
@@ -205,6 +215,10 @@ func (s *Store) DeleteRepoSlot(targetRepo string) error {
 
 func (s *Store) AppendEventAt(taskID string, eventType core.EventType, detail string, createdAt time.Time) error {
 	return s.jsonl.AppendEventAt(taskID, eventType, detail, createdAt)
+}
+
+func (s *Store) AppendEventAtStructured(taskID string, eventType core.EventType, detail string, createdAt time.Time, meta EventGapMeta) error {
+	return s.jsonl.AppendEventAtWithMeta(taskID, eventType, detail, createdAt, meta)
 }
 
 func (s *Store) RecordTokenUsage(record TokenUsageRecord) error {

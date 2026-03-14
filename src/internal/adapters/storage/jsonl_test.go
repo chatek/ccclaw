@@ -16,6 +16,9 @@ func TestJSONLStoreAppendsWeeklyRecords(t *testing.T) {
 	if err := store.AppendEventAt("task-1", core.EventCreated, "{}", time.Date(2026, 3, 12, 10, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.AppendEventAt("task-1", core.EventFailed, "执行器退出码=1", time.Date(2026, 3, 12, 10, 0, 30, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.RecordTokenUsage(TokenUsageRecord{
 		TaskID:     "task-1",
 		SessionID:  "sess-1",
@@ -30,11 +33,14 @@ func TestJSONLStoreAppendsWeeklyRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 {
+	if len(events) != 2 {
 		t.Fatalf("unexpected event count: %d", len(events))
 	}
 	if events[0].Seq != 1 || events[0].PrevHash != GenesisHash(2026, 11) || events[0].Hash == "" {
 		t.Fatalf("unexpected event record: %#v", events[0])
+	}
+	if events[1].GapKeyword != "失败" || !events[1].GapAggregatable || !events[1].GapEscalatable {
+		t.Fatalf("unexpected structured event metadata: %#v", events[1])
 	}
 	tokens, err := store.jsonl.ReadTokens()
 	if err != nil {
