@@ -245,6 +245,63 @@ func TestGapSignalRenderAndParseCloseReason(t *testing.T) {
 	}
 }
 
+func TestApplySkillGapEscalationResolutionWritesCloseReason(t *testing.T) {
+	kbDir := t.TempDir()
+	now := time.Date(2026, 3, 13, 0, 0, 0, 0, time.Local)
+	skillPath := filepath.Join(kbDir, "skills", "L1", "demo", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillPath, []byte(`---
+name: demo-skill
+description: test
+keywords: [demo]
+status: active
+gap_signals:
+  - gap-20260313-dup
+gap_escalations:
+  - fingerprint: sg-dup
+    status: escalated
+    issue_number: 99
+    updated_at: "2026-03-12"
+    gap_ids:
+      - gap-20260313-dup
+---
+content
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := skillGapEscalation{
+		Fingerprint: "sg-dup",
+		Status:      gapEscalationStatusConverged,
+		CloseReason: closeReasonDuplicate,
+		IssueNumber: 99,
+		GapIDs:      []string{"gap-20260313-dup"},
+		UpdatedAt:   now.Format("2006-01-02"),
+	}
+	changed, err := ApplySkillGapEscalationResolution(skillPath, []skillGapEscalation{target}, now)
+	if err != nil {
+		t.Fatalf("ApplySkillGapEscalationResolution failed: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+	payload, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, want := range []string{
+		"status: converged",
+		"close_reason: duplicate",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in skill frontmatter:\n%s", want, text)
+		}
+	}
+}
+
 func TestInferIssueCloseReasonPriorityBodyLabelComment(t *testing.T) {
 	issue := &ghadapter.Issue{
 		Repo:   "41490/ccclaw",

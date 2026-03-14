@@ -28,8 +28,9 @@ type Issue struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
-	State     string    `json:"state"`
-	Labels    []Label   `json:"labels"`
+	State       string    `json:"state"`
+	StateReason string    `json:"state_reason,omitempty"`
+	Labels      []Label   `json:"labels"`
 	User      User      `json:"user"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
