@@ -1503,6 +1503,7 @@ env_file = "$ENV_FILE"
 provider = "claude-code"
 command = ["$CLAUDE_WRAPPER"]
 timeout = "30m"
+mode = "tmux"
 
 # 调度策略配置：
 # - mode: 安装时请求的调度模式 auto|systemd|cron|none
@@ -1547,6 +1548,7 @@ reject_words = ["reject", "no", "cancel", "nil", "null", "拒绝", "000"]
 # repo = "owner/repo"
 # local_path = "/opt/src/3claw/owner/repo"
 # kb_path = "$KB_DIR"
+# executor_mode = "tmux" # 可选: tmux|daemon，留空继承 [executor].mode
 # disabled = false
 CFG
 }

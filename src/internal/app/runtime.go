@@ -192,18 +192,26 @@ func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 
 func (rt *Runtime) Patrol(ctx context.Context, out io.Writer) error {
 	defer rt.store.Close()
-	execEngine, err := rt.newExecutor()
+	tmuxEngine, err := rt.newExecutorForMode(config.ExecutorModeTMux)
 	if err != nil {
-		rt.logError("patrol", "初始化执行器失败", "error", err)
+		rt.logError("patrol", "初始化 tmux 执行器失败", "error", err)
 		return err
 	}
-	manager := execEngine.TMux()
-	if manager == nil {
+	manager := tmuxEngine.TMux()
+	if manager != nil {
+		if err := rt.patrolRepoSlots(ctx, tmuxEngine, manager, out); err != nil {
+			return err
+		}
+	} else {
 		rt.logInfo("patrol", "当前未启用 tmux，会话巡查已跳过")
 		_, _ = fmt.Fprintln(out, "当前未启用 tmux，会话巡查已跳过")
-		return nil
 	}
-	return rt.patrolRepoSlots(ctx, execEngine, manager, out)
+	daemonEngine, err := rt.newExecutorForMode(config.ExecutorModeDaemon)
+	if err != nil {
+		rt.logError("patrol", "初始化 daemon 执行器失败", "error", err)
+		return err
+	}
+	return rt.patrolDaemonRepoSlots(ctx, daemonEngine, out)
 }
 
 func (rt *Runtime) Stats(out io.Writer) error {
@@ -1423,12 +1431,25 @@ func (rt *Runtime) memoryIndex(target *config.TargetConfig) *memory.Index {
 }
 
 func (rt *Runtime) newExecutor() (*executor.Executor, error) {
+	return rt.newExecutorForMode(rt.cfg.ExecutorMode())
+}
+
+func (rt *Runtime) newExecutorForRepo(repo string) (*executor.Executor, config.ExecutorMode, error) {
+	mode := rt.cfg.ExecutorModeForRepo(repo)
+	execEngine, err := rt.newExecutorForMode(mode)
+	if err != nil {
+		return nil, mode, err
+	}
+	return execEngine, mode, nil
+}
+
+func (rt *Runtime) newExecutorForMode(mode config.ExecutorMode) (*executor.Executor, error) {
 	timeout, err := time.ParseDuration(rt.cfg.Executor.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("解析执行超时失败: %w", err)
 	}
 	var manager tmux.Manager
-	if tmux.Available("tmux") {
+	if mode == config.ExecutorModeTMux && tmux.Available("tmux") {
 		tmuxManager, err := tmux.New("tmux")
 		if err != nil {
 			return nil, err

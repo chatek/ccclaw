@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -284,6 +285,9 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 	if err := e.writeRunMetadata(artifacts.MetaFile, meta); err != nil {
 		return nil, err
 	}
+	if normalizeOutputFormat(meta.OutputFormat) == outputFormatStreamJSON {
+		return e.runSyncStreamJSON(ctx, repoPath, taskID, opts, artifacts, meta)
+	}
 
 	logHandle, err := os.Create(artifacts.LogFile)
 	if err != nil {
@@ -362,6 +366,135 @@ func (e *Executor) runSync(parent context.Context, repoPath, taskID string, opts
 		}
 		fallback := &Result{
 			Output:   strings.TrimSpace(string(joinDiagnosticPayloads(stdout.Bytes(), stderr.Bytes()))),
+			ExitCode: exitCode,
+			Duration: duration,
+		}
+		e.applyArtifactMetadata(fallback, artifacts, meta)
+		return fallback, fmt.Errorf("解析 Claude JSON 输出失败: %w", parseErr)
+	}
+	result.ExitCode = exitCode
+	return result, nil
+}
+
+func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID string, opts RunOptions, artifacts Result, meta runMetadata) (*Result, error) {
+	logHandle, err := os.Create(artifacts.LogFile)
+	if err != nil {
+		return nil, fmt.Errorf("创建日志文件失败: %w", err)
+	}
+	defer logHandle.Close()
+
+	diagnosticHandle, err := os.OpenFile(artifacts.DiagnosticFile, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("打开诊断文件失败: %w", err)
+	}
+	defer diagnosticHandle.Close()
+
+	args := e.commandArgs(opts)
+	cmd := exec.CommandContext(ctx, e.command[0], args...)
+	cmd.Dir = repoPath
+	cmd.Env = append(cmd.Environ(), mapToEnv(e.runtimeEnv(taskID, meta.RTKMarkerFile))...)
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stderr 管道失败: %w", err)
+	}
+
+	start := time.Now()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("启动执行器失败: %w", err)
+	}
+
+	var stderr bytes.Buffer
+	stderrDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(io.MultiWriter(logHandle, diagnosticHandle, &stderr), stderrPipe)
+		stderrDone <- copyErr
+	}()
+
+	var rawStream bytes.Buffer
+	events := make([]StreamEvent, 0, 32)
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	var decodeErr error
+	lineNo := 0
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		lineNo++
+		rawStream.Write(line)
+		rawStream.WriteByte('\n')
+		_, _ = logHandle.Write(line)
+		_, _ = logHandle.Write([]byte{'\n'})
+		if decodeErr != nil || len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		event, err := parseStreamLine(lineNo, line)
+		if err != nil {
+			decodeErr = err
+			continue
+		}
+		events = append(events, event)
+	}
+	if scanErr := scanner.Err(); scanErr != nil && decodeErr == nil {
+		decodeErr = scanErr
+	}
+	if stderrErr := <-stderrDone; stderrErr != nil && decodeErr == nil {
+		decodeErr = stderrErr
+	}
+	runErr := cmd.Wait()
+	duration := time.Since(start)
+	exitCode := 0
+	if runErr != nil {
+		exitCode = 1
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	streamRaw := rawStream.Bytes()
+	snapshot, streamErr := e.PersistStreamEventSnapshot(taskID, streamRaw)
+	resultPayload, compatErr := marshalCompatibleResultFromStreamSnapshot(snapshot, duration)
+	if compatErr != nil {
+		resultPayload = streamRaw
+	}
+
+	result, parseErr := parseClaudeResult(resultPayload, duration, artifacts.LogFile, artifacts.ResultFile)
+	if parseErr != nil {
+		if decodeErr != nil {
+			parseErr = fmt.Errorf("stream-json 解码失败: %w", decodeErr)
+		} else if streamErr != nil {
+			parseErr = fmt.Errorf("stream-json 聚合失败: %w", streamErr)
+		} else if compatErr != nil {
+			parseErr = fmt.Errorf("stream-json 兼容结果转换失败: %w", compatErr)
+		}
+	}
+	if persistErr := e.persistStructuredArtifacts(artifacts, resultPayload, streamRaw, stderr.Bytes(), parseErr); persistErr != nil {
+		return nil, persistErr
+	}
+	if result != nil {
+		e.applyArtifactMetadata(result, artifacts, meta)
+	}
+	if runErr != nil {
+		if result == nil {
+			result = &Result{Output: strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes()))), Duration: duration}
+			e.applyArtifactMetadata(result, artifacts, meta)
+		}
+		result.ExitCode = exitCode
+		if parseErr != nil {
+			return result, fmt.Errorf("执行器运行失败: %w；结果校验失败: %v", runErr, parseErr)
+		}
+		return result, fmt.Errorf("执行器运行失败: %w", runErr)
+	}
+	if parseErr != nil {
+		if result != nil {
+			result.ExitCode = exitCode
+			return result, parseErr
+		}
+		fallback := &Result{
+			Output:   strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes()))),
 			ExitCode: exitCode,
 			Duration: duration,
 		}

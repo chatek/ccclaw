@@ -33,6 +33,7 @@ const (
 type RepoSlot struct {
 	TargetRepo          string            `json:"target_repo"`
 	TaskID              string            `json:"task_id"`
+	ExecutorMode        string            `json:"executor_mode,omitempty"`
 	SessionName         string            `json:"session_name,omitempty"`
 	SessionID           string            `json:"session_id,omitempty"`
 	Phase               RepoSlotPhase     `json:"phase"`

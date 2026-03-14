@@ -2411,3 +2411,137 @@ func TestBuildPromptUsesSevolverDeepAnalysisTemplate(t *testing.T) {
 		}
 	}
 }
+
+func TestNewExecutorForRepoRespectsModeOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	tmuxScript := filepath.Join(fakeBin, "tmux")
+	if err := os.WriteFile(tmuxScript, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入 fake tmux 失败: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir: tmpDir,
+				LogDir: filepath.Join(tmpDir, "log"),
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{"/bin/sh"},
+				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
+			},
+			Targets: []config.TargetConfig{
+				{Repo: "41490/ccclaw", LocalPath: tmpDir, ExecutorMode: string(config.ExecutorModeDaemon)},
+				{Repo: "41490/other", LocalPath: tmpDir},
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+	}
+
+	daemonExec, daemonMode, err := rt.newExecutorForRepo("41490/ccclaw")
+	if err != nil {
+		t.Fatalf("创建 daemon 执行器失败: %v", err)
+	}
+	if daemonMode != config.ExecutorModeDaemon || daemonExec.TMux() != nil {
+		t.Fatalf("expected daemon executor without tmux, mode=%s engine=%#v", daemonMode, daemonExec)
+	}
+
+	tmuxExec, tmuxMode, err := rt.newExecutorForRepo("41490/other")
+	if err != nil {
+		t.Fatalf("创建 tmux 执行器失败: %v", err)
+	}
+	if tmuxMode != config.ExecutorModeTMux || tmuxExec.TMux() == nil {
+		t.Fatalf("expected tmux executor, mode=%s engine=%#v", tmuxMode, tmuxExec)
+	}
+}
+
+func TestRunIngestCycleDaemonModeDoesNotDependOnTMuxPatrol(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+	stateDB := filepath.Join(tmpDir, "state.db")
+	store, err := storage.Open(stateDB)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         "48#body",
+		IdempotencyKey: "48#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    48,
+		IssueTitle:     "daemon mode",
+		IssueBody:      "phase2 daemon execution",
+		IssueAuthor:    "ZoomQuiet",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateNew,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	targetPath := filepath.Join(tmpDir, "target")
+	if err := os.MkdirAll(targetPath, 0o755); err != nil {
+		t.Fatalf("创建 target 目录失败: %v", err)
+	}
+	execScript := filepath.Join(tmpDir, "fake-stream.sh")
+	stream := `#!/bin/sh
+printf '%s\n' '{"event":"started","timestamp":"2026-03-13T20:00:00Z","session_id":"sess-48-a","message":"start","step":"execute"}'
+printf '%s\n' '{"event":"result","timestamp":"2026-03-13T20:00:02Z","session_id":"sess-48-a","result":"daemon done","total_cost_usd":0.21,"usage":{"input_tokens":30,"output_tokens":12}}'
+`
+	if err := os.WriteFile(execScript, []byte(stream), 0o755); err != nil {
+		t.Fatalf("写入执行脚本失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir:  filepath.Join(tmpDir, "app"),
+				LogDir:  filepath.Join(tmpDir, "log"),
+				StateDB: stateDB,
+				KBDir:   "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{execScript},
+				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
+			},
+			Targets: []config.TargetConfig{{
+				Repo:         "41490/ccclaw",
+				LocalPath:    targetPath,
+				KBPath:       "/opt/ccclaw/kb",
+				ExecutorMode: string(config.ExecutorModeDaemon),
+			}},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+	rt.syncRepo = func(repoPath, message string, paths []string, maxRetry int) error { return nil }
+
+	if err := rt.runIngestCycle(context.Background(), nil, false); err != nil {
+		t.Fatalf("执行 ingest cycle 失败: %v", err)
+	}
+	loaded, err := store.GetByIdempotency(task.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateDone {
+		t.Fatalf("预期 daemon 模式任务同轮 DONE，实际为 %#v", loaded)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取 repo slot 失败: %v", err)
+	}
+	if slot != nil {
+		t.Fatalf("预期 daemon 模式无需 tmux 巡查槽位，实际为 %#v", slot)
+	}
+}

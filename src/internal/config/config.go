@@ -35,6 +35,13 @@ type Config struct {
 	Targets       []TargetConfig  `mapstructure:"targets" toml:"targets"`
 }
 
+type ExecutorMode string
+
+const (
+	ExecutorModeTMux   ExecutorMode = "tmux"
+	ExecutorModeDaemon ExecutorMode = "daemon"
+)
+
 type GitHubConfig struct {
 	ControlRepo string `mapstructure:"control_repo" toml:"control_repo"`
 	IssueLabel  string `mapstructure:"issue_label" toml:"issue_label"`
@@ -55,6 +62,7 @@ type ExecutorConfig struct {
 	Binary   string   `mapstructure:"binary" toml:"binary"`
 	Command  []string `mapstructure:"command" toml:"command"`
 	Timeout  string   `mapstructure:"timeout" toml:"timeout"`
+	Mode     string   `mapstructure:"mode" toml:"mode"`
 }
 
 type SchedulerConfig struct {
@@ -87,10 +95,11 @@ type ApprovalConfig struct {
 }
 
 type TargetConfig struct {
-	Repo      string `mapstructure:"repo" toml:"repo"`
-	LocalPath string `mapstructure:"local_path" toml:"local_path"`
-	KBPath    string `mapstructure:"kb_path" toml:"kb_path"`
-	Disabled  bool   `mapstructure:"disabled" toml:"disabled,omitempty"`
+	Repo         string `mapstructure:"repo" toml:"repo"`
+	LocalPath    string `mapstructure:"local_path" toml:"local_path"`
+	KBPath       string `mapstructure:"kb_path" toml:"kb_path"`
+	ExecutorMode string `mapstructure:"executor_mode" toml:"executor_mode,omitempty"`
+	Disabled     bool   `mapstructure:"disabled" toml:"disabled,omitempty"`
 }
 
 type Secrets struct {
@@ -117,6 +126,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.provider", "claude-code")
 	v.SetDefault("executor.command", []string{"claude"})
 	v.SetDefault("executor.timeout", "30m")
+	v.SetDefault("executor.mode", string(ExecutorModeTMux))
 	v.SetDefault("scheduler.mode", "none")
 	v.SetDefault("scheduler.systemd_user_dir", "~/.config/systemd/user")
 	v.SetDefault("scheduler.calendar_timezone", "Asia/Shanghai")
@@ -177,11 +187,16 @@ func (cfg *Config) NormalizePaths() {
 	for idx := range cfg.Targets {
 		cfg.Targets[idx].LocalPath = ExpandPath(cfg.Targets[idx].LocalPath)
 		cfg.Targets[idx].KBPath = ExpandPath(cfg.Targets[idx].KBPath)
+		cfg.Targets[idx].ExecutorMode = strings.ToLower(strings.TrimSpace(cfg.Targets[idx].ExecutorMode))
 	}
 	for idx, arg := range cfg.Executor.Command {
 		cfg.Executor.Command[idx] = ExpandPath(arg)
 	}
 	cfg.Executor.Binary = ExpandPath(cfg.Executor.Binary)
+	cfg.Executor.Mode = strings.ToLower(strings.TrimSpace(cfg.Executor.Mode))
+	if cfg.Executor.Mode == "" {
+		cfg.Executor.Mode = string(ExecutorModeTMux)
+	}
 }
 
 func (cfg *Config) Validate() error {
@@ -208,6 +223,9 @@ func (cfg *Config) Validate() error {
 	}
 	if len(cfg.Executor.Command) == 0 && cfg.Executor.Binary == "" {
 		return errors.New("executor.command 或 executor.binary 至少需要一个")
+	}
+	if normalizeExecutorMode(cfg.Executor.Mode, "") == "" && strings.TrimSpace(cfg.Executor.Mode) != "" {
+		return fmt.Errorf("executor.mode 取值无效: %s", cfg.Executor.Mode)
 	}
 	switch cfg.Scheduler.Mode {
 	case "", "auto", "systemd", "cron", "none":
@@ -253,6 +271,9 @@ func (cfg *Config) Validate() error {
 		if target.Repo == "" || target.LocalPath == "" {
 			return errors.New("targets.repo 与 targets.local_path 均不能为空")
 		}
+		if normalizeExecutorMode(target.ExecutorMode, "") == "" && strings.TrimSpace(target.ExecutorMode) != "" {
+			return fmt.Errorf("targets.executor_mode 取值无效: repo=%s mode=%s", target.Repo, target.ExecutorMode)
+		}
 		if _, exists := seenTargets[target.Repo]; exists {
 			return fmt.Errorf("targets.repo 不允许重复: %s", target.Repo)
 		}
@@ -277,6 +298,9 @@ func (cfg *Config) TargetByRepo(repo string) (*TargetConfig, error) {
 			if copy.KBPath == "" {
 				copy.KBPath = cfg.Paths.KBDir
 			}
+			if strings.TrimSpace(copy.ExecutorMode) == "" {
+				copy.ExecutorMode = string(cfg.ExecutorMode())
+			}
 			return &copy, nil
 		}
 	}
@@ -291,6 +315,9 @@ func (cfg *Config) EnabledTargets() []TargetConfig {
 		}
 		if target.KBPath == "" {
 			target.KBPath = cfg.Paths.KBDir
+		}
+		if strings.TrimSpace(target.ExecutorMode) == "" {
+			target.ExecutorMode = string(cfg.ExecutorMode())
 		}
 		targets = append(targets, target)
 	}
@@ -308,10 +335,31 @@ func (cfg *Config) EnabledTargetByRepo(repo string) (*TargetConfig, error) {
 	return target, nil
 }
 
+func (cfg *Config) ExecutorMode() ExecutorMode {
+	if cfg == nil {
+		return ExecutorModeTMux
+	}
+	return normalizeExecutorMode(cfg.Executor.Mode, ExecutorModeTMux)
+}
+
+func (cfg *Config) ExecutorModeForRepo(repo string) ExecutorMode {
+	repo = strings.TrimSpace(repo)
+	if cfg == nil || repo == "" {
+		return ExecutorModeTMux
+	}
+	if target, err := cfg.TargetByRepo(repo); err == nil {
+		if mode := normalizeExecutorMode(target.ExecutorMode, ""); mode != "" {
+			return mode
+		}
+	}
+	return cfg.ExecutorMode()
+}
+
 func (cfg *Config) UpsertTarget(target TargetConfig, makeDefault bool) error {
 	target.Repo = strings.TrimSpace(target.Repo)
 	target.LocalPath = ExpandPath(target.LocalPath)
 	target.KBPath = ExpandPath(target.KBPath)
+	target.ExecutorMode = string(normalizeExecutorMode(target.ExecutorMode, ""))
 	if target.Repo == "" || target.LocalPath == "" {
 		return errors.New("repo 与 local_path 均不能为空")
 	}
@@ -324,6 +372,7 @@ func (cfg *Config) UpsertTarget(target TargetConfig, makeDefault bool) error {
 		}
 		cfg.Targets[idx].LocalPath = target.LocalPath
 		cfg.Targets[idx].KBPath = target.KBPath
+		cfg.Targets[idx].ExecutorMode = target.ExecutorMode
 		cfg.Targets[idx].Disabled = target.Disabled
 		if makeDefault {
 			cfg.DefaultTarget = target.Repo
@@ -723,6 +772,17 @@ func normalizeApprovalWords(words []string) []string {
 	return normalized
 }
 
+func normalizeExecutorMode(raw string, fallback ExecutorMode) ExecutorMode {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case string(ExecutorModeTMux):
+		return ExecutorModeTMux
+	case string(ExecutorModeDaemon):
+		return ExecutorModeDaemon
+	default:
+		return fallback
+	}
+}
+
 func approvalSectionContainsLegacyCommand(content string) bool {
 	_, changed, err := rewriteApprovalSection(content)
 	return err == nil && changed
@@ -938,7 +998,8 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString(fmt.Sprintf("provider = %q\n", cfg.Executor.Provider))
 	buf.WriteString(fmt.Sprintf("binary = %q\n", cfg.Executor.Binary))
 	buf.WriteString(fmt.Sprintf("command = %s\n", tomlArrayLiteral(cfg.Executor.Command)))
-	buf.WriteString(fmt.Sprintf("timeout = %q\n\n", cfg.Executor.Timeout))
+	buf.WriteString(fmt.Sprintf("timeout = %q\n", cfg.Executor.Timeout))
+	buf.WriteString(fmt.Sprintf("mode = %q\n\n", cfg.ExecutorMode()))
 
 	buf.WriteString(strings.Join(renderSchedulerSection(cfg.Scheduler), "\n"))
 	buf.WriteString("\n")
@@ -956,6 +1017,7 @@ func renderAnnotatedConfig(cfg *Config) string {
 		buf.WriteString("# repo = \"owner/repo\"\n")
 		buf.WriteString("# local_path = \"/opt/src/3claw/owner/repo\"\n")
 		buf.WriteString(fmt.Sprintf("# kb_path = %q\n", cfg.Paths.KBDir))
+		buf.WriteString("# executor_mode = \"tmux\" # 可选: tmux|daemon，留空继承 [executor].mode\n")
 		buf.WriteString("# disabled = false\n")
 		return buf.String()
 	}
@@ -965,6 +1027,9 @@ func renderAnnotatedConfig(cfg *Config) string {
 		buf.WriteString(fmt.Sprintf("repo = %q\n", target.Repo))
 		buf.WriteString(fmt.Sprintf("local_path = %q\n", target.LocalPath))
 		buf.WriteString(fmt.Sprintf("kb_path = %q\n", target.KBPath))
+		if strings.TrimSpace(target.ExecutorMode) != "" {
+			buf.WriteString(fmt.Sprintf("executor_mode = %q\n", target.ExecutorMode))
+		}
 		if target.Disabled {
 			buf.WriteString("disabled = true\n")
 		}

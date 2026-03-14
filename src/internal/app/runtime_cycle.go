@@ -33,21 +33,17 @@ const (
 )
 
 func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
-	execEngine, err := rt.newExecutor()
-	if err != nil {
-		return err
-	}
-	advanced, err := rt.advanceRepoSlots(ctx, execEngine)
+	advanced, err := rt.advanceRepoSlots(ctx)
 	if err != nil {
 		return err
 	}
 	if dispatchOnly {
-		return rt.dispatchNextByRepo(ctx, execEngine, out, advanced)
+		return rt.dispatchNextByRepo(ctx, out, advanced)
 	}
-	return rt.dispatchNextByRepo(ctx, execEngine, out, advanced)
+	return rt.dispatchNextByRepo(ctx, out, advanced)
 }
 
-func (rt *Runtime) advanceRepoSlots(ctx context.Context, execEngine *executor.Executor) (map[string]struct{}, error) {
+func (rt *Runtime) advanceRepoSlots(ctx context.Context) (map[string]struct{}, error) {
 	if err := rt.hydrateRepoSlots(); err != nil {
 		return nil, err
 	}
@@ -60,8 +56,17 @@ func (rt *Runtime) advanceRepoSlots(ctx context.Context, execEngine *executor.Ex
 		if slot == nil {
 			continue
 		}
+		mode := config.ExecutorMode(strings.TrimSpace(slot.ExecutorMode))
+		if mode == "" {
+			mode = rt.cfg.ExecutorModeForRepo(slot.TargetRepo)
+			slot.ExecutorMode = string(mode)
+		}
+		execEngine, err := rt.newExecutorForMode(mode)
+		if err != nil {
+			return nil, err
+		}
 		advanced[slot.TargetRepo] = struct{}{}
-		if err := rt.advanceRepoSlot(ctx, execEngine, slot); err != nil {
+		if err := rt.advanceRepoSlot(ctx, execEngine, slot, mode); err != nil {
 			return nil, err
 		}
 	}
@@ -85,6 +90,12 @@ func (rt *Runtime) hydrateRepoSlots() error {
 			return err
 		}
 		if slot != nil && strings.TrimSpace(slot.TaskID) != "" {
+			if strings.TrimSpace(slot.ExecutorMode) == "" {
+				slot.ExecutorMode = string(rt.cfg.ExecutorModeForRepo(task.TargetRepo))
+				if err := rt.store.UpsertRepoSlot(slot); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		phase := storage.RepoSlotPhaseRunning
@@ -94,6 +105,7 @@ func (rt *Runtime) hydrateRepoSlots() error {
 		if err := rt.store.UpsertRepoSlot(&storage.RepoSlot{
 			TargetRepo:    task.TargetRepo,
 			TaskID:        task.TaskID,
+			ExecutorMode:  string(rt.cfg.ExecutorModeForRepo(task.TargetRepo)),
 			SessionName:   executor.SessionName(task.TaskID),
 			Phase:         phase,
 			CurrentStep:   defaultSlotStepForTask(task.State),
@@ -106,13 +118,32 @@ func (rt *Runtime) hydrateRepoSlots() error {
 	return nil
 }
 
-func (rt *Runtime) advanceRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot) error {
+func (rt *Runtime) advanceRepoSlot(ctx context.Context, execEngine *executor.Executor, slot *storage.RepoSlot, mode config.ExecutorMode) error {
 	if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
 		return nil
+	}
+	if mode == "" {
+		mode = rt.cfg.ExecutorModeForRepo(slot.TargetRepo)
 	}
 	rt.observeStreamEventContract(execEngine, slot)
 	if slot.Phase == storage.RepoSlotPhaseFinalizeFailed && !slot.NextRetryAt.IsZero() && time.Now().UTC().Before(slot.NextRetryAt) {
 		return nil
+	}
+	if mode == config.ExecutorModeDaemon {
+		switch slot.Phase {
+		case storage.RepoSlotPhaseRunning, storage.RepoSlotPhaseRestarting:
+			advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
+			slot.CompletedAt = time.Now().UTC()
+			slot.LastProbeAt = time.Now().UTC()
+			if err := rt.store.UpsertRepoSlot(slot); err != nil {
+				return err
+			}
+			return rt.finalizeRepoSlot(ctx, execEngine, slot)
+		case storage.RepoSlotPhasePaneDead, storage.RepoSlotPhaseFinalizing, storage.RepoSlotPhaseFinalizeFailed:
+			return rt.finalizeRepoSlot(ctx, execEngine, slot)
+		default:
+			return nil
+		}
 	}
 	switch slot.Phase {
 	case storage.RepoSlotPhaseRunning, storage.RepoSlotPhaseRestarting:
@@ -151,7 +182,7 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 	return nil
 }
 
-func (rt *Runtime) dispatchNextByRepo(ctx context.Context, execEngine *executor.Executor, out io.Writer, skipRepos map[string]struct{}) error {
+func (rt *Runtime) dispatchNextByRepo(ctx context.Context, out io.Writer, skipRepos map[string]struct{}) error {
 	grouped, err := rt.store.ListRunnableByTarget(1)
 	if err != nil {
 		return err
@@ -174,7 +205,7 @@ func (rt *Runtime) dispatchNextByRepo(ctx context.Context, execEngine *executor.
 		if len(queue) == 0 {
 			continue
 		}
-		if err := rt.dispatchTask(ctx, execEngine, queue[0], target); err != nil {
+		if err := rt.dispatchTask(ctx, queue[0], target); err != nil {
 			return err
 		}
 		dispatched++
@@ -189,9 +220,13 @@ func (rt *Runtime) dispatchNextByRepo(ctx context.Context, execEngine *executor.
 	return nil
 }
 
-func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Executor, task *core.Task, target *config.TargetConfig) error {
+func (rt *Runtime) dispatchTask(ctx context.Context, task *core.Task, target *config.TargetConfig) error {
 	if task == nil || target == nil {
 		return nil
+	}
+	execEngine, mode, err := rt.newExecutorForRepo(target.Repo)
+	if err != nil {
+		return err
 	}
 	if err := rt.ensureClaudeManagedHooks(target.LocalPath); err != nil {
 		return err
@@ -220,6 +255,7 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 		slot := &storage.RepoSlot{
 			TargetRepo:    fresh.TargetRepo,
 			TaskID:        fresh.TaskID,
+			ExecutorMode:  string(mode),
 			SessionName:   result.SessionName,
 			Phase:         storage.RepoSlotPhaseRunning,
 			CurrentStep:   "execute",
@@ -239,6 +275,7 @@ func (rt *Runtime) dispatchTask(ctx context.Context, execEngine *executor.Execut
 	slot := &storage.RepoSlot{
 		TargetRepo:    fresh.TargetRepo,
 		TaskID:        fresh.TaskID,
+		ExecutorMode:  string(mode),
 		SessionName:   executor.SessionName(fresh.TaskID),
 		Phase:         storage.RepoSlotPhasePaneDead,
 		CurrentStep:   "load_result",
@@ -420,6 +457,7 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 		slot = &storage.RepoSlot{
 			TargetRepo:    updated.TargetRepo,
 			TaskID:        updated.TaskID,
+			ExecutorMode:  string(rt.cfg.ExecutorModeForRepo(updated.TargetRepo)),
 			Phase:         storage.RepoSlotPhaseFinalizing,
 			CurrentStep:   "sync_target",
 			LastAdvanceAt: time.Now().UTC(),
@@ -651,6 +689,9 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 		if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
 			continue
 		}
+		if mode := config.ExecutorMode(strings.TrimSpace(slot.ExecutorMode)); mode == config.ExecutorModeDaemon || (mode == "" && rt.cfg.ExecutorModeForRepo(slot.TargetRepo) == config.ExecutorModeDaemon) {
+			continue
+		}
 		if slot.Phase != storage.RepoSlotPhaseRunning && slot.Phase != storage.RepoSlotPhaseRestarting {
 			if slot.Phase == storage.RepoSlotPhasePaneDead {
 				paneDead++
@@ -721,6 +762,41 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 	}
 	if out != nil {
 		_, _ = fmt.Fprintf(out, "巡查完成: running=%d restarting=%d pane_dead=%d\n", running, restarting, paneDead)
+	}
+	return nil
+}
+
+func (rt *Runtime) patrolDaemonRepoSlots(ctx context.Context, execEngine *executor.Executor, out io.Writer) error {
+	if err := rt.hydrateRepoSlots(); err != nil {
+		return err
+	}
+	slots, err := rt.store.ListRepoSlots()
+	if err != nil {
+		return err
+	}
+	checked := 0
+	compensated := 0
+	for _, slot := range slots {
+		if slot == nil || strings.TrimSpace(slot.TargetRepo) == "" {
+			continue
+		}
+		mode := config.ExecutorMode(strings.TrimSpace(slot.ExecutorMode))
+		if mode == "" {
+			mode = rt.cfg.ExecutorModeForRepo(slot.TargetRepo)
+		}
+		if mode != config.ExecutorModeDaemon {
+			continue
+		}
+		checked++
+		if slot.Phase == storage.RepoSlotPhaseFinalizeFailed && !slot.NextRetryAt.IsZero() && time.Now().UTC().After(slot.NextRetryAt) {
+			if err := rt.advanceRepoSlot(ctx, execEngine, slot, mode); err != nil {
+				return err
+			}
+			compensated++
+		}
+	}
+	if out != nil {
+		_, _ = fmt.Fprintf(out, "daemon 健康检查: checked=%d compensated=%d\n", checked, compensated)
 	}
 	return nil
 }

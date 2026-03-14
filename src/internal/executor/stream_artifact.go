@@ -110,6 +110,9 @@ func marshalCompatibleResultFromStreamSnapshot(snapshot *StreamEventSnapshot, du
 	if streamSnapshotHasError(snapshot) {
 		payload.IsError = true
 		payload.Subtype = "error_stream"
+		if subtype := strings.TrimSpace(snapshot.Error); strings.HasPrefix(subtype, "error_") {
+			payload.Subtype = subtype
+		}
 		if strings.TrimSpace(payload.Result) == "" {
 			payload.Result = "stream-json 报告执行失败"
 		}

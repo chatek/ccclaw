@@ -122,6 +122,57 @@ minimum_permission = "maintain"
 	}
 }
 
+func TestExecutorModeForRepoSupportsGlobalAndOverride(t *testing.T) {
+	cfg := &Config{
+		Executor: ExecutorConfig{Mode: "tmux"},
+		Targets: []TargetConfig{
+			{Repo: "41490/ccclaw", LocalPath: "/opt/src/ccclaw", ExecutorMode: "daemon"},
+			{Repo: "41490/other", LocalPath: "/opt/src/other"},
+		},
+	}
+	cfg.NormalizePaths()
+	if got := cfg.ExecutorMode(); got != ExecutorModeTMux {
+		t.Fatalf("unexpected executor mode: %s", got)
+	}
+	if got := cfg.ExecutorModeForRepo("41490/ccclaw"); got != ExecutorModeDaemon {
+		t.Fatalf("expected daemon override, got %s", got)
+	}
+	if got := cfg.ExecutorModeForRepo("41490/other"); got != ExecutorModeTMux {
+		t.Fatalf("expected tmux fallback, got %s", got)
+	}
+}
+
+func TestLoadRejectsInvalidExecutorMode(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+mode = "invalid-mode"
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected invalid executor.mode error")
+	}
+}
+
 func TestLoadConfigDefaultsSchedulerLogArchiveDirFromLogDir(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

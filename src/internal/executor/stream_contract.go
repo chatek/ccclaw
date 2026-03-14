@@ -243,11 +243,17 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 	}
 	message := readStringField(payload, "message", "detail", "text")
 	resultText := readStringField(payload, "result")
+	subtype := strings.ToLower(strings.TrimSpace(readStringField(payload, "subtype")))
 	if kind == StreamEventResult && strings.TrimSpace(resultText) == "" {
 		resultText = message
 	}
 	if kind == StreamEventError && strings.TrimSpace(errorText) == "" {
-		errorText = strings.TrimSpace(resultText)
+		if strings.HasPrefix(subtype, "error_") {
+			errorText = subtype
+		}
+		if errorText == "" {
+			errorText = strings.TrimSpace(resultText)
+		}
 		if errorText == "" {
 			errorText = message
 		}
