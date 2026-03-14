@@ -79,6 +79,11 @@ const (
 	journalUserPlaceholder = "<!-- 本区块留给本机人工补充；自动更新时会保留这里的内容。 -->"
 )
 
+var sevolverObservedTaskClasses = []core.TaskClass{
+	core.TaskClassSevolver,
+	core.TaskClassSevolverDeepAnalysis,
+}
+
 func NewRuntime(configPath, envFile string) (*Runtime, error) {
 	return NewRuntimeWithOptions(configPath, envFile, RuntimeOptions{})
 }
@@ -228,152 +233,163 @@ func (rt *Runtime) StatsWithOptions(out io.Writer, options StatsOptions) error {
 	if err != nil {
 		return err
 	}
-	if summary.Runs == 0 {
+	hasTokens := summary.Runs > 0
+	if !hasTokens {
 		if hasStatsRange(options.Start, options.End) {
 			_, _ = fmt.Fprintln(out, "所选范围内暂无 token 使用记录")
 		} else {
 			_, _ = fmt.Fprintln(out, "暂无 token 使用记录")
 		}
-		return nil
-	}
-	if hasStatsRange(options.Start, options.End) {
-		_, _ = fmt.Fprintln(out, "统计范围:")
-		if !options.Start.IsZero() {
-			_, _ = fmt.Fprintf(out, "  起始日期: %s\n", options.Start.Format("2006-01-02"))
+	} else {
+		if hasStatsRange(options.Start, options.End) {
+			_, _ = fmt.Fprintln(out, "统计范围:")
+			if !options.Start.IsZero() {
+				_, _ = fmt.Fprintf(out, "  起始日期: %s\n", options.Start.Format("2006-01-02"))
+			}
+			if !options.End.IsZero() {
+				_, _ = fmt.Fprintf(out, "  截止日期: %s (含当日)\n", options.End.Add(-24*time.Hour).Format("2006-01-02"))
+			}
+			_, _ = fmt.Fprintln(out)
 		}
-		if !options.End.IsZero() {
-			_, _ = fmt.Fprintf(out, "  截止日期: %s (含当日)\n", options.End.Add(-24*time.Hour).Format("2006-01-02"))
+		_, _ = fmt.Fprintf(out, "执行次数: %d\n", summary.Runs)
+		_, _ = fmt.Fprintf(out, "会话数: %d\n", summary.Sessions)
+		_, _ = fmt.Fprintf(out, "输入 tokens: %d\n", summary.InputTokens)
+		_, _ = fmt.Fprintf(out, "输出 tokens: %d\n", summary.OutputTokens)
+		_, _ = fmt.Fprintf(out, "缓存创建 tokens: %d\n", summary.CacheCreate)
+		_, _ = fmt.Fprintf(out, "缓存命中 tokens: %d\n", summary.CacheRead)
+		_, _ = fmt.Fprintf(out, "累计成本(USD): %.4f\n", summary.CostUSD)
+		if !summary.FirstUsedAt.IsZero() {
+			_, _ = fmt.Fprintf(out, "首次记录: %s\n", summary.FirstUsedAt.Format(time.RFC3339))
 		}
-		_, _ = fmt.Fprintln(out)
-	}
-	_, _ = fmt.Fprintf(out, "执行次数: %d\n", summary.Runs)
-	_, _ = fmt.Fprintf(out, "会话数: %d\n", summary.Sessions)
-	_, _ = fmt.Fprintf(out, "输入 tokens: %d\n", summary.InputTokens)
-	_, _ = fmt.Fprintf(out, "输出 tokens: %d\n", summary.OutputTokens)
-	_, _ = fmt.Fprintf(out, "缓存创建 tokens: %d\n", summary.CacheCreate)
-	_, _ = fmt.Fprintf(out, "缓存命中 tokens: %d\n", summary.CacheRead)
-	_, _ = fmt.Fprintf(out, "累计成本(USD): %.4f\n", summary.CostUSD)
-	if !summary.FirstUsedAt.IsZero() {
-		_, _ = fmt.Fprintf(out, "首次记录: %s\n", summary.FirstUsedAt.Format(time.RFC3339))
-	}
-	if !summary.LastUsedAt.IsZero() {
-		_, _ = fmt.Fprintf(out, "最近记录: %s\n", summary.LastUsedAt.Format(time.RFC3339))
-	}
-	if options.Daily {
-		daily, err := rt.store.DailyTokenStatsBetween(options.Start, options.End)
+		if !summary.LastUsedAt.IsZero() {
+			_, _ = fmt.Fprintf(out, "最近记录: %s\n", summary.LastUsedAt.Format(time.RFC3339))
+		}
+		if options.Daily {
+			daily, err := rt.store.DailyTokenStatsBetween(options.Start, options.End)
+			if err != nil {
+				return err
+			}
+			daily, dailyTruncated := limitDailyTokenStats(daily, limit)
+			if len(daily) > 0 {
+				_, _ = fmt.Fprintln(out)
+				if dailyTruncated {
+					_, _ = fmt.Fprintf(out, "按天聚合(最近 %d 天):\n", limit)
+				} else {
+					_, _ = fmt.Fprintln(out, "按天聚合:")
+				}
+				w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				_, _ = fmt.Fprintln(w, "DAY\tRUNS\tSESSIONS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD")
+				for _, item := range daily {
+					_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.4f\n",
+						item.Day.Format("2006-01-02"),
+						item.Runs,
+						item.Sessions,
+						item.InputTokens,
+						item.OutputTokens,
+						item.CacheCreate,
+						item.CacheRead,
+						item.CostUSD,
+					)
+				}
+				if err := w.Flush(); err != nil {
+					return err
+				}
+			}
+		}
+		stats, err := rt.store.TaskTokenStatsBetween(options.Start, options.End, limit)
 		if err != nil {
 			return err
 		}
-		daily, dailyTruncated := limitDailyTokenStats(daily, limit)
-		if len(daily) > 0 {
+		if len(stats) > 0 {
 			_, _ = fmt.Fprintln(out)
-			if dailyTruncated {
-				_, _ = fmt.Fprintf(out, "按天聚合(最近 %d 天):\n", limit)
-			} else {
-				_, _ = fmt.Fprintln(out, "按天聚合:")
-			}
+			_, _ = fmt.Fprintf(out, "任务明细(最近 %d 项):\n", limit)
 			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "DAY\tRUNS\tSESSIONS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD")
-			for _, item := range daily {
-				_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.4f\n",
-					item.Day.Format("2006-01-02"),
+			_, _ = fmt.Fprintln(w, "ISSUE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD\tSESSION\tTITLE")
+			for _, item := range stats {
+				title := item.IssueTitle
+				if len(title) > 40 {
+					title = title[:37] + "..."
+				}
+				sessionID := item.LastSessionID
+				if sessionID == "" {
+					sessionID = "-"
+				}
+				_, _ = fmt.Fprintf(
+					w,
+					"%s#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
+					item.IssueRepo,
+					item.IssueNumber,
 					item.Runs,
-					item.Sessions,
 					item.InputTokens,
 					item.OutputTokens,
 					item.CacheCreate,
 					item.CacheRead,
 					item.CostUSD,
+					sessionID,
+					title,
 				)
 			}
 			if err := w.Flush(); err != nil {
 				return err
 			}
 		}
-	}
-	stats, err := rt.store.TaskTokenStatsBetween(options.Start, options.End, limit)
-	if err != nil {
-		return err
-	}
-	if len(stats) > 0 {
-		_, _ = fmt.Fprintln(out)
-		_, _ = fmt.Fprintf(out, "任务明细(最近 %d 项):\n", limit)
-		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "ISSUE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD\tSESSION\tTITLE")
-		for _, item := range stats {
-			title := item.IssueTitle
-			if len(title) > 40 {
-				title = title[:37] + "..."
+		if options.ShowRTKComparison {
+			comparison, err := rt.store.RTKComparisonBetween(options.Start, options.End)
+			if err != nil {
+				return err
 			}
-			sessionID := item.LastSessionID
-			if sessionID == "" {
-				sessionID = "-"
-			}
-			_, _ = fmt.Fprintf(
-				w,
-				"%s#%d\t%d\t%d\t%d\t%d\t%d\t%.4f\t%s\t%s\n",
-				item.IssueRepo,
-				item.IssueNumber,
-				item.Runs,
-				item.InputTokens,
-				item.OutputTokens,
-				item.CacheCreate,
-				item.CacheRead,
-				item.CostUSD,
-				sessionID,
-				title,
-			)
-		}
-		if err := w.Flush(); err != nil {
-			return err
-		}
-	}
-	if !options.ShowRTKComparison {
-		return nil
-	}
-	comparison, err := rt.store.RTKComparisonBetween(options.Start, options.End)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintln(out, "RTK 对比:")
-	_, _ = fmt.Fprintf(out, "  RTK runs: %d\n", comparison.RTKRuns)
-	_, _ = fmt.Fprintf(out, "  Plain runs: %d\n", comparison.PlainRuns)
-	_, _ = fmt.Fprintf(out, "  RTK avg cost(USD): %.4f\n", comparison.RTKAvgCostUSD)
-	_, _ = fmt.Fprintf(out, "  Plain avg cost(USD): %.4f\n", comparison.PlainAvgCostUSD)
-	_, _ = fmt.Fprintf(out, "  RTK avg tokens: %.1f\n", comparison.RTKAvgTokens)
-	_, _ = fmt.Fprintf(out, "  Plain avg tokens: %.1f\n", comparison.PlainAvgTokens)
-	_, _ = fmt.Fprintf(out, "  Estimated savings: %.2f%%\n", comparison.SavingsPercent)
-	if options.Daily {
-		dailyComparison, err := rt.store.DailyRTKComparisonBetween(options.Start, options.End)
-		if err != nil {
-			return err
-		}
-		dailyComparison, dailyComparisonTruncated := limitDailyRTKComparisons(dailyComparison, limit)
-		if len(dailyComparison) > 0 {
 			_, _ = fmt.Fprintln(out)
-			if dailyComparisonTruncated {
-				_, _ = fmt.Fprintf(out, "按天 RTK 对比(最近 %d 天):\n", limit)
-			} else {
-				_, _ = fmt.Fprintln(out, "按天 RTK 对比:")
+			_, _ = fmt.Fprintln(out, "RTK 对比:")
+			_, _ = fmt.Fprintf(out, "  RTK runs: %d\n", comparison.RTKRuns)
+			_, _ = fmt.Fprintf(out, "  Plain runs: %d\n", comparison.PlainRuns)
+			_, _ = fmt.Fprintf(out, "  RTK avg cost(USD): %.4f\n", comparison.RTKAvgCostUSD)
+			_, _ = fmt.Fprintf(out, "  Plain avg cost(USD): %.4f\n", comparison.PlainAvgCostUSD)
+			_, _ = fmt.Fprintf(out, "  RTK avg tokens: %.1f\n", comparison.RTKAvgTokens)
+			_, _ = fmt.Fprintf(out, "  Plain avg tokens: %.1f\n", comparison.PlainAvgTokens)
+			_, _ = fmt.Fprintf(out, "  Estimated savings: %.2f%%\n", comparison.SavingsPercent)
+			if options.Daily {
+				dailyComparison, err := rt.store.DailyRTKComparisonBetween(options.Start, options.End)
+				if err != nil {
+					return err
+				}
+				dailyComparison, dailyComparisonTruncated := limitDailyRTKComparisons(dailyComparison, limit)
+				if len(dailyComparison) > 0 {
+					_, _ = fmt.Fprintln(out)
+					if dailyComparisonTruncated {
+						_, _ = fmt.Fprintf(out, "按天 RTK 对比(最近 %d 天):\n", limit)
+					} else {
+						_, _ = fmt.Fprintln(out, "按天 RTK 对比:")
+					}
+					w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+					_, _ = fmt.Fprintln(w, "DAY\tRTK_RUNS\tPLAIN_RUNS\tRTK_AVG_COST\tPLAIN_AVG_COST\tRTK_AVG_TOKENS\tPLAIN_AVG_TOKENS\tSAVINGS")
+					for _, item := range dailyComparison {
+						_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%.4f\t%.4f\t%.1f\t%.1f\t%.2f%%\n",
+							item.Day.Format("2006-01-02"),
+							item.RTKRuns,
+							item.PlainRuns,
+							item.RTKAvgCostUSD,
+							item.PlainAvgCostUSD,
+							item.RTKAvgTokens,
+							item.PlainAvgTokens,
+							item.SavingsPercent,
+						)
+					}
+					if err := w.Flush(); err != nil {
+						return err
+					}
+				}
 			}
-			w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "DAY\tRTK_RUNS\tPLAIN_RUNS\tRTK_AVG_COST\tPLAIN_AVG_COST\tRTK_AVG_TOKENS\tPLAIN_AVG_TOKENS\tSAVINGS")
-			for _, item := range dailyComparison {
-				_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%.4f\t%.4f\t%.1f\t%.1f\t%.2f%%\n",
-					item.Day.Format("2006-01-02"),
-					item.RTKRuns,
-					item.PlainRuns,
-					item.RTKAvgCostUSD,
-					item.PlainAvgCostUSD,
-					item.RTKAvgTokens,
-					item.PlainAvgTokens,
-					item.SavingsPercent,
-				)
-			}
-			if err := w.Flush(); err != nil {
-				return err
-			}
+		}
+	}
+
+	flowWindows, err := rt.collectTaskClassFlowWindows(buildStatsTaskClassFlowWindowSpecs(options))
+	if err != nil {
+		return err
+	}
+	if len(flowWindows) > 0 {
+		_, _ = fmt.Fprintln(out)
+		if err := renderTaskClassFlowWindows(out, "Sevolver 自进化链路聚合:", flowWindows); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -395,6 +411,139 @@ func limitDailyRTKComparisons(items []storage.DailyRTKComparison, limit int) ([]
 		return items, false
 	}
 	return items[len(items)-limit:], true
+}
+
+type taskClassFlowWindowSpec struct {
+	Name  string
+	Label string
+	Start time.Time
+	End   time.Time
+}
+
+func buildStatsTaskClassFlowWindowSpecs(options StatsOptions) []taskClassFlowWindowSpec {
+	anchor := time.Now()
+	if !options.End.IsZero() {
+		anchor = options.End
+	} else if !options.Start.IsZero() {
+		anchor = options.Start.Add(24 * time.Hour)
+	}
+	rangeLabel := "指定范围"
+	if !hasStatsRange(options.Start, options.End) {
+		rangeLabel = "全量(未指定范围)"
+	}
+	return []taskClassFlowWindowSpec{
+		{
+			Name:  "day",
+			Label: "日窗口(最近 24 小时)",
+			Start: anchor.Add(-24 * time.Hour),
+			End:   anchor,
+		},
+		{
+			Name:  "week",
+			Label: "周窗口(最近 7 天)",
+			Start: anchor.Add(-7 * 24 * time.Hour),
+			End:   anchor,
+		},
+		{
+			Name:  "range",
+			Label: rangeLabel,
+			Start: options.Start,
+			End:   options.End,
+		},
+	}
+}
+
+func buildStatusTaskClassFlowWindowSpecs() []taskClassFlowWindowSpec {
+	now := time.Now()
+	return []taskClassFlowWindowSpec{
+		{
+			Name:  "day",
+			Label: "日窗口(最近 24 小时)",
+			Start: now.Add(-24 * time.Hour),
+			End:   now,
+		},
+		{
+			Name:  "week",
+			Label: "周窗口(最近 7 天)",
+			Start: now.Add(-7 * 24 * time.Hour),
+			End:   now,
+		},
+		{
+			Name:  "range",
+			Label: "全量(未指定范围)",
+		},
+	}
+}
+
+func (rt *Runtime) collectTaskClassFlowWindows(specs []taskClassFlowWindowSpec) ([]taskClassFlowWindowSnapshot, error) {
+	windows := make([]taskClassFlowWindowSnapshot, 0, len(specs))
+	for _, spec := range specs {
+		snapshot, err := rt.store.TaskClassFlowStatsBetween(spec.Start, spec.End, sevolverObservedTaskClasses)
+		if err != nil {
+			return nil, err
+		}
+		window := taskClassFlowWindowSnapshot{
+			Name:    spec.Name,
+			Label:   spec.Label,
+			Start:   formatRFC3339(spec.Start),
+			End:     formatRFC3339(spec.End),
+			Classes: nil,
+		}
+		if snapshot != nil {
+			window.Classes = snapshot.Classes
+		}
+		windows = append(windows, window)
+	}
+	return windows, nil
+}
+
+func renderTaskClassFlowWindows(out io.Writer, title string, windows []taskClassFlowWindowSnapshot) error {
+	_, _ = fmt.Fprintln(out, title)
+	if len(windows) == 0 {
+		_, _ = fmt.Fprintln(out, "  当前无 task_class 聚合数据")
+		return nil
+	}
+	for _, window := range windows {
+		_, _ = fmt.Fprintf(out, "  [%s] %s\n", emptyStatusValue(window.Name), emptyStatusValue(window.Label))
+		if window.Start != "" || window.End != "" {
+			_, _ = fmt.Fprintf(out, "  范围: %s -> %s\n", emptyStatusValue(window.Start), emptyStatusValue(window.End))
+		}
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "CLASS\tUPGRADE\tCONVERGED\tBACKLOG\tSUCCESS\tFAILURE\tAVG_CLOSE\tRUNS\tINPUT\tOUTPUT\tCACHE_CREATE\tCACHE_READ\tCOST_USD")
+		for _, item := range window.Classes {
+			_, _ = fmt.Fprintf(
+				w,
+				"%s\t%d\t%d\t%d\t%.1f%%(%d)\t%.1f%%(%d)\t%s\t%d\t%d\t%d\t%d\t%d\t%.4f\n",
+				emptyStatusValue(item.TaskClass),
+				item.UpgradeCount,
+				item.ConvergedCount,
+				item.BacklogCount,
+				item.SuccessRate,
+				item.SuccessCount,
+				item.FailureRate,
+				item.FailureCount,
+				formatAvgCloseDuration(item.AvgCloseSeconds),
+				item.Runs,
+				item.InputTokens,
+				item.OutputTokens,
+				item.CacheCreate,
+				item.CacheRead,
+				item.CostUSD,
+			)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatAvgCloseDuration(seconds float64) string {
+	if seconds <= 0 {
+		return "-"
+	}
+	duration := time.Duration(seconds * float64(time.Second))
+	return duration.Round(time.Second).String()
 }
 
 func (rt *Runtime) Status(out io.Writer) error {
@@ -464,7 +613,12 @@ func (rt *Runtime) StatusWithOptions(out io.Writer, options StatusOptions) error
 		)
 	}
 	alerts := rt.filterStatusAlerts(recentEvents, tasks)
-	snapshot := buildRuntimeStatusSnapshot(tasks, counts, schedulerSnapshot, execSnapshot, sessionSnapshot, slotSnapshot, tokenSummary, rtkComparison, alerts)
+	flowWindows, err := rt.collectTaskClassFlowWindows(buildStatusTaskClassFlowWindowSpecs())
+	if err != nil {
+		rt.logError("status", "读取 task_class 聚合失败", "error", err)
+		return err
+	}
+	snapshot := buildRuntimeStatusSnapshot(tasks, counts, schedulerSnapshot, execSnapshot, sessionSnapshot, slotSnapshot, tokenSummary, rtkComparison, alerts, flowWindows)
 	if options.JSON {
 		if err := renderRuntimeStatusJSON(out, snapshot); err != nil {
 			rt.logError("status", "输出 JSON 运行态快照失败", "error", err)
@@ -597,15 +751,24 @@ type statusTokenSnapshot struct {
 	RTKComparison statusRTKComparisonSnapshot `json:"rtk_comparison"`
 }
 
+type taskClassFlowWindowSnapshot struct {
+	Name    string                      `json:"name"`
+	Label   string                      `json:"label"`
+	Start   string                      `json:"start,omitempty"`
+	End     string                      `json:"end,omitempty"`
+	Classes []storage.TaskClassFlowStat `json:"classes"`
+}
+
 type runtimeStatusSnapshot struct {
-	GeneratedAt string                   `json:"generated_at"`
-	Scheduler   scheduler.StatusSnapshot `json:"scheduler"`
-	Executor    executorSnapshot         `json:"executor"`
-	Sessions    statusSessionSnapshot    `json:"sessions"`
-	Slots       statusRepoSlotSnapshot   `json:"slots"`
-	Tasks       statusTasksSnapshot      `json:"tasks"`
-	Tokens      statusTokenSnapshot      `json:"tokens"`
-	Alerts      []statusAlert            `json:"alerts"`
+	GeneratedAt string                        `json:"generated_at"`
+	Scheduler   scheduler.StatusSnapshot      `json:"scheduler"`
+	Executor    executorSnapshot              `json:"executor"`
+	Sessions    statusSessionSnapshot         `json:"sessions"`
+	Slots       statusRepoSlotSnapshot        `json:"slots"`
+	Tasks       statusTasksSnapshot           `json:"tasks"`
+	Tokens      statusTokenSnapshot           `json:"tokens"`
+	TaskClass   []taskClassFlowWindowSnapshot `json:"task_class"`
+	Alerts      []statusAlert                 `json:"alerts"`
 }
 
 func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapshot {
@@ -763,7 +926,7 @@ func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*cor
 	return alerts
 }
 
-func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, schedulerSnapshot scheduler.StatusSnapshot, execSnapshot executorSnapshot, sessionSnapshot statusSessionSnapshot, slotSnapshot statusRepoSlotSnapshot, tokenSummary *storage.TokenStatsSummary, rtkComparison *storage.RTKComparison, alerts []statusAlert) runtimeStatusSnapshot {
+func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, schedulerSnapshot scheduler.StatusSnapshot, execSnapshot executorSnapshot, sessionSnapshot statusSessionSnapshot, slotSnapshot statusRepoSlotSnapshot, tokenSummary *storage.TokenStatsSummary, rtkComparison *storage.RTKComparison, alerts []statusAlert, taskClass []taskClassFlowWindowSnapshot) runtimeStatusSnapshot {
 	taskItems := make([]statusTaskItem, 0, len(tasks))
 	for _, task := range tasks {
 		taskItems = append(taskItems, statusTaskItem{
@@ -816,7 +979,8 @@ func buildRuntimeStatusSnapshot(tasks []*core.Task, counts map[core.State]int, s
 				SavingsPercent:  rtkComparison.SavingsPercent,
 			},
 		},
-		Alerts: alerts,
+		TaskClass: taskClass,
+		Alerts:    alerts,
 	}
 }
 
@@ -968,6 +1132,11 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 			}
 		}
 		_, _ = fmt.Fprintln(out, "  详情请执行: ccclaw stats --rtk-comparison")
+	}
+	_, _ = fmt.Fprintln(out)
+
+	if err := renderTaskClassFlowWindows(out, "Sevolver 自进化链路聚合:", snapshot.TaskClass); err != nil {
+		return err
 	}
 	_, _ = fmt.Fprintln(out)
 

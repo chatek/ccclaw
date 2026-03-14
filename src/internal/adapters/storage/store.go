@@ -88,6 +88,31 @@ type DailyRTKComparison struct {
 	SavingsPercent  float64
 }
 
+type TaskClassFlowStat struct {
+	TaskClass       string  `json:"task_class"`
+	UpgradeCount    int     `json:"upgrade_count"`
+	ConvergedCount  int     `json:"converged_count"`
+	BacklogCount    int     `json:"backlog_count"`
+	ClosedCount     int     `json:"closed_count"`
+	SuccessCount    int     `json:"success_count"`
+	FailureCount    int     `json:"failure_count"`
+	SuccessRate     float64 `json:"success_rate"`
+	FailureRate     float64 `json:"failure_rate"`
+	AvgCloseSeconds float64 `json:"avg_close_seconds"`
+	Runs            int     `json:"runs"`
+	InputTokens     int     `json:"input_tokens"`
+	OutputTokens    int     `json:"output_tokens"`
+	CacheCreate     int     `json:"cache_create"`
+	CacheRead       int     `json:"cache_read"`
+	CostUSD         float64 `json:"cost_usd"`
+}
+
+type TaskClassFlowSnapshot struct {
+	Start   time.Time           `json:"start,omitempty"`
+	End     time.Time           `json:"end,omitempty"`
+	Classes []TaskClassFlowStat `json:"classes"`
+}
+
 type JournalDaySummary struct {
 	TasksTouched int
 	Started      int
@@ -428,6 +453,138 @@ func (s *Store) DailyRTKComparisonBetween(start, end time.Time) ([]DailyRTKCompa
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (s *Store) TaskClassFlowStatsBetween(start, end time.Time, classes []core.TaskClass) (*TaskClassFlowSnapshot, error) {
+	tasks, err := s.state.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+
+	order, selected := normalizeTaskClassSelection(classes)
+	if len(order) == 0 {
+		return &TaskClassFlowSnapshot{Start: start, End: end, Classes: nil}, nil
+	}
+
+	indexed := make(map[core.TaskClass]*TaskClassFlowStat, len(order))
+	for _, taskClass := range order {
+		indexed[taskClass] = &TaskClassFlowStat{TaskClass: string(taskClass)}
+	}
+
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		taskClass := normalizeTaskClass(task.TaskClass)
+		if _, ok := selected[taskClass]; !ok {
+			continue
+		}
+		if task.State != core.StateDone && task.State != core.StateDead {
+			indexed[taskClass].BacklogCount++
+		}
+	}
+
+	tokenRecords, err := s.filteredTokens(start, end, "")
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range tokenRecords {
+		task := tasks[record.TaskID]
+		if task == nil {
+			continue
+		}
+		taskClass := normalizeTaskClass(task.TaskClass)
+		if _, ok := selected[taskClass]; !ok {
+			continue
+		}
+		item := indexed[taskClass]
+		item.Runs++
+		item.InputTokens += record.InputTokens
+		item.OutputTokens += record.OutputTokens
+		item.CacheCreate += record.CacheCreate
+		item.CacheRead += record.CacheRead
+		item.CostUSD += record.CostUSD
+	}
+
+	events, err := s.filteredEvents(start, end, "")
+	if err != nil {
+		return nil, err
+	}
+	createdByClass := make(map[core.TaskClass]map[string]struct{}, len(order))
+	for _, taskClass := range order {
+		createdByClass[taskClass] = map[string]struct{}{}
+	}
+	type terminalOutcome struct {
+		EventType core.EventType
+		ClosedAt  time.Time
+	}
+	closedByTask := map[string]terminalOutcome{}
+	for _, event := range events {
+		task := tasks[event.TaskID]
+		if task == nil {
+			continue
+		}
+		taskClass := normalizeTaskClass(task.TaskClass)
+		if _, ok := selected[taskClass]; !ok {
+			continue
+		}
+		switch event.EventType {
+		case core.EventCreated:
+			createdByClass[taskClass][event.TaskID] = struct{}{}
+		case core.EventDone, core.EventDead:
+			closedByTask[event.TaskID] = terminalOutcome{
+				EventType: event.EventType,
+				ClosedAt:  event.CreatedAt,
+			}
+		}
+	}
+	for _, taskClass := range order {
+		indexed[taskClass].UpgradeCount = len(createdByClass[taskClass])
+	}
+
+	closeDurationSum := make(map[core.TaskClass]time.Duration, len(order))
+	closeDurationSamples := make(map[core.TaskClass]int, len(order))
+	for taskID, outcome := range closedByTask {
+		task := tasks[taskID]
+		if task == nil {
+			continue
+		}
+		taskClass := normalizeTaskClass(task.TaskClass)
+		item, ok := indexed[taskClass]
+		if !ok {
+			continue
+		}
+		item.ClosedCount++
+		if outcome.EventType == core.EventDone {
+			item.ConvergedCount++
+			item.SuccessCount++
+		} else {
+			item.FailureCount++
+		}
+		if !task.CreatedAt.IsZero() && !outcome.ClosedAt.IsZero() && !outcome.ClosedAt.Before(task.CreatedAt) {
+			closeDurationSum[taskClass] += outcome.ClosedAt.Sub(task.CreatedAt)
+			closeDurationSamples[taskClass]++
+		}
+	}
+
+	items := make([]TaskClassFlowStat, 0, len(order))
+	for _, taskClass := range order {
+		item := indexed[taskClass]
+		total := item.SuccessCount + item.FailureCount
+		if total > 0 {
+			item.SuccessRate = float64(item.SuccessCount) * 100 / float64(total)
+			item.FailureRate = float64(item.FailureCount) * 100 / float64(total)
+		}
+		if samples := closeDurationSamples[taskClass]; samples > 0 {
+			item.AvgCloseSeconds = closeDurationSum[taskClass].Seconds() / float64(samples)
+		}
+		items = append(items, *item)
+	}
+	return &TaskClassFlowSnapshot{
+		Start:   start,
+		End:     end,
+		Classes: items,
+	}, nil
 }
 
 func (s *Store) ListTasks() ([]*core.Task, error) {
@@ -804,6 +961,31 @@ func dayBounds(day time.Time) (time.Time, time.Time) {
 	loc := day.Location()
 	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
 	return start, start.Add(24 * time.Hour)
+}
+
+func normalizeTaskClassSelection(classes []core.TaskClass) ([]core.TaskClass, map[core.TaskClass]struct{}) {
+	order := make([]core.TaskClass, 0, len(classes))
+	selected := make(map[core.TaskClass]struct{}, len(classes))
+	for _, raw := range classes {
+		taskClass := normalizeTaskClass(raw)
+		if taskClass == "" {
+			continue
+		}
+		if _, ok := selected[taskClass]; ok {
+			continue
+		}
+		selected[taskClass] = struct{}{}
+		order = append(order, taskClass)
+	}
+	return order, selected
+}
+
+func normalizeTaskClass(taskClass core.TaskClass) core.TaskClass {
+	value := strings.TrimSpace(string(taskClass))
+	if value == "" {
+		return core.TaskClassGeneral
+	}
+	return core.TaskClass(value)
 }
 
 func resolveVarDir(path string) string {

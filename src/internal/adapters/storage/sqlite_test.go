@@ -410,3 +410,142 @@ func TestStoreSupportsStatsDateRangeAndDailyAggregation(t *testing.T) {
 		t.Fatalf("unexpected daily rtk item: %#v", dailyRTK[1])
 	}
 }
+
+func TestTaskClassFlowStatsBetween(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 3, 14, 10, 0, 0, 0, time.UTC)
+	tasks := []*core.Task{
+		{
+			TaskID:         "50#body",
+			IdempotencyKey: "50#body",
+			IssueRepo:      "41490/ccclaw",
+			IssueNumber:    50,
+			IssueTitle:     "sevolver daily",
+			TaskClass:      core.TaskClassSevolver,
+			State:          core.StateDone,
+			CreatedAt:      base.Add(-2 * time.Hour),
+		},
+		{
+			TaskID:         "51#body",
+			IdempotencyKey: "51#body",
+			IssueRepo:      "41490/ccclaw",
+			IssueNumber:    51,
+			IssueTitle:     "deep done",
+			TaskClass:      core.TaskClassSevolverDeepAnalysis,
+			State:          core.StateDone,
+			CreatedAt:      base.Add(-3 * time.Hour),
+		},
+		{
+			TaskID:         "52#body",
+			IdempotencyKey: "52#body",
+			IssueRepo:      "41490/ccclaw",
+			IssueNumber:    52,
+			IssueTitle:     "deep dead",
+			TaskClass:      core.TaskClassSevolverDeepAnalysis,
+			State:          core.StateDead,
+			CreatedAt:      base.Add(-4 * time.Hour),
+		},
+		{
+			TaskID:         "53#body",
+			IdempotencyKey: "53#body",
+			IssueRepo:      "41490/ccclaw",
+			IssueNumber:    53,
+			IssueTitle:     "deep backlog",
+			TaskClass:      core.TaskClassSevolverDeepAnalysis,
+			State:          core.StateRunning,
+			CreatedAt:      base.Add(-30 * time.Minute),
+		},
+	}
+	for _, task := range tasks {
+		if err := store.UpsertTask(task); err != nil {
+			t.Fatalf("写入任务失败: %v", err)
+		}
+	}
+
+	for _, event := range []struct {
+		taskID    string
+		eventType core.EventType
+		at        time.Time
+	}{
+		{taskID: "50#body", eventType: core.EventCreated, at: base.Add(-2 * time.Hour)},
+		{taskID: "50#body", eventType: core.EventDone, at: base.Add(-90 * time.Minute)},
+		{taskID: "51#body", eventType: core.EventCreated, at: base.Add(-3 * time.Hour)},
+		{taskID: "51#body", eventType: core.EventDone, at: base.Add(-2 * time.Hour)},
+		{taskID: "52#body", eventType: core.EventCreated, at: base.Add(-4 * time.Hour)},
+		{taskID: "52#body", eventType: core.EventDead, at: base.Add(-3 * time.Hour)},
+		{taskID: "53#body", eventType: core.EventCreated, at: base.Add(-30 * time.Minute)},
+	} {
+		if err := store.AppendEventAt(event.taskID, event.eventType, "test", event.at); err != nil {
+			t.Fatalf("写入事件失败: %v", err)
+		}
+	}
+
+	for _, token := range []TokenUsageRecord{
+		{
+			TaskID:     "50#body",
+			SessionID:  "sess-50",
+			PromptFile: "/tmp/50.md",
+			Usage:      core.TokenUsage{InputTokens: 20, OutputTokens: 5},
+			CostUSD:    0.10,
+			RecordedAt: base.Add(-89 * time.Minute),
+		},
+		{
+			TaskID:     "51#body",
+			SessionID:  "sess-51",
+			PromptFile: "/tmp/51.md",
+			Usage:      core.TokenUsage{InputTokens: 40, OutputTokens: 10},
+			CostUSD:    0.20,
+			RecordedAt: base.Add(-119 * time.Minute),
+		},
+		{
+			TaskID:     "52#body",
+			SessionID:  "sess-52",
+			PromptFile: "/tmp/52.md",
+			Usage:      core.TokenUsage{InputTokens: 60, OutputTokens: 15},
+			CostUSD:    0.30,
+			RecordedAt: base.Add(-179 * time.Minute),
+		},
+	} {
+		if err := store.RecordTokenUsage(token); err != nil {
+			t.Fatalf("写入 token 失败: %v", err)
+		}
+	}
+
+	snapshot, err := store.TaskClassFlowStatsBetween(
+		base.Add(-24*time.Hour),
+		base.Add(time.Hour),
+		[]core.TaskClass{core.TaskClassSevolver, core.TaskClassSevolverDeepAnalysis},
+	)
+	if err != nil {
+		t.Fatalf("读取 task_class 聚合失败: %v", err)
+	}
+	if snapshot == nil || len(snapshot.Classes) != 2 {
+		t.Fatalf("unexpected task_class snapshot: %#v", snapshot)
+	}
+
+	sevolver := snapshot.Classes[0]
+	deep := snapshot.Classes[1]
+	if sevolver.TaskClass != string(core.TaskClassSevolver) || sevolver.UpgradeCount != 1 || sevolver.ConvergedCount != 1 || sevolver.BacklogCount != 0 {
+		t.Fatalf("unexpected sevolver stat: %#v", sevolver)
+	}
+	if sevolver.SuccessRate != 100 || sevolver.FailureRate != 0 || sevolver.Runs != 1 || sevolver.CostUSD != 0.10 {
+		t.Fatalf("unexpected sevolver rates or costs: %#v", sevolver)
+	}
+	if deep.TaskClass != string(core.TaskClassSevolverDeepAnalysis) || deep.UpgradeCount != 3 || deep.ConvergedCount != 1 || deep.BacklogCount != 1 {
+		t.Fatalf("unexpected deep stat: %#v", deep)
+	}
+	if deep.SuccessCount != 1 || deep.FailureCount != 1 || deep.SuccessRate != 50 || deep.FailureRate != 50 {
+		t.Fatalf("unexpected deep success/failure: %#v", deep)
+	}
+	if deep.Runs != 2 || deep.InputTokens != 100 || deep.CostUSD != 0.50 {
+		t.Fatalf("unexpected deep token costs: %#v", deep)
+	}
+	if deep.AvgCloseSeconds <= 0 {
+		t.Fatalf("unexpected deep avg close: %#v", deep)
+	}
+}

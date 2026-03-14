@@ -878,6 +878,11 @@ func TestStatsWithDateRangeAndDailyRendersSections(t *testing.T) {
 		"任务明细(最近 1 项):",
 		"RTK 对比:",
 		"按天 RTK 对比(最近 1 天):",
+		"Sevolver 自进化链路聚合:",
+		"[day] 日窗口(最近 24 小时)",
+		"[week] 周窗口(最近 7 天)",
+		"[range] 指定范围",
+		"sevolver_deep_analysis",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in %q", want, text)
@@ -1054,6 +1059,7 @@ exit 0
 		"RTK 对比样本: rtk=1 plain=1",
 		"RTK 估算节省:",
 		"详情请执行: ccclaw stats --rtk-comparison",
+		"Sevolver 自进化链路聚合:",
 		"最近异常:",
 		"tmux 会话超时",
 	} {
@@ -1143,6 +1149,13 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 			LastUsedAt  string `json:"last_used_at"`
 			InputTokens int    `json:"input_tokens"`
 		} `json:"tokens"`
+		TaskClass []struct {
+			Name    string `json:"name"`
+			Label   string `json:"label"`
+			Classes []struct {
+				TaskClass string `json:"task_class"`
+			} `json:"classes"`
+		} `json:"task_class"`
 		Sessions struct {
 			Error string `json:"error"`
 		} `json:"sessions"`
@@ -1164,6 +1177,15 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 	}
 	if payload.Tokens.Runs != 1 || payload.Tokens.InputTokens != 11 || payload.Tokens.LastUsedAt == "" {
 		t.Fatalf("unexpected tokens payload: %+v", payload.Tokens)
+	}
+	if len(payload.TaskClass) != 3 {
+		t.Fatalf("unexpected task_class windows payload: %+v", payload.TaskClass)
+	}
+	if payload.TaskClass[0].Name != "day" || payload.TaskClass[1].Name != "week" || payload.TaskClass[2].Name != "range" {
+		t.Fatalf("unexpected task_class window names: %+v", payload.TaskClass)
+	}
+	if len(payload.TaskClass[0].Classes) != 2 || payload.TaskClass[0].Classes[1].TaskClass != string(core.TaskClassSevolverDeepAnalysis) {
+		t.Fatalf("unexpected task_class rows: %+v", payload.TaskClass[0].Classes)
 	}
 	if !strings.Contains(payload.Sessions.Error, "tmux") {
 		t.Fatalf("unexpected sessions payload: %+v", payload.Sessions)
