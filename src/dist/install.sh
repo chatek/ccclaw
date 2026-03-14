@@ -1503,7 +1503,7 @@ env_file = "$ENV_FILE"
 provider = "claude-code"
 command = ["$CLAUDE_WRAPPER"]
 timeout = "30m"
-mode = "tmux"
+mode = "daemon"
 
 # 调度策略配置：
 # - mode: 安装时请求的调度模式 auto|systemd|cron|none

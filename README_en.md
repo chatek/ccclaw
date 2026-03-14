@@ -64,6 +64,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 - Default knowledge repo: `/opt/ccclaw`
 - Knowledge repo modes: `init | remote | local`
 - Task repo modes: `none | remote | local`
+- Default executor mode: `daemon` (can be switched back globally or per-target to `tmux`)
 - Default scheduler: `auto`, preferring `systemd --user`
 - Version format: `yy.mm.dd.HHMM`
 

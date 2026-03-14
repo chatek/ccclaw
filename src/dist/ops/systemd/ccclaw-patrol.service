@@ -1,5 +1,5 @@
 [Unit]
-Description=ccclaw patrol service (user)
+Description=ccclaw patrol health/compensation service (user)
 After=network-online.target
 
 [Service]

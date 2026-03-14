@@ -492,6 +492,7 @@ type statusSessionItem struct {
 
 type statusSessionSnapshot struct {
 	RunningTasks     int                 `json:"running_tasks"`
+	DaemonTasks      int                 `json:"daemon_tasks"`
 	TotalSessions    int                 `json:"total_sessions"`
 	HealthySessions  int                 `json:"healthy_sessions"`
 	WarningSessions  int                 `json:"warning_sessions"`
@@ -506,6 +507,7 @@ type statusSessionSnapshot struct {
 type statusRepoSlotItem struct {
 	TargetRepo         string `json:"target_repo"`
 	TaskID             string `json:"task_id"`
+	ExecutorMode       string `json:"executor_mode,omitempty"`
 	Phase              string `json:"phase"`
 	CurrentStep        string `json:"current_step,omitempty"`
 	RestartCount       int    `json:"restart_count"`
@@ -537,6 +539,9 @@ type statusAlert struct {
 }
 
 type executorSnapshot struct {
+	Mode              string `json:"mode"`
+	TMuxTargets       int    `json:"tmux_targets"`
+	DaemonTargets     int    `json:"daemon_targets"`
 	LauncherRequested string `json:"launcher_requested"`
 	LauncherResolved  string `json:"launcher_resolved,omitempty"`
 	LauncherError     string `json:"launcher_error,omitempty"`
@@ -606,12 +611,22 @@ type runtimeStatusSnapshot struct {
 func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{}
 	runningTasks := make([]*core.Task, 0)
+	daemonTasks := 0
 	for _, task := range tasks {
-		if task.State == core.StateRunning {
-			runningTasks = append(runningTasks, task)
+		if task.State != core.StateRunning {
+			continue
 		}
+		if rt.cfg.ExecutorModeForRepo(task.TargetRepo) == config.ExecutorModeTMux {
+			runningTasks = append(runningTasks, task)
+			continue
+		}
+		daemonTasks++
 	}
 	snapshot.RunningTasks = len(runningTasks)
+	snapshot.DaemonTasks = daemonTasks
+	if snapshot.RunningTasks == 0 {
+		return snapshot
+	}
 	if !tmux.Available("tmux") {
 		snapshot.Error = "未检测到 tmux CLI，当前无法汇报会话健康"
 		return snapshot
@@ -696,6 +711,7 @@ func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
 		snapshot.Items = append(snapshot.Items, statusRepoSlotItem{
 			TargetRepo:         slot.TargetRepo,
 			TaskID:             slot.TaskID,
+			ExecutorMode:       slot.ExecutorMode,
 			Phase:              phase,
 			CurrentStep:        slot.CurrentStep,
 			RestartCount:       slot.RestartCount,
@@ -818,6 +834,7 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 	_, _ = fmt.Fprintln(out)
 
 	_, _ = fmt.Fprintln(out, "执行器快照:")
+	_, _ = fmt.Fprintf(out, "  默认模式: %s (daemon_targets=%d tmux_targets=%d)\n", emptyStatusValue(snapshot.Executor.Mode), snapshot.Executor.DaemonTargets, snapshot.Executor.TMuxTargets)
 	_, _ = fmt.Fprintf(out, "  入口配置: %s\n", snapshot.Executor.LauncherRequested)
 	_, _ = fmt.Fprintf(out, "  入口解析: %s\n", formatResolvedBinary(snapshot.Executor.LauncherRequested, snapshot.Executor.LauncherResolved, snapshot.Executor.LauncherError))
 	_, _ = fmt.Fprintf(out, "  Claude 解析: %s\n", formatResolvedBinary(snapshot.Executor.ClaudeRequested, snapshot.Executor.ClaudeResolved, snapshot.Executor.ClaudeError))
@@ -825,9 +842,12 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 	_, _ = fmt.Fprintln(out)
 
 	_, _ = fmt.Fprintln(out, "会话快照:")
-	_, _ = fmt.Fprintf(out, "  运行中任务: %d\n", snapshot.Sessions.RunningTasks)
+	_, _ = fmt.Fprintf(out, "  tmux 托管任务: %d\n", snapshot.Sessions.RunningTasks)
+	_, _ = fmt.Fprintf(out, "  daemon 任务: %d\n", snapshot.Sessions.DaemonTasks)
 	if snapshot.Sessions.Error != "" {
 		_, _ = fmt.Fprintf(out, "  tmux 状态: %s\n", snapshot.Sessions.Error)
+	} else if snapshot.Sessions.RunningTasks == 0 {
+		_, _ = fmt.Fprintln(out, "  tmux 状态: 当前无 tmux 托管任务（默认 daemon 模式）")
 	} else {
 		_, _ = fmt.Fprintf(out, "  tmux 会话: %d\n", snapshot.Sessions.TotalSessions)
 		_, _ = fmt.Fprintf(out, "  会话健康: 正常=%d 接近超时=%d 超时=%d 已退出=%d 丢失=%d 孤儿=%d\n",
@@ -870,7 +890,7 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 		}
 		_, _ = fmt.Fprintln(out)
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "TARGET\tPHASE\tSTEP\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
+		_, _ = fmt.Fprintln(w, "TARGET\tMODE\tPHASE\tSTEP\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
 		for _, item := range snapshot.Slots.Items {
 			nextRetry := item.NextRetryAt
 			if nextRetry == "" {
@@ -880,8 +900,9 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 			if lastError == "" {
 				lastError = "-"
 			}
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
 				item.TargetRepo,
+				emptyStatusValue(item.ExecutorMode),
 				item.Phase,
 				emptyStatusValue(item.CurrentStep),
 				item.RestartCount,
@@ -1013,7 +1034,19 @@ func (rt *Runtime) executorSnapshot() executorSnapshot {
 	if rtkRequested == "" {
 		rtkRequested = "rtk"
 	}
+	tmuxTargets := 0
+	daemonTargets := 0
+	for _, target := range rt.cfg.EnabledTargets() {
+		if rt.cfg.ExecutorModeForRepo(target.Repo) == config.ExecutorModeTMux {
+			tmuxTargets++
+		} else {
+			daemonTargets++
+		}
+	}
 	return executorSnapshot{
+		Mode:              string(rt.cfg.ExecutorMode()),
+		TMuxTargets:       tmuxTargets,
+		DaemonTargets:     daemonTargets,
 		LauncherRequested: launcherRequested,
 		LauncherResolved:  resolvedBinaryOrEmpty(launcherRequested),
 		LauncherError:     unresolvedBinaryError(launcherRequested),
@@ -1117,7 +1150,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "Go 工具链", run: func() (string, error) { return commandVersion("go", "version") }},
 		{name: "sudo 无口令", run: rt.checkPasswordlessSudo},
 		{name: "rtk CLI", run: func() (string, error) { return rt.describeBinaryVersion("CCCLAW_RTK_BIN", "rtk", "--version") }},
-		{name: "tmux CLI", run: func() (string, error) { return commandVersion("tmux", "-V") }},
+		{name: "tmux CLI", run: rt.checkTMuxAvailability},
 		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
 		{name: "duckdb CLI", run: func() (string, error) { return commandVersion("duckdb", "--version") }},
 		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
@@ -1156,6 +1189,22 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 	}
 	rt.logInfo("doctor", "环境诊断完成", "failed", 0, "checks", len(checks))
 	return nil
+}
+
+func (rt *Runtime) checkTMuxAvailability() (string, error) {
+	if rt == nil || rt.cfg == nil {
+		return "", nil
+	}
+	tmuxTargets := 0
+	for _, target := range rt.cfg.EnabledTargets() {
+		if rt.cfg.ExecutorModeForRepo(target.Repo) == config.ExecutorModeTMux {
+			tmuxTargets++
+		}
+	}
+	if tmuxTargets == 0 {
+		return "当前无 tmux 托管仓库（tmux 仅作为 debug attach）", nil
+	}
+	return commandVersion("tmux", "-V")
 }
 
 func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bool) error {

@@ -126,7 +126,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("executor.provider", "claude-code")
 	v.SetDefault("executor.command", []string{"claude"})
 	v.SetDefault("executor.timeout", "30m")
-	v.SetDefault("executor.mode", string(ExecutorModeTMux))
+	v.SetDefault("executor.mode", string(ExecutorModeDaemon))
 	v.SetDefault("scheduler.mode", "none")
 	v.SetDefault("scheduler.systemd_user_dir", "~/.config/systemd/user")
 	v.SetDefault("scheduler.calendar_timezone", "Asia/Shanghai")
@@ -195,7 +195,7 @@ func (cfg *Config) NormalizePaths() {
 	cfg.Executor.Binary = ExpandPath(cfg.Executor.Binary)
 	cfg.Executor.Mode = strings.ToLower(strings.TrimSpace(cfg.Executor.Mode))
 	if cfg.Executor.Mode == "" {
-		cfg.Executor.Mode = string(ExecutorModeTMux)
+		cfg.Executor.Mode = string(ExecutorModeDaemon)
 	}
 }
 
@@ -337,15 +337,15 @@ func (cfg *Config) EnabledTargetByRepo(repo string) (*TargetConfig, error) {
 
 func (cfg *Config) ExecutorMode() ExecutorMode {
 	if cfg == nil {
-		return ExecutorModeTMux
+		return ExecutorModeDaemon
 	}
-	return normalizeExecutorMode(cfg.Executor.Mode, ExecutorModeTMux)
+	return normalizeExecutorMode(cfg.Executor.Mode, ExecutorModeDaemon)
 }
 
 func (cfg *Config) ExecutorModeForRepo(repo string) ExecutorMode {
 	repo = strings.TrimSpace(repo)
 	if cfg == nil || repo == "" {
-		return ExecutorModeTMux
+		return ExecutorModeDaemon
 	}
 	if target, err := cfg.TargetByRepo(repo); err == nil {
 		if mode := normalizeExecutorMode(target.ExecutorMode, ""); mode != "" {
@@ -994,6 +994,7 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString(fmt.Sprintf("env_file = %q\n\n", cfg.Paths.EnvFile))
 
 	buf.WriteString("# 执行器默认走 ccclaude 包装器；当前包装器默认直连 claude，不再拼接 rtk proxy。\n")
+	buf.WriteString("# mode: 默认 daemon；可按仓配置 executor_mode=tmux 用于 debug attach。\n")
 	buf.WriteString("[executor]\n")
 	buf.WriteString(fmt.Sprintf("provider = %q\n", cfg.Executor.Provider))
 	buf.WriteString(fmt.Sprintf("binary = %q\n", cfg.Executor.Binary))

@@ -1025,7 +1025,7 @@ exit 0
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
-			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Executor:  config.ExecutorConfig{Timeout: "30m", Mode: string(config.ExecutorModeTMux)},
 			Scheduler: config.SchedulerConfig{Mode: "none"},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
@@ -1111,7 +1111,7 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
-			Executor:  config.ExecutorConfig{Timeout: "30m"},
+			Executor:  config.ExecutorConfig{Timeout: "30m", Mode: string(config.ExecutorModeTMux)},
 			Scheduler: config.SchedulerConfig{Mode: "none"},
 		},
 		secrets: &config.Secrets{Values: map[string]string{}},
@@ -1397,7 +1397,7 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 		"执行器快照:",
 		"入口配置: claude",
 		"当前无任务",
-		"tmux 状态: 未检测到 tmux CLI，当前无法汇报会话健康",
+		"tmux 状态: 当前无 tmux 托管任务（默认 daemon 模式）",
 		"未检测到 token 使用记录",
 		"最近 7 天无失败/超时告警",
 	} {
@@ -1539,6 +1539,7 @@ exit 0
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
 			},
 			Targets: []config.TargetConfig{{
 				Repo:      "41490/ccclaw",
@@ -1678,6 +1679,7 @@ exit 0
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
 			},
 			Targets: []config.TargetConfig{{
 				Repo:      "41490/ccclaw",
@@ -1807,6 +1809,7 @@ exit 0
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
 			},
 			Targets: []config.TargetConfig{{
 				Repo:      "41490/ccclaw",
@@ -1935,6 +1938,7 @@ exit 0
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
 			},
 			Targets: []config.TargetConfig{{
 				Repo:      "41490/ccclaw",
@@ -2083,6 +2087,7 @@ exit 0
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
 				Timeout: "30m",
+				Mode:    string(config.ExecutorModeTMux),
 			},
 			Targets: []config.TargetConfig{{
 				Repo:      "41490/ccclaw",

@@ -31,7 +31,7 @@ env_file = "~/.ccclaw/.env"
 provider = "claude-code"
 command = ["~/.ccclaw/bin/ccclaude"]
 timeout = "30m"
-mode = "tmux"
+mode = "daemon"
 
 # 调度策略配置：
 # - mode: 安装时请求的调度模式
