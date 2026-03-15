@@ -1892,11 +1892,29 @@ commit_home_repo_seed() {
     log "[simulate] git add/commit seeded files in $HOME_REPO"
     return 0
   fi
-  git -C "$HOME_REPO" add kb README.md CLAUDE.md .gitignore
+  # 决策 #3（Issue#58）：提交前确保本地已有可用 git 工作复本
+  if [[ ! -d "$HOME_REPO/.git" ]]; then
+    warn "本体仓库不是 git 工作复本，跳过自动提交: $HOME_REPO"
+    return 0
+  fi
+  # 决策 #2（Issue#58）：只限受管模板文件，排除运行态内容
+  # 仅提交 kb/**/CLAUDE.md + README.md / CLAUDE.md / .gitignore
+  while IFS= read -r f; do
+    git -C "$HOME_REPO" add -- "${f#$HOME_REPO/}"
+  done < <(find "$HOME_REPO/kb" -type f -name 'CLAUDE.md' 2>/dev/null | sort)
+  git -C "$HOME_REPO" add -- README.md CLAUDE.md .gitignore 2>/dev/null || true
   if git -C "$HOME_REPO" diff --cached --quiet; then
     return 0
   fi
   git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m 'seed ccclaw home repo'
+  # 决策 #4（Issue#58）：终端强调提醒用户具体的提交指令
+  printf '\n== 本体仓库自动提交完成（仅受管模板文件）==\n'
+  log "已提交：kb/**/CLAUDE.md, README.md, CLAUDE.md, .gitignore"
+  log "如需推送到远端，请执行："
+  log "  git -C \"$HOME_REPO\" push"
+  log "查看当前状态："
+  log "  git -C \"$HOME_REPO\" status"
+  log "  git -C \"$HOME_REPO\" log --oneline -5"
 }
 
 init_jj_colocate_repo() {
