@@ -1926,10 +1926,30 @@ CLAUDE
   append_line_if_missing "$HOME_REPO/.gitignore" "*.tmp"
 }
 
+list_home_repo_seed_relative_files() {
+  {
+    if [[ -d "$DIST_DIR/kb" ]]; then
+      while IFS= read -r f; do
+        printf 'kb/%s\n' "${f#$DIST_DIR/kb/}"
+      done < <(find "$DIST_DIR/kb" -type f -name 'CLAUDE.md' 2>/dev/null | sort)
+    fi
+    if [[ -d "$HOME_REPO/kb" ]]; then
+      while IFS= read -r f; do
+        printf '%s\n' "${f#$HOME_REPO/}"
+      done < <(find "$HOME_REPO/kb" -type f -name 'CLAUDE.md' 2>/dev/null | sort)
+    fi
+    printf '%s\n' README.md CLAUDE.md .gitignore
+  } | awk 'NF && !seen[$0]++' | sort
+}
+
 commit_home_repo_seed() {
-  local commit_message remote_name branch_name status_head ahead_count
+  local commit_message remote_name branch_name status_head ahead_count relative_path
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] git add/commit seeded files in $HOME_REPO"
+    log "[simulate] 将要 add 的文件列表："
+    while IFS= read -r relative_path; do
+      log "[simulate]   - $relative_path"
+    done < <(list_home_repo_seed_relative_files)
     return 0
   fi
   # 决策 #3（Issue#58）：提交前确保本地已有可用 git 工作复本
@@ -1939,10 +1959,9 @@ commit_home_repo_seed() {
   fi
   # 决策 #2（Issue#58）：只限受管模板文件，排除运行态内容
   # 仅提交 kb/**/CLAUDE.md + README.md / CLAUDE.md / .gitignore
-  while IFS= read -r f; do
-    git -C "$HOME_REPO" add -- "${f#$HOME_REPO/}"
-  done < <(find "$HOME_REPO/kb" -type f -name 'CLAUDE.md' 2>/dev/null | sort)
-  git -C "$HOME_REPO" add -- README.md CLAUDE.md .gitignore 2>/dev/null || true
+  while IFS= read -r relative_path; do
+    git -C "$HOME_REPO" add -- "$relative_path" 2>/dev/null || true
+  done < <(list_home_repo_seed_relative_files)
   if git -C "$HOME_REPO" diff --cached --quiet; then
     return 0
   fi
@@ -1986,6 +2005,24 @@ init_jj_colocate_repo() {
   jj git init --colocate "$repo_path"
 }
 
+preview_home_repo_simulation() {
+  case "$HOME_REPO_MODE" in
+    init)
+      log "[simulate] initialize home repo at $HOME_REPO"
+      ;;
+    remote)
+      [[ -n "$HOME_REPO_REMOTE" ]] || fail "本体 remote 模式缺少远程仓库"
+      log "[simulate] git clone $(clone_url_from_repo_input "$HOME_REPO_REMOTE") $HOME_REPO"
+      ;;
+    local)
+      log "[simulate] attach local home repo at $HOME_REPO"
+      ;;
+  esac
+  seed_home_repo_tree
+  commit_home_repo_seed
+  init_jj_colocate_repo "$HOME_REPO"
+}
+
 init_or_attach_home_repo() {
   case "$HOME_REPO_MODE" in
     init)
@@ -2024,9 +2061,6 @@ init_or_attach_home_repo() {
       ensure_path_owner "$HOME_REPO"
       ;;
   esac
-  if [[ "$SIMULATE" -eq 1 ]]; then
-    return 0
-  fi
   seed_home_repo_tree
   commit_home_repo_seed
   init_jj_colocate_repo "$HOME_REPO"
@@ -2231,6 +2265,7 @@ main() {
     exit 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
+    preview_home_repo_simulation
     print_summary
     exit 0
   fi

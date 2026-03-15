@@ -448,6 +448,43 @@ test_home_repo_seed_commit_includes_version_and_ahead_hint() {
   assert_contains "$log" "[home_repo ahead 1，建议执行：git -C \"$home_repo\" push]"
 }
 
+test_simulate_lists_seed_files_to_add() {
+  local sandbox app_dir home_repo log
+  sandbox="$(setup_sandbox simulate-seed-file-list)"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  log="$sandbox/simulate.log"
+
+  create_git_repo "$home_repo"
+  mkdir -p "$home_repo/kb/custom"
+  cat > "$home_repo/kb/custom/CLAUDE.md" <<'EOF'
+# custom
+EOF
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --simulate \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode local \
+      --task-repo-mode none \
+      --scheduler none
+
+  assert_contains "$log" "[simulate] 将要 add 的文件列表："
+  assert_contains "$log" "[simulate]   - .gitignore"
+  assert_contains "$log" "[simulate]   - CLAUDE.md"
+  assert_contains "$log" "[simulate]   - README.md"
+  assert_contains "$log" "[simulate]   - kb/CLAUDE.md"
+  assert_contains "$log" "[simulate]   - kb/custom/CLAUDE.md"
+  assert_contains "$log" "[simulate]   - kb/skills/L1/CLAUDE.md"
+}
+
 test_systemd_degrade_preflight() {
   local sandbox readonly_xdg fakebin log
   sandbox="$(setup_sandbox systemd-degrade)"
@@ -1157,6 +1194,8 @@ main() {
   log "已通过: 首装 + 幂等重装"
   test_home_repo_seed_commit_includes_version_and_ahead_hint
   log "已通过: home_repo seed 版本号与 ahead 提示"
+  test_simulate_lists_seed_files_to_add
+  log "已通过: simulate 输出 home_repo seed 文件清单"
   test_systemd_degrade_preflight
   log "已通过: systemd 降级体检"
   test_systemd_preflight_accepts_busless_deploy
