@@ -54,6 +54,7 @@ JOURNAL_CALENDAR="${JOURNAL_CALENDAR:-$JOURNAL_CALENDAR_DEFAULT}"
 
 ENV_FILE=""
 CONFIG_FILE=""
+CRONCFG_FILE=""
 STATE_DB=""
 LOG_DIR=""
 KB_DIR=""
@@ -108,6 +109,7 @@ refresh_paths() {
   TASK_KB_PATH="$(expand_path "$TASK_KB_PATH")"
   ENV_FILE="$APP_DIR/.env"
   CONFIG_FILE="$APP_DIR/ops/config/config.toml"
+  CRONCFG_FILE="$APP_DIR/croncfg.md"
   STATE_DB="$APP_DIR/var/state.db"
   LOG_DIR="$APP_DIR/log"
   KB_DIR="$HOME_REPO/kb"
@@ -128,7 +130,7 @@ usage() {
   --preflight-only          只执行安装前体检，不落盘
   --skip-deps               跳过系统依赖安装
   --install-claude          非交互模式下自动执行 Claude 官方安装
-  --scheduler MODE          调度器模式: auto|systemd|cron|none
+  --scheduler MODE          调度器模式: auto|systemd|cron|none（安装器不再自动托管 cron）
   --task-clone-root PATH    remote 任务仓库本地 clone 根目录，默认 /opt/src/3claw
   --app-dir PATH            程序目录，默认 ~/.ccclaw
   --home-repo PATH          本体仓库目录，默认 /opt/ccclaw
@@ -964,6 +966,47 @@ probe_crontab() {
   CRON_CHECK_STATUS="probe_failed(${text:-unknown})"
 }
 
+cron_manual_mode_hint() {
+  case "$CRON_CHECK_STATUS" in
+    ready*)
+      printf '当前检测到可用 crontab；安装器不会自动改写，请按 %s 走专家手工配置。\n' "$CRONCFG_FILE"
+      ;;
+    missing_crontab)
+      printf '当前环境缺少 crontab；本轮只能保持 none，如需 cron 请先安装 cron/cronie，并参考 %s。\n' "$CRONCFG_FILE"
+      ;;
+    probe_failed*)
+      printf '当前 crontab 探查失败(%s)；本轮只能保持 none，请先修复环境或参考 %s。\n' "$CRON_CHECK_STATUS" "$CRONCFG_FILE"
+      ;;
+    *)
+      printf '当前未检测到可用 crontab；本轮按 none 继续，如需专家手工 cron 请参考 %s。\n' "$CRONCFG_FILE"
+      ;;
+  esac
+}
+
+cron_manual_block() {
+  cat <<EOF
+# >>> ccclaw managed cron >>>
+*/4 * * * * $APP_DIR/bin/ccclaw ingest --config $CONFIG_FILE --env-file $ENV_FILE
+*/2 * * * * $APP_DIR/bin/ccclaw patrol --config $CONFIG_FILE --env-file $ENV_FILE
+50 23 * * * $APP_DIR/bin/ccclaw journal --config $CONFIG_FILE --env-file $ENV_FILE
+# <<< ccclaw managed cron <<<
+EOF
+}
+
+cron_manual_summary() {
+  cat <<EOF
+详细专家说明：$CRONCFG_FILE
+可先复核：
+crontab -l
+$APP_DIR/bin/ccclaw scheduler status --config $CONFIG_FILE --env-file $ENV_FILE
+如需专家手工托管，可选两种方式：
+1. 使用 CLI 专家工具：
+   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron
+2. 手工写入以下 crontab：
+$(cron_manual_block)
+EOF
+}
+
 decide_scheduler() {
   case "$SCHEDULER" in
     systemd)
@@ -988,23 +1031,13 @@ decide_scheduler() {
         fi
       else
         probe_crontab
-        if [[ "$CRON_READY" -eq 1 ]]; then
-          SCHEDULER_EFFECTIVE="cron"
-          SCHEDULER_REASON="user systemd 不可用，自动降级为 cron (systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
-        else
-          SCHEDULER_EFFECTIVE="none"
-          SCHEDULER_REASON="user systemd 与 cron 均不可用，自动降级为 none (systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
-        fi
+        SCHEDULER_EFFECTIVE="none"
+        SCHEDULER_REASON="user systemd 不可用，安装器不再自动托管 cron；本次按 none 继续。$(cron_manual_mode_hint | tr '\n' ' ')(systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
       fi
       ;;
     cron)
       probe_crontab
-      if [[ "$CRON_READY" -eq 1 ]]; then
-        SCHEDULER_EFFECTIVE="cron"
-        SCHEDULER_REASON="按显式参数执行，将写入或更新当前用户受控 crontab 规则"
-      else
-        fail "已显式指定 --scheduler cron，但当前环境不可用: $CRON_CHECK_STATUS"
-      fi
+      fail "安装器不再自动托管 cron。请改用 --scheduler auto|systemd|none，并参考 $CRONCFG_FILE 进行专家手工配置 (systemd=$SYSTEMD_CHECK_STATUS cron=$CRON_CHECK_STATUS)"
       ;;
     none)
       SCHEDULER_EFFECTIVE="none"
@@ -1037,10 +1070,10 @@ print_preflight() {
     *) systemd_line="WARN: user systemd 不可直接使用($SYSTEMD_CHECK_STATUS)，将按 $SCHEDULER_EFFECTIVE 继续" ;;
   esac
   case "$CRON_CHECK_STATUS" in
-    ready*) cron_line="OK: crontab 可写，支持受控规则写入/更新" ;;
+    ready*) cron_line="INFO: 已检测到 crontab；仅供专家手工配置，安装器不会自动改写" ;;
     skip*) cron_line="OK: 已跳过 crontab 探查，当前调度模式 $SCHEDULER" ;;
-    missing_crontab) cron_line="WARN: 未找到 crontab，无法使用 cron 调度" ;;
-    probe_failed*) cron_line="WARN: crontab 探查失败($CRON_CHECK_STATUS)" ;;
+    missing_crontab) cron_line="WARN: 未找到 crontab；当前无法走专家手工 cron" ;;
+    probe_failed*) cron_line="WARN: crontab 探查失败($CRON_CHECK_STATUS)，当前无法走专家手工 cron" ;;
     *) cron_line="INFO: crontab 尚未参与本轮调度决策" ;;
   esac
   if [[ "$TASK_REPO_MODE" == "remote" ]]; then
@@ -1104,8 +1137,8 @@ print_flow() {
 10. 安装调度后端：
    - 请求模式为 auto|systemd 时先体检 user systemd
    - user systemd 可用时写入 $SYSTEMD_USER_DIR
-   - user systemd 不可用且 crontab 可写时，auto 自动降级为受控 cron
-   - cron 仅管理带标记的 ccclaw 受控块，不覆盖用户其它规则
+   - user systemd 不可用时，安装器进入 none + 手工 cron 指引
+   - 安装器不再自动写入当前用户 crontab；cron 仅保留为专家手工工具
 11. 任务仓库绑定：
    - none: 本轮不绑定
    - remote: clone 到 $TASK_CLONE_ROOT 下约定入口，并写入 config.toml
@@ -1189,7 +1222,13 @@ collect_inputs() {
   esac
 
   print_stage "阶段 3/4 调度器"
-  prompt_mode SCHEDULER "调度器模式 (A)uto/(S)ystemd/(C)ron/(N)one" "$SCHEDULER" "auto systemd cron none"
+  if [[ "$SCHEDULER_EXPLICIT" -eq 0 && "$YES" -eq 0 ]]; then
+    local scheduler_prompt_default="$SCHEDULER"
+    if [[ "$scheduler_prompt_default" == "cron" ]]; then
+      scheduler_prompt_default="auto"
+    fi
+    prompt_mode SCHEDULER "调度器模式 (A)uto/(S)ystemd/(N)one" "$scheduler_prompt_default" "auto systemd none"
+  fi
   refresh_paths
 }
 
@@ -1730,21 +1769,7 @@ reconcile_managed_crontab() {
     return 0
   fi
   case "$SCHEDULER_EFFECTIVE" in
-    cron)
-      if [[ "$SIMULATE" -eq 1 ]]; then
-        CRON_MANAGED_STATUS="planned:enable"
-        CRON_MANAGED_REASON="模拟模式：将写入或更新当前用户 crontab 中的 ccclaw 受控规则"
-        log "[simulate] $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
-        return 0
-      fi
-      if ! message="$("$APP_DIR/bin/ccclaw" --config "$CONFIG_FILE" --env-file "$ENV_FILE" scheduler enable-cron 2>&1)"; then
-        fail "写入受控 crontab 失败: $message"
-      fi
-      CRON_MANAGED_STATUS="enabled"
-      CRON_MANAGED_REASON="$message"
-      log "$message"
-      ;;
-    systemd|none)
+    systemd)
       if [[ "$SIMULATE" -eq 1 ]]; then
         CRON_MANAGED_STATUS="planned:disable"
         CRON_MANAGED_REASON="模拟模式：如存在 ccclaw 受控 crontab 规则将尝试清理"
@@ -1760,6 +1785,10 @@ reconcile_managed_crontab() {
         CRON_MANAGED_REASON="$message"
         warn "清理受控 crontab 失败: $message"
       fi
+      ;;
+    none)
+      CRON_MANAGED_STATUS="skip(none)"
+      CRON_MANAGED_REASON="当前调度模式为 none；安装器未自动改写 crontab。$(cron_manual_mode_hint | tr '\n' ' ')"
       ;;
   esac
 }
@@ -2074,22 +2103,13 @@ print_summary() {
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       fi
-      scheduler_step_7="7. 若需要切换或回滚 cron 规则，可执行:
+      scheduler_step_7="7. 若需要清理历史托管 cron 规则，可执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
-   bash $APP_DIR/install.sh --scheduler cron"
-      ;;
-    cron)
-      scheduler_step_6="6. 当前调度模式为 cron；安装器已写入或更新当前用户 crontab 中的 ccclaw 受控规则:
-   crontab -l
-   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
-      scheduler_step_7="7. 若后续切回 systemd --user，请先执行:
-   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
-   systemctl --user daemon-reload
-   systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
+   详细专家说明见: $CRONCFG_FILE"
       ;;
     none|*)
-      scheduler_step_6="6. 当前调度模式为 none；如需受控 cron，可执行:
-   $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler enable-cron"
+      scheduler_step_6="6. 当前调度模式为 none；安装器未自动写入 crontab。
+$(cron_manual_summary)"
       scheduler_step_7="7. 若后续修复好 user systemd，再执行:
    $APP_DIR/bin/ccclaw --config $CONFIG_FILE --env-file $ENV_FILE scheduler disable-cron
    systemctl --user daemon-reload

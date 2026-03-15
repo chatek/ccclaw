@@ -467,6 +467,107 @@ test_systemd_preflight_accepts_busless_deploy() {
   assert_contains "$log" '手工启用 timer'
 }
 
+test_systemd_preflight_auto_guides_manual_cron() {
+  local sandbox readonly_xdg fakebin crontab_file log app_dir
+  sandbox="$(setup_sandbox systemd-auto-manual-cron)"
+  readonly_xdg="$sandbox/readonly-xdg"
+  fakebin="$sandbox/fakebin"
+  crontab_file="$sandbox/crontab.txt"
+  log="$sandbox/preflight.log"
+  app_dir="$sandbox/home/.ccclaw"
+  mkdir -p "$readonly_xdg"
+  chmod 500 "$readonly_xdg"
+  create_fake_crontab "$fakebin" ready
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$readonly_xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --preflight-only \
+      --home-repo "$sandbox/home-repo" \
+      --home-repo-mode init \
+      --task-repo-mode none \
+      --scheduler auto
+
+  chmod 700 "$readonly_xdg"
+  assert_contains "$log" '请求=auto, 生效=none'
+  assert_contains "$log" '安装器不再自动托管 cron'
+  assert_contains "$log" "$app_dir/croncfg.md"
+  assert_contains "$log" "$app_dir/bin/ccclaw scheduler status --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$log" "*/4 * * * * $app_dir/bin/ccclaw ingest --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$log" "*/2 * * * * $app_dir/bin/ccclaw patrol --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+  assert_contains "$log" "50 23 * * * $app_dir/bin/ccclaw journal --config $app_dir/ops/config/config.toml --env-file $app_dir/.env"
+}
+
+test_explicit_cron_mode_fails_fast() {
+  local sandbox fakebin crontab_file log app_dir
+  sandbox="$(setup_sandbox explicit-cron-fail)"
+  fakebin="$sandbox/fakebin"
+  crontab_file="$sandbox/crontab.txt"
+  log="$sandbox/preflight.log"
+  app_dir="$sandbox/app"
+  create_fake_crontab "$fakebin" ready
+
+  run_expect_fail "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --preflight-only \
+      --app-dir "$app_dir" \
+      --home-repo "$sandbox/home-repo" \
+      --home-repo-mode init \
+      --task-repo-mode none \
+      --scheduler cron
+
+  assert_contains "$log" '安装器不再自动托管 cron'
+  assert_contains "$log" "$app_dir/croncfg.md"
+  assert_not_contains "$log" '写入或更新当前用户受控 crontab 规则'
+}
+
+test_legacy_cron_config_fails_fast_on_yes_mode() {
+  local sandbox fakebin crontab_file log app_dir config_dir
+  sandbox="$(setup_sandbox legacy-cron-config)"
+  fakebin="$sandbox/fakebin"
+  crontab_file="$sandbox/crontab.txt"
+  log="$sandbox/preflight.log"
+  app_dir="$sandbox/app"
+  config_dir="$app_dir/ops/config"
+  create_fake_crontab "$fakebin" ready
+  mkdir -p "$config_dir"
+  cat > "$config_dir/config.toml" <<'EOF'
+[scheduler]
+mode = "cron"
+EOF
+
+  run_expect_fail "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      PATH="$fakebin:$PATH" \
+      CCCLAW_FAKE_CRONTAB_FILE="$crontab_file" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --preflight-only \
+      --app-dir "$app_dir" \
+      --home-repo "$sandbox/home-repo" \
+      --home-repo-mode init \
+      --task-repo-mode none
+
+  assert_contains "$log" '安装器不再自动托管 cron'
+  assert_contains "$log" "$app_dir/croncfg.md"
+}
+
 test_systemd_install_auto_enable_and_restart() {
   local sandbox fakebin app_dir home_repo task_repo xdg log1 log2 config_file readme_file systemctl_log
   sandbox="$(setup_sandbox systemd-auto-enable)"
@@ -1017,6 +1118,12 @@ main() {
   log "已通过: systemd 降级体检"
   test_systemd_preflight_accepts_busless_deploy
   log "已通过: systemd 无 user bus 仍允许部署"
+  test_systemd_preflight_auto_guides_manual_cron
+  log "已通过: auto 在无 systemd 时仅输出手工 cron 指引"
+  test_explicit_cron_mode_fails_fast
+  log "已通过: 显式 cron 安装路径直接失败"
+  test_legacy_cron_config_fails_fast_on_yes_mode
+  log "已通过: 继承旧 cron 配置时非交互安装直接失败"
   test_systemd_install_auto_enable_and_restart
   log "已通过: systemd 安装自动启用与重装重启"
   test_merge_managed_markdown_preserves_skill_meta_fields
