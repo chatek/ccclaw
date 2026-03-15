@@ -18,6 +18,7 @@ UPGRADE_PROGRAM="${UPGRADE_PROGRAM:-1}"
 UPGRADE_CLAUDE="${UPGRADE_CLAUDE:-0}"
 REFRESH_CLAUDE_ASSETS="${REFRESH_CLAUDE_ASSETS:-0}"
 WORK_DIR=""
+RELEASE_TAG=""
 
 log() { printf '[ccclaw-upgrade] %s\n' "$*"; }
 fail() { printf '[ccclaw-upgrade][FAIL] %s\n' "$*" >&2; exit 1; }
@@ -96,23 +97,23 @@ detect_platform() {
 }
 
 download_latest_release() {
-  local tag package_name checksum_file archive_file
+  local package_name checksum_file archive_file
   require_tool gh
   require_tool tar
   require_tool sha256sum
 
-  tag="$(gh release view --repo "$CONTROL_REPO" --json tagName --jq '.tagName')"
-  [[ -n "$tag" ]] || fail "无法获取最新 release tag"
+  RELEASE_TAG="$(gh release view --repo "$CONTROL_REPO" --json tagName --jq '.tagName')"
+  [[ -n "$RELEASE_TAG" ]] || fail "无法获取最新 release tag"
 
-  PACKAGE_NAME="ccclaw_${tag}_${GOOS}_${GOARCH}.tar.gz"
+  PACKAGE_NAME="ccclaw_${RELEASE_TAG}_${GOOS}_${GOARCH}.tar.gz"
   CHECKSUM_NAME="SHA256SUMS"
   WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccclaw-upgrade.XXXXXX")"
   DOWNLOAD_DIR="$WORK_DIR/download"
   EXTRACT_DIR="$WORK_DIR/extract"
   mkdir -p "$DOWNLOAD_DIR" "$EXTRACT_DIR"
 
-  log "下载官方 release: repo=$CONTROL_REPO tag=$tag asset=$PACKAGE_NAME"
-  gh release download "$tag" \
+  log "下载官方 release: repo=$CONTROL_REPO tag=$RELEASE_TAG asset=$PACKAGE_NAME"
+  gh release download "$RELEASE_TAG" \
     --repo "$CONTROL_REPO" \
     --dir "$DOWNLOAD_DIR" \
     --pattern "$PACKAGE_NAME" \
@@ -145,7 +146,7 @@ run_release_installer() {
   if [[ "$UPGRADE_CLAUDE" == "1" ]]; then
     args+=(--install-claude)
   fi
-  "$RELEASE_DIR/install.sh" "${args[@]}"
+  CCCLAW_VERSION="$RELEASE_TAG" "$RELEASE_DIR/install.sh" "${args[@]}"
 }
 
 load_existing_context

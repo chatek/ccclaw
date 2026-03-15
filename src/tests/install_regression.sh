@@ -415,6 +415,39 @@ test_first_install_and_idempotent_reinstall() {
   assert_contains "$log2" "保留已有普通配置: $config_file"
 }
 
+test_home_repo_seed_commit_includes_version_and_ahead_hint() {
+  local sandbox app_dir home_repo remote_repo log
+  sandbox="$(setup_sandbox home-repo-seed-version)"
+  app_dir="$sandbox/app"
+  home_repo="$sandbox/home-repo"
+  remote_repo="$sandbox/home-remote.git"
+  log="$sandbox/install.log"
+
+  create_git_repo "$home_repo"
+  git init --bare -q "$remote_repo"
+  git -C "$home_repo" branch -M main
+  git -C "$home_repo" remote add origin "$remote_repo"
+  git -C "$home_repo" push -q -u origin main
+
+  run_case "$log" \
+    env \
+      HOME="$sandbox/home" \
+      XDG_CONFIG_HOME="$sandbox/xdg" \
+      BIN_LINK="$sandbox/bin/ccclaw" \
+      CCCLAW_VERSION="26.03.15.0746" \
+      "$INSTALL_SCRIPT" \
+      --yes \
+      --skip-deps \
+      --app-dir "$app_dir" \
+      --home-repo "$home_repo" \
+      --home-repo-mode local \
+      --task-repo-mode none \
+      --scheduler none
+
+  assert_eq "seed ccclaw home repo (v26.03.15.0746)" "$(git -C "$home_repo" log -1 --pretty=%s)" "seed commit 应携带版本号"
+  assert_contains "$log" "[home_repo ahead 1，建议执行：git -C \"$home_repo\" push]"
+}
+
 test_systemd_degrade_preflight() {
   local sandbox readonly_xdg fakebin log
   sandbox="$(setup_sandbox systemd-degrade)"
@@ -1113,6 +1146,7 @@ EOF
   assert_contains "$app_dir/install.sh" 'CONTROL_REPO_DEFAULT="41490/ccclaw"'
   assert_file_exists "$croncfg_file"
   assert_contains "$croncfg_file" 'ccclaw cron 专家手工配置说明'
+  assert_eq "seed ccclaw home repo (v$version)" "$(git -C "$home_repo" log -1 --pretty=%s)" "upgrade 应把 release tag 传给 seed commit"
 }
 
 main() {
@@ -1121,6 +1155,8 @@ main() {
   log "开始执行 install.sh 回归测试"
   test_first_install_and_idempotent_reinstall
   log "已通过: 首装 + 幂等重装"
+  test_home_repo_seed_commit_includes_version_and_ahead_hint
+  log "已通过: home_repo seed 版本号与 ahead 提示"
   test_systemd_degrade_preflight
   log "已通过: systemd 降级体检"
   test_systemd_preflight_accepts_busless_deploy

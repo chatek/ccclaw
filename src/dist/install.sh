@@ -34,6 +34,7 @@ APP_DIR="${APP_DIR:-$APP_DIR_DEFAULT}"
 HOME_REPO="${HOME_REPO:-$HOME_REPO_DEFAULT}"
 HOME_REPO_MODE="${HOME_REPO_MODE:-init}"
 HOME_REPO_REMOTE="${HOME_REPO_REMOTE:-}"
+CCCLAW_VERSION="${CCCLAW_VERSION:-}"
 CONTROL_REPO="$CONTROL_REPO_DEFAULT"
 BIN_LINK="${BIN_LINK:-$BIN_LINK_DEFAULT}"
 SYSTEMD_USER_DIR="$SYSTEMD_USER_DIR_DEFAULT"
@@ -1926,6 +1927,7 @@ CLAUDE
 }
 
 commit_home_repo_seed() {
+  local commit_message remote_name branch_name status_head ahead_count
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] git add/commit seeded files in $HOME_REPO"
     return 0
@@ -1944,12 +1946,28 @@ commit_home_repo_seed() {
   if git -C "$HOME_REPO" diff --cached --quiet; then
     return 0
   fi
-  git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m 'seed ccclaw home repo'
+  commit_message='seed ccclaw home repo'
+  if [[ -n "$CCCLAW_VERSION" ]]; then
+    commit_message="$commit_message (v$CCCLAW_VERSION)"
+  fi
+  git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m "$commit_message"
   # 决策 #4（Issue#58）：终端强调提醒用户具体的提交指令
   printf '\n== 本体仓库自动提交完成（仅受管模板文件）==\n'
   log "已提交：kb/**/CLAUDE.md, README.md, CLAUDE.md, .gitignore"
-  log "如需推送到远端，请执行："
-  log "  git -C \"$HOME_REPO\" push"
+  remote_name="$(git -C "$HOME_REPO" remote 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$remote_name" ]]; then
+    status_head="$(git -C "$HOME_REPO" status --porcelain=v1 -b 2>/dev/null | head -n 1 || true)"
+    ahead_count="$(printf '%s\n' "$status_head" | sed -nE 's/.*ahead ([0-9]+).*/\1/p')"
+    if [[ -n "$ahead_count" && "$ahead_count" != "0" ]]; then
+      log "[home_repo ahead $ahead_count，建议执行：git -C \"$HOME_REPO\" push]"
+    else
+      branch_name="$(git -C "$HOME_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')"
+      log "检测到本体仓库 remote=$remote_name，但当前分支 $branch_name 尚未返回 ahead 统计；首次推送建议执行："
+      log "  git -C \"$HOME_REPO\" push -u $remote_name HEAD"
+    fi
+  else
+    log "未检测到本体仓库 remote，跳过 ahead 提示。"
+  fi
   log "查看当前状态："
   log "  git -C \"$HOME_REPO\" status"
   log "  git -C \"$HOME_REPO\" log --oneline -5"
