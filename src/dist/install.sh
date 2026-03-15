@@ -12,6 +12,7 @@ SHELL_INTEGRATION="none"
 REMOVE_SHELL_INTEGRATION="none"
 REMOVE_CRON=0
 SCHEDULER_EXPLICIT=0
+UPGRADE_HOME_REPO=0
 
 APP_DIR_DEFAULT="$HOME/.ccclaw"
 HOME_REPO_DEFAULT="/opt/ccclaw"
@@ -148,6 +149,7 @@ usage() {
   --inject-shell TARGET     显式写入 shell 集成，目前仅支持 bashrc
   --remove-shell TARGET     移除受控 shell 集成块，目前仅支持 bashrc
   --remove-cron             只清理当前用户 crontab 中的 ccclaw 受控规则
+  --upgrade-home-repo       升级路径：只刷新现有 home_repo 的受管模板，不执行首装初始化
   -h, --help                显示帮助
 USAGE
 }
@@ -176,6 +178,7 @@ while (($#)); do
     --inject-shell) shift; SHELL_INTEGRATION="$1" ;;
     --remove-shell) shift; REMOVE_SHELL_INTEGRATION="$1" ;;
     --remove-cron) REMOVE_CRON=1 ;;
+    --upgrade-home-repo) UPGRADE_HOME_REPO=1 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "未知参数: $1" ;;
   esac
@@ -1102,13 +1105,25 @@ INFO
 }
 
 print_flow() {
+  local home_repo_mode_summary="$HOME_REPO_MODE"
+  local home_repo_step_title="5. 初始化或接管本体仓库："
+  local home_repo_step_body="   - init: 在目标目录 git init，并写入 dist/kb 初始记忆树
+   - remote: clone 指定仓库到目标目录，再补齐 kb 初始树
+   - local: 接管本地已有 git 仓库，再补齐 kb 初始树"
+  if [[ "$UPGRADE_HOME_REPO" -eq 1 ]]; then
+    home_repo_mode_summary="upgrade-refresh"
+    home_repo_step_title="5. 刷新现有本体仓库受管模板："
+    home_repo_step_body="   - 仅刷新 kb/**/CLAUDE.md 受管模板
+   - 不再执行首次初始化专属逻辑
+   - 不自动创建本体 README.md / CLAUDE.md / .gitignore"
+  fi
   cat <<FLOW
 == 计划执行流程 ==
 1. 探查现有环境：claude / gh / rg / sqlite3 / tmux / rtk / git / node / npm / uv / systemd --user
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
-   - 本体仓库模式: $HOME_REPO_MODE
+   - 本体仓库模式: $home_repo_mode_summary
    - 调度模式: $SCHEDULER
 3. 生成固定隐私配置：
    - .env: $ENV_FILE
@@ -1117,10 +1132,8 @@ print_flow() {
    - config.toml: $CONFIG_FILE
    - 固定写入官方控制仓库: $CONTROL_REPO
    - 记录 path/执行器/调度等非敏感配置
-5. 初始化或接管本体仓库：
-   - init: 在目标目录 git init，并写入 dist/kb 初始记忆树
-   - remote: clone 指定仓库到目标目录，再补齐 kb 初始树
-   - local: 接管本地已有 git 仓库，再补齐 kb 初始树
+$home_repo_step_title
+$home_repo_step_body
 6. Claude 适配：
    - 先探查官方安装通道可达性
    - 交互模式可确认后执行官方安装脚本
@@ -1942,8 +1955,47 @@ list_home_repo_seed_relative_files() {
   } | awk 'NF && !seen[$0]++' | sort
 }
 
+list_home_repo_refresh_relative_files() {
+  if [[ -d "$DIST_DIR/kb" ]]; then
+    find "$DIST_DIR/kb" -type f -name 'CLAUDE.md' 2>/dev/null | while IFS= read -r f; do
+      printf 'kb/%s\n' "${f#$DIST_DIR/kb/}"
+    done | sort
+  fi
+}
+
+home_repo_commit_message() {
+  local base_message="$1"
+  if [[ -n "$CCCLAW_VERSION" ]]; then
+    printf '%s (v%s)\n' "$base_message" "$CCCLAW_VERSION"
+    return 0
+  fi
+  printf '%s\n' "$base_message"
+}
+
+print_home_repo_commit_followup() {
+  local remote_name branch_name status_head ahead_count
+  printf '\n== 本体仓库自动提交完成（仅受管模板文件）==\n'
+  remote_name="$(git -C "$HOME_REPO" remote 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$remote_name" ]]; then
+    status_head="$(git -C "$HOME_REPO" status --porcelain=v1 -b 2>/dev/null | head -n 1 || true)"
+    ahead_count="$(printf '%s\n' "$status_head" | sed -nE 's/.*ahead ([0-9]+).*/\1/p')"
+    if [[ -n "$ahead_count" && "$ahead_count" != "0" ]]; then
+      log "[home_repo ahead $ahead_count，建议执行：git -C \"$HOME_REPO\" push]"
+    else
+      branch_name="$(git -C "$HOME_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')"
+      log "检测到本体仓库 remote=$remote_name，但当前分支 $branch_name 尚未返回 ahead 统计；首次推送建议执行："
+      log "  git -C \"$HOME_REPO\" push -u $remote_name HEAD"
+    fi
+  else
+    log "未检测到本体仓库 remote，跳过 ahead 提示。"
+  fi
+  log "查看当前状态："
+  log "  git -C \"$HOME_REPO\" status"
+  log "  git -C \"$HOME_REPO\" log --oneline -5"
+}
+
 commit_home_repo_seed() {
-  local commit_message remote_name branch_name status_head ahead_count relative_path
+  local commit_message relative_path
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] git add/commit seeded files in $HOME_REPO"
     log "[simulate] 将要 add 的文件列表："
@@ -1965,31 +2017,33 @@ commit_home_repo_seed() {
   if git -C "$HOME_REPO" diff --cached --quiet; then
     return 0
   fi
-  commit_message='seed ccclaw home repo'
-  if [[ -n "$CCCLAW_VERSION" ]]; then
-    commit_message="$commit_message (v$CCCLAW_VERSION)"
-  fi
+  commit_message="$(home_repo_commit_message 'seed ccclaw home repo')"
   git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m "$commit_message"
-  # 决策 #4（Issue#58）：终端强调提醒用户具体的提交指令
-  printf '\n== 本体仓库自动提交完成（仅受管模板文件）==\n'
   log "已提交：kb/**/CLAUDE.md, README.md, CLAUDE.md, .gitignore"
-  remote_name="$(git -C "$HOME_REPO" remote 2>/dev/null | head -n 1 || true)"
-  if [[ -n "$remote_name" ]]; then
-    status_head="$(git -C "$HOME_REPO" status --porcelain=v1 -b 2>/dev/null | head -n 1 || true)"
-    ahead_count="$(printf '%s\n' "$status_head" | sed -nE 's/.*ahead ([0-9]+).*/\1/p')"
-    if [[ -n "$ahead_count" && "$ahead_count" != "0" ]]; then
-      log "[home_repo ahead $ahead_count，建议执行：git -C \"$HOME_REPO\" push]"
-    else
-      branch_name="$(git -C "$HOME_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'HEAD')"
-      log "检测到本体仓库 remote=$remote_name，但当前分支 $branch_name 尚未返回 ahead 统计；首次推送建议执行："
-      log "  git -C \"$HOME_REPO\" push -u $remote_name HEAD"
-    fi
-  else
-    log "未检测到本体仓库 remote，跳过 ahead 提示。"
+  print_home_repo_commit_followup
+}
+
+commit_home_repo_refresh() {
+  local commit_message relative_path
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] git add/commit refreshed files in $HOME_REPO"
+    log "[simulate] 将要 add 的文件列表："
+    while IFS= read -r relative_path; do
+      log "[simulate]   - $relative_path"
+    done < <(list_home_repo_refresh_relative_files)
+    return 0
   fi
-  log "查看当前状态："
-  log "  git -C \"$HOME_REPO\" status"
-  log "  git -C \"$HOME_REPO\" log --oneline -5"
+  [[ -d "$HOME_REPO/.git" ]] || fail "升级刷新要求 home_repo 已存在且为 git 仓库: $HOME_REPO"
+  while IFS= read -r relative_path; do
+    git -C "$HOME_REPO" add -- "$relative_path" 2>/dev/null || true
+  done < <(list_home_repo_refresh_relative_files)
+  if git -C "$HOME_REPO" diff --cached --quiet; then
+    return 0
+  fi
+  commit_message="$(home_repo_commit_message 'seed ccclaw home repo')"
+  git -C "$HOME_REPO" -c user.name='ccclaw' -c user.email='ccclaw@local' commit -m "$commit_message"
+  log "已提交：kb/**/CLAUDE.md"
+  print_home_repo_commit_followup
 }
 
 init_jj_colocate_repo() {
@@ -2020,6 +2074,13 @@ preview_home_repo_simulation() {
   esac
   seed_home_repo_tree
   commit_home_repo_seed
+  init_jj_colocate_repo "$HOME_REPO"
+}
+
+preview_home_repo_upgrade_simulation() {
+  log "[simulate] refresh managed home repo templates at $HOME_REPO"
+  merge_kb_contracts
+  commit_home_repo_refresh
   init_jj_colocate_repo "$HOME_REPO"
 }
 
@@ -2063,6 +2124,14 @@ init_or_attach_home_repo() {
   esac
   seed_home_repo_tree
   commit_home_repo_seed
+  init_jj_colocate_repo "$HOME_REPO"
+}
+
+refresh_managed_home_repo_templates() {
+  [[ -d "$HOME_REPO" ]] || fail "升级刷新要求现有 home_repo 目录存在: $HOME_REPO"
+  [[ -d "$HOME_REPO/.git" ]] || fail "升级刷新要求 home_repo 已存在且为 git 仓库: $HOME_REPO"
+  merge_kb_contracts
+  commit_home_repo_refresh
   init_jj_colocate_repo "$HOME_REPO"
 }
 
@@ -2143,11 +2212,15 @@ print_summary() {
   if [[ "$gh_token_summary" == "未写入" && -n "$GH_TOKEN_DETECTED" ]]; then
     gh_token_summary="待从 gh auth token 回填"
   fi
-  case "$HOME_REPO_MODE" in
-    remote) home_source_summary="remote -> $HOME_REPO_REMOTE" ;;
-    local) home_source_summary="local -> $HOME_REPO" ;;
-    init) home_source_summary="init -> $HOME_REPO" ;;
-  esac
+  if [[ "$UPGRADE_HOME_REPO" -eq 1 ]]; then
+    home_source_summary="upgrade-refresh -> $HOME_REPO"
+  else
+    case "$HOME_REPO_MODE" in
+      remote) home_source_summary="remote -> $HOME_REPO_REMOTE" ;;
+      local) home_source_summary="local -> $HOME_REPO" ;;
+      init) home_source_summary="init -> $HOME_REPO" ;;
+    esac
+  fi
   case "$TASK_REPO_MODE" in
     remote) task_summary="$TASK_REPO @ $TASK_REPO_PATH (from $TASK_REPO_REMOTE)" ;;
     local) task_summary="$TASK_REPO @ $TASK_REPO_PATH (local)" ;;
@@ -2265,7 +2338,11 @@ main() {
     exit 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
-    preview_home_repo_simulation
+    if [[ "$UPGRADE_HOME_REPO" -eq 1 ]]; then
+      preview_home_repo_upgrade_simulation
+    else
+      preview_home_repo_simulation
+    fi
     print_summary
     exit 0
   fi
@@ -2274,7 +2351,11 @@ main() {
   install_rtk
   create_app_layout
   apply_shell_integration "$SHELL_INTEGRATION"
-  init_or_attach_home_repo
+  if [[ "$UPGRADE_HOME_REPO" -eq 1 ]]; then
+    refresh_managed_home_repo_templates
+  else
+    init_or_attach_home_repo
+  fi
   bind_task_repo
   print_summary
 }

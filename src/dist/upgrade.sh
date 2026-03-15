@@ -142,7 +142,7 @@ download_latest_release() {
 
 run_release_installer() {
   local args=()
-  args=(--yes --app-dir "$APP_DIR" --home-repo "$HOME_REPO")
+  args=(--yes --app-dir "$APP_DIR" --home-repo "$HOME_REPO" --upgrade-home-repo)
   if [[ "$UPGRADE_CLAUDE" == "1" ]]; then
     args+=(--install-claude)
   fi

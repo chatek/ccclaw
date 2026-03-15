@@ -1086,7 +1086,7 @@ test_install_keeps_claude_read_only() {
 }
 
 test_upgrade_downloads_release_and_migrates_config() {
-  local sandbox fakebin fixture_dir app_dir home_repo config_file env_file gh_log version old_bin croncfg_file
+  local sandbox fakebin fixture_dir app_dir home_repo config_file env_file gh_log version old_bin croncfg_file upgrade_log changed_log
   sandbox="$(setup_sandbox upgrade-release)"
   fakebin="$sandbox/fakebin"
   fixture_dir="$sandbox/release-fixture"
@@ -1096,12 +1096,21 @@ test_upgrade_downloads_release_and_migrates_config() {
   env_file="$app_dir/.env"
   croncfg_file="$app_dir/croncfg.md"
   gh_log="$sandbox/gh.log"
+  upgrade_log="$sandbox/upgrade.log"
+  changed_log="$sandbox/home-repo-changed.log"
   version="$("$BIN_PATH" -V)"
   old_bin="$app_dir/bin/ccclaw"
 
   mkdir -p "$app_dir/bin" "$app_dir/ops/config" "$fixture_dir"
   create_fake_gh "$fakebin"
   create_release_fixture "$fixture_dir" "$version"
+  mkdir -p "$home_repo"
+  git -C "$home_repo" init -q
+  git -C "$home_repo" config user.name "ccclaw-test"
+  git -C "$home_repo" config user.email "ccclaw-test@example.invalid"
+  printf 'sentinel\n' > "$home_repo/notes.txt"
+  git -C "$home_repo" add notes.txt
+  git -C "$home_repo" commit -q -m "init home repo"
 
   cat > "$old_bin" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -1160,7 +1169,7 @@ EOF
   printf 'GH_TOKEN=\n' > "$env_file"
   chmod 600 "$env_file"
 
-  run_case "$sandbox/upgrade.log" \
+  run_case "$upgrade_log" \
     env \
       HOME="$sandbox/home" \
       XDG_CONFIG_HOME="$sandbox/xdg" \
@@ -1184,6 +1193,16 @@ EOF
   assert_file_exists "$croncfg_file"
   assert_contains "$croncfg_file" 'ccclaw cron 专家手工配置说明'
   assert_eq "seed ccclaw home repo (v$version)" "$(git -C "$home_repo" log -1 --pretty=%s)" "upgrade 应把 release tag 传给 seed commit"
+  assert_contains "$upgrade_log" "本体仓库来源: upgrade-refresh -> $home_repo"
+  assert_file_exists "$home_repo/kb/CLAUDE.md"
+  assert_file_missing "$home_repo/README.md"
+  assert_file_missing "$home_repo/CLAUDE.md"
+  assert_file_missing "$home_repo/.gitignore"
+  git -C "$home_repo" diff-tree --no-commit-id --name-only -r HEAD > "$changed_log"
+  assert_contains "$changed_log" 'kb/CLAUDE.md'
+  assert_eq "0" "$(grep -Fxc 'README.md' "$changed_log" 2>/dev/null || true)" "upgrade 不应写入首装 README.md"
+  assert_eq "0" "$(grep -Fxc 'CLAUDE.md' "$changed_log" 2>/dev/null || true)" "upgrade 不应写入首装 CLAUDE.md"
+  assert_eq "0" "$(grep -Fxc '.gitignore' "$changed_log" 2>/dev/null || true)" "upgrade 不应写入首装 .gitignore"
 }
 
 main() {
