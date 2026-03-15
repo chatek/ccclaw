@@ -8,7 +8,7 @@ import (
 )
 
 func TestManagedHookSettingsUsesOfficialNestedShape(t *testing.T) {
-	settings := ManagedHookSettings("/opt/ccclaw/bin/ccclaw")
+	settings := ManagedHookSettings("/opt/ccclaw/bin/ccclaw", "/opt/ccclaw/ops/config/config.toml")
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected hooks map, got %#v", settings["hooks"])
@@ -35,7 +35,7 @@ func TestManagedHookSettingsUsesOfficialNestedShape(t *testing.T) {
 	if commandHook["type"] != "command" {
 		t.Fatalf("expected command type, got %#v", commandHook["type"])
 	}
-	if commandHook["command"] != "/opt/ccclaw/bin/ccclaw claude-hook session-start" {
+	if commandHook["command"] != "/opt/ccclaw/bin/ccclaw --config /opt/ccclaw/ops/config/config.toml claude-hook session-start" {
 		t.Fatalf("unexpected command hook: %#v", commandHook)
 	}
 
@@ -66,7 +66,7 @@ func TestEnsureManagedHookSettingsPreservesCustomHooksAndReplacesManagedOnes(t *
 						},
 						map[string]any{
 							"type":    "command",
-							"command": "/old/bin/ccclaw claude-hook session-start",
+							"command": "/old/bin/ccclaw --config /old/config.toml claude-hook session-start",
 						},
 					},
 				},
@@ -82,7 +82,7 @@ func TestEnsureManagedHookSettingsPreservesCustomHooksAndReplacesManagedOnes(t *
 		t.Fatalf("写入 settings.local.json 失败: %v", err)
 	}
 
-	if err := EnsureManagedHookSettings(repoDir, "/opt/ccclaw/bin/ccclaw"); err != nil {
+	if err := EnsureManagedHookSettings(repoDir, "/opt/ccclaw/bin/ccclaw", "/opt/ccclaw/ops/config/config.toml"); err != nil {
 		t.Fatalf("EnsureManagedHookSettings 失败: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestEnsureManagedHookSettingsPreservesCustomHooksAndReplacesManagedOnes(t *
 	lastGroup := sessionEntries[1].(map[string]any)
 	lastHooks := lastGroup["hooks"].([]any)
 	lastHook := lastHooks[0].(map[string]any)
-	if lastHook["command"] != "/opt/ccclaw/bin/ccclaw claude-hook session-start" {
+	if lastHook["command"] != "/opt/ccclaw/bin/ccclaw --config /opt/ccclaw/ops/config/config.toml claude-hook session-start" {
 		t.Fatalf("expected new managed hook to be appended, got %#v", lastHook)
 	}
 }

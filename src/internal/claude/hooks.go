@@ -16,13 +16,13 @@ const (
 )
 
 type HookPayload struct {
-	HookEventName string `json:"hook_event_name"`
-	SessionID     string `json:"session_id"`
+	HookEventName  string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
-	Cwd           string `json:"cwd"`
-	Matcher       string `json:"matcher"`
-	Model         any    `json:"model"`
-	ContextWindow *struct {
+	Cwd            string `json:"cwd"`
+	Matcher        string `json:"matcher"`
+	Model          any    `json:"model"`
+	ContextWindow  *struct {
 		ContextWindowSize int `json:"context_window_size"`
 	} `json:"context_window,omitempty"`
 }
@@ -146,13 +146,13 @@ func HandleHook(stateDir, taskID string, payload HookPayload) error {
 	return SaveHookState(stateDir, state)
 }
 
-func ManagedHookSettings(ccclawBin string) map[string]any {
+func ManagedHookSettings(ccclawBin, configPath string) map[string]any {
 	buildGroup := func(name, matcher string) map[string]any {
 		group := map[string]any{
 			"hooks": []any{
 				map[string]any{
 					"type":    "command",
-					"command": strings.TrimSpace(ccclawBin) + " claude-hook " + name,
+					"command": buildManagedHookCommand(ccclawBin, configPath, name),
 				},
 			},
 		}
@@ -170,7 +170,16 @@ func ManagedHookSettings(ccclawBin string) map[string]any {
 	}
 }
 
-func EnsureManagedHookSettings(repoPath, ccclawBin string) error {
+func buildManagedHookCommand(ccclawBin, configPath, eventName string) string {
+	parts := []string{strings.TrimSpace(ccclawBin)}
+	if strings.TrimSpace(configPath) != "" {
+		parts = append(parts, "--config", strings.TrimSpace(configPath))
+	}
+	parts = append(parts, "claude-hook", strings.TrimSpace(eventName))
+	return strings.Join(parts, " ")
+}
+
+func EnsureManagedHookSettings(repoPath, ccclawBin, configPath string) error {
 	repoPath = strings.TrimSpace(repoPath)
 	if repoPath == "" {
 		return nil
@@ -186,7 +195,7 @@ func EnsureManagedHookSettings(repoPath, ccclawBin string) error {
 			return fmt.Errorf("解析项目 Claude 本地配置失败: %w", err)
 		}
 	}
-	mergeManagedHooks(current, strings.TrimSpace(ccclawBin))
+	mergeManagedHooks(current, strings.TrimSpace(ccclawBin), strings.TrimSpace(configPath))
 	encoded, err := json.MarshalIndent(current, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化项目 Claude 本地配置失败: %w", err)
@@ -197,8 +206,8 @@ func EnsureManagedHookSettings(repoPath, ccclawBin string) error {
 	return nil
 }
 
-func mergeManagedHooks(current map[string]any, ccclawBin string) {
-	managed := ManagedHookSettings(ccclawBin)
+func mergeManagedHooks(current map[string]any, ccclawBin, configPath string) {
+	managed := ManagedHookSettings(ccclawBin, configPath)
 	hooks, _ := current["hooks"].(map[string]any)
 	if hooks == nil {
 		hooks = map[string]any{}
@@ -264,10 +273,13 @@ func isManagedHookEntry(entry map[string]any, ccclawBin string) bool {
 	if command == "" {
 		return false
 	}
-	if strings.Contains(command, strings.TrimSpace(ccclawBin)+" claude-hook ") {
+	if !strings.Contains(command, " claude-hook ") {
+		return false
+	}
+	if strings.HasPrefix(command, strings.TrimSpace(ccclawBin)+" ") {
 		return true
 	}
-	return strings.Contains(command, "ccclaw claude-hook ")
+	return strings.Contains(command, "ccclaw ")
 }
 
 func normalizeModel(value any) string {

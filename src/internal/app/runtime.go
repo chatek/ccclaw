@@ -1714,7 +1714,8 @@ func (rt *Runtime) ensureClaudeManagedHooks(repoPath string) error {
 		return nil
 	}
 	ccclawBin := filepath.Join(rt.cfg.Paths.AppDir, "bin", "ccclaw")
-	return claude.EnsureManagedHookSettings(repoPath, ccclawBin)
+	configPath := filepath.Join(rt.cfg.Paths.AppDir, "ops", "config", "config.toml")
+	return claude.EnsureManagedHookSettings(repoPath, ccclawBin, configPath)
 }
 
 func (rt *Runtime) syncTaskSessionFromHook(task *core.Task) error {
