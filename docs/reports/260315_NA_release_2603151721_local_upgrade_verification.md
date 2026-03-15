@@ -1,0 +1,306 @@
+# 260315_NA_release_2603151721_local_upgrade_verification
+
+## 背景
+
+- 对应操作目标：
+  1. 将当前 `main` 发布为新 release
+  2. 使用本机 release 缓存中的最新版本完成当前主机升级
+  3. 执行关键运行态与调度健康检查
+  4. 形成统一汇报入口，沉淀最小日常测试与人工验收路径
+- 操作日期：
+  - 本地时区（US/Eastern）：2026-03-15
+  - release 发布时间（UTC）：2026-03-15T09:21:45Z
+- 执行前参考决策：
+  - `#55` 已固定“发布后直接使用 `/ops/logs/ccclaw/<version>/` 本地缓存包升级当前主机”的验收口径
+  - `#69` 已固定“升级必须走 `upgrade-refresh`，只刷新现有 `home_repo` 受管模板，不回退到首装语义”的边界
+
+## 发布前核对
+
+### 1. 仓库状态
+
+- 当前分支：`main...origin/main`
+- 工作树：干净
+- 当前 `HEAD`：`49d4f5d85264545bd1126d9fdc605ad85dc746b5`
+- 当前最新已发布 tag（发布前）：`26.03.15.0746`
+
+### 2. 版本号与发布门禁
+
+- `src/ops/scripts/version.sh` 输出：`26.03.15.1721`
+- `make test`：通过
+- `make release-preflight VERSION=26.03.15.1721`：通过
+- `gh auth status`：已登录，具备 `repo` 与 `write:discussion` 等权限
+
+### 3. 升级前主机基线
+
+- `ccclaw -V`：`26.03.15.0746`
+- 程序目录：`/home/zoomq/.ccclaw`
+- 本体仓库：`/opt/data/9527`
+- 调度模式：`systemd`
+- `ccclaw status`：
+  - 默认执行模式：`daemon`
+  - `tmux 托管任务=0`
+  - `daemon 任务=0`
+- `systemctl --user list-unit-files 'ccclaw*'`：
+  - 仍存在遗留 `ccclaw-run.service` / `ccclaw-run.timer`
+- `git -C /opt/data/9527 status --short --branch`：
+  - `## main...origin/main [ahead 3]`
+
+## 发布执行
+
+执行命令：
+
+```bash
+cd /opt/src/ccclaw/src
+make release VERSION=26.03.15.1721
+```
+
+结果：
+
+- release URL：<https://github.com/41490/ccclaw/releases/tag/26.03.15.1721>
+- tag：`26.03.15.1721`
+- target commit：`49d4f5d85264545bd1126d9fdc605ad85dc746b5`
+- 发布时间：`2026-03-15T09:21:45Z`
+
+GitHub release 资产：
+
+- `ccclaw_26.03.15.1721_linux_amd64.tar.gz`
+  - digest：`sha256:cd7e0ce24cb31321c2f3aacfd2521d283abaea99407399d050c077781ed74566`
+  - size：`7047347`
+- `SHA256SUMS`
+  - digest：`sha256:c34ee0308f51a8b0a47204fa8c6302add84a6b9ab4cb89aac3f6e531534c54fb`
+
+## 本地缓存归档与升级执行
+
+### 1. 本地缓存归档
+
+归档目录：
+
+```text
+/ops/logs/ccclaw/26.03.15.1721/
+```
+
+归档文件：
+
+- `ccclaw_26.03.15.1721_linux_amd64.tar.gz`
+- `SHA256SUMS`
+
+本地校验：
+
+```bash
+cd /ops/logs/ccclaw/26.03.15.1721
+sha256sum -c SHA256SUMS
+```
+
+结果：
+
+- `ccclaw_26.03.15.1721_linux_amd64.tar.gz: OK`
+
+### 2. 升级方式
+
+本轮没有从远端重新下载，而是直接使用本机最新缓存包：
+
+```bash
+tmpdir=$(mktemp -d /tmp/ccclaw-local-upgrade.XXXXXX)
+tar -C "$tmpdir" -xzf /ops/logs/ccclaw/26.03.15.1721/ccclaw_26.03.15.1721_linux_amd64.tar.gz
+CCCLAW_VERSION=26.03.15.1721 \
+  "$tmpdir/ccclaw_26.03.15.1721_linux_amd64/install.sh" \
+  --yes \
+  --app-dir /home/zoomq/.ccclaw \
+  --home-repo /opt/data/9527 \
+  --upgrade-home-repo
+```
+
+升级器明确输出：
+
+- 本体仓库模式：`upgrade-refresh`
+- 仅刷新现有 `home_repo` 受管模板
+- 自动完成 `user systemd daemon-reload`
+- 自动重启受管 timer
+- 已清理遗留 `ccclaw-run unit`
+
+## 升级后关键验收
+
+### 1. 版本与工具链
+
+- `ccclaw -V`：`26.03.15.1721`
+- `/home/zoomq/.ccclaw/bin/ccclaw -V`：`26.03.15.1721`
+- `claude --version`：`2.1.76 (Claude Code)`
+- `rtk --version`：`rtk 0.27.2`
+
+### 2. 调度状态
+
+- `ccclaw scheduler status`
+  - `request=systemd effective=systemd`
+- `ccclaw scheduler timers --wide`
+  - `ingest/patrol/journal/archive/sevolver` 五类 timer 均为 `active enabled`
+  - 时区解释继续符合 `Asia/Shanghai`
+
+### 3. 运行态状态
+
+`ccclaw status` 与 `ccclaw status --json` 关键事实：
+
+- 默认模式：`daemon (daemon_targets=1 tmux_targets=0)`
+- `tmux 托管任务: 0`
+- `daemon 任务: 0`
+- 调度后端：`systemd`
+- 当前任务池仍保留历史遗留：
+  - `BLOCKED=7`
+  - `DEAD=4`
+- 最近异常仍指向旧问题：
+  - Claude `--print` 与 `--output-format=stream-json` 组合缺少 `--verbose`
+
+### 4. 健康体检
+
+- 执行：`ccclaw doctor`
+- 结果：`18` 项检查全部通过
+- 关键项：
+  - 配置文件：OK
+  - `.env` 权限：OK
+  - 执行器入口：OK
+  - Claude 运行态：OK
+  - user systemd 调度器：OK
+  - tmux：`当前无 tmux 托管仓库（tmux 仅作为 debug attach）`
+
+### 5. systemd 单元现状
+
+升级前仍存在：
+
+- `ccclaw-run.service`
+- `ccclaw-run.timer`
+
+升级后 `systemctl --user list-unit-files 'ccclaw*'` 显示：
+
+- 仅保留：
+  - `ccclaw-ingest.*`
+  - `ccclaw-patrol.*`
+  - `ccclaw-journal.*`
+  - `ccclaw-archive.*`
+  - `ccclaw-sevolver.*`
+- `ccclaw-run.*` 已被移除
+
+这说明 Issue #57 所追踪的旧 unit 残留，在当前版本升级路径下已被正确清理。
+
+### 6. 本体仓库受管刷新边界
+
+- `git -C /opt/data/9527 status --short --branch`
+  - 仍为 `## main...origin/main [ahead 3]`
+- 升级后没有新增本地提交
+- 说明本轮 `upgrade-refresh` 没有因为“无实际模板差异”而额外生成 seed commit
+
+这符合 Issue #69 Phase 3 的升级边界：有差异才刷新受管模板，无差异则不制造新提交。
+
+### 7. 运行产物目录
+
+- `~/.ccclaw/var/results/` 当前文件数：`35`
+- 已存在：
+  - `*.stream.jsonl`
+  - `*.meta.json`
+  - 兼容 `*.json`
+  - `*.diag.txt`
+  - `*.stdout.txt`
+
+这说明运行态产物目录仍保持结构化结果落盘能力。
+
+### 8. 调度日志
+
+`journalctl --user -u ccclaw-ingest.service -u ccclaw-patrol.service -u ccclaw-journal.service -u ccclaw-sevolver.service -n 80` 显示：
+
+- ingest 周期性执行正常
+- patrol 周期性执行正常
+- 最近多轮 `巡查完成: running=0 restarting=0 pane_dead=0`
+- 最近多轮 `daemon 健康检查: checked=0 compensated=0`
+
+当前没有发现升级导致的 timer 失活或反复失败。
+
+## 新发现与残留风险
+
+### 1. 本地缓存包与 GitHub release 资产摘要不一致
+
+核对结果：
+
+- GitHub release 资产 digest：`cd7e0ce24cb31321c2f3aacfd2521d283abaea99407399d050c077781ed74566`
+- 本地缓存包 digest：`31ade63509ecf2c704098d23f53112f8159323329c517b189fac4d4a536dd4e8`
+- 两者大小也不同：
+  - release 资产：`7047347`
+  - 本地缓存：`7047346`
+
+进一步核对确认：
+
+- `src/.release/ccclaw_26.03.15.1721_linux_amd64.tar.gz` 的 digest 与 GitHub release 资产一致
+- `/ops/logs/ccclaw/26.03.15.1721/` 中的缓存包来自 `make release` 过程中的第一次打包归档
+- `Makefile` 在 `release` 过程中先执行一次 `archive`，随后 `release-notes -> checksum -> package` 又重新生成了一次压缩包
+
+结论：
+
+- 本轮“本地缓存升级”使用的是自洽且经 `SHA256SUMS` 校验通过的本地包，因此本机升级本身是成功的
+- 但“本地缓存包”与“GitHub 正式发布资产”并不是同一个二进制文件
+- 这会削弱 release 归档的一致性审计能力，建议后续单独修复 `Makefile`，确保归档与上传严格复用同一份包
+
+### 2. 任务池仍有历史遗留失败/阻塞任务
+
+当前 `status` 仍可见：
+
+- `#57 BLOCKED`
+- `#58 BLOCKED`
+- `#56/#55/#22/#41 DEAD`
+
+这不影响本轮升级完成，但说明运行态仍存在待清理与待复核的问题池，尤其是 `stream-json` 参数兼容问题。
+
+## 建议的最小日常工作流测试
+
+建议每天或每次升级后至少跑一次以下最小链路：
+
+1. 在控制仓库新建一个最小任务 Issue，正文显式写 `target_repo: 41490/ccclaw`
+2. 由受信任成员评论 `/ccclaw approve`
+3. 观察 `ccclaw status`
+   - 预期：默认模式仍为 `daemon`
+   - 预期：出现 `RUNNING` 或 `FINALIZING` 任务
+   - 预期：`tmux 托管任务` 仍为 `0`
+4. 观察调度推进
+   - `ccclaw scheduler logs patrol --level info`
+   - `journalctl --user -u ccclaw-ingest.service -u ccclaw-patrol.service -n 200`
+5. 观察结果目录
+   - `find ~/.ccclaw/var/results -maxdepth 1 -type f | tail`
+   - 预期新增：
+     - `*.stream.jsonl`
+     - `*.event.json`
+     - `*.json`
+     - `*.meta.json`
+6. 观察结构化状态
+   - `ccclaw status --json`
+   - 预期：任务经历 `NEW -> RUNNING -> FINALIZING -> DONE/FAILED`
+
+## 建议的人工检验流程
+
+1. 检查版本与主链路
+   - `ccclaw -V`
+   - `ccclaw scheduler status`
+   - `ccclaw status`
+2. 检查健康体检
+   - `ccclaw doctor`
+3. 检查调度单元
+   - `systemctl --user list-unit-files 'ccclaw*'`
+   - `systemctl --user list-units 'ccclaw*' --all`
+4. 检查运行日志
+   - `journalctl --user -u ccclaw-ingest.service -u ccclaw-patrol.service -n 200`
+5. 检查结果产物
+   - `ls ~/.ccclaw/var/results/`
+6. 检查本体仓库保护边界
+   - `git -C /opt/data/9527 status --short --branch`
+   - `git -C /opt/data/9527 log --oneline -n 3`
+
+人工判读重点：
+
+- 主模式必须仍是 `daemon`
+- `tmux` 不应重新成为默认执行内核
+- 五类 timer 必须都处于 `active enabled`
+- 升级不应覆盖用户记忆，也不应在“无差异”时制造新的 `home_repo` 提交
+- 如果继续使用本地缓存升级，应额外确认缓存包与 GitHub release 资产是否一致，直到 `Makefile` 的双重打包问题被修复
+
+## 结论
+
+- `26.03.15.1721` 已成功发布
+- 当前主机已通过本地缓存包成功升级到 `26.03.15.1721`
+- 关键运行态、调度器、健康检查均通过
+- 遗留 `ccclaw-run.*` unit 已被清理
+- 发现一个新的发布一致性风险：本地缓存包与 GitHub release 资产摘要不一致，需要后续单独修复
