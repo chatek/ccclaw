@@ -13,6 +13,7 @@ bash install.sh
 - `bin/ccclaw`：主二进制
 - `ops/`：配置样板、systemd 单元、release notes 模板与运维脚本
 - `ops/scripts/ccclaude`：Claude 执行包装器源，安装时复制到 `~/.ccclaw/bin/ccclaude`
+- `croncfg.md`：`cron` 专家手工配置说明，安装时复制到程序目录
 - `kb/`：本体仓库初始化目录树
 - `kb/**/CLAUDE.md`：记忆记录与整理规约模板，升级时无损合并
 - `SHA256SUMS`：release 资产校验文件
@@ -57,7 +58,7 @@ bash install.sh --remove-cron
 2. 检查本体仓库 / 任务仓库 配置是否符合预期
 3. 若体检结果为 `systemd`，且当前会话可直连 user bus，安装/升级会自动启用或重启 timer
 4. 若体检结果为 `systemd`，但当前会话无法直连 user bus，请在登录会话中手工执行 `systemctl --user daemon-reload && systemctl --user enable --now ...`
-5. 若需要专家手工启用 `cron`，先确认 `systemd --user` 确实不可用，再用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
+5. 若需要专家手工启用 `cron`，先阅读 `~/.ccclaw/croncfg.md`，再确认 `systemd --user` 确实不可用，并用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
 6. 如需单独查看或切换调度后端：
 
 ```bash
@@ -76,7 +77,7 @@ bash install.sh --remove-cron
 ~/.ccclaw/bin/ccclaw scheduler use none
 ```
 
-如需专家手工切换到 `cron`：
+如需专家手工切换到 `cron`，先阅读 `~/.ccclaw/croncfg.md`：
 
 ```bash
 ~/.ccclaw/bin/ccclaw scheduler use cron

@@ -15,6 +15,7 @@
 - 安装脚本在可直连 user bus 时应自动启用/重启托管 timer；不可直连时再退回手工命令提示
 - 安装完成后必须打印部署成果、触发方式、日常使用流程与开源协作流程
 - `jj.md` 必须随安装同步到 `~/.ccclaw/jj.md`，作为本机仓库同步速查表
+- `croncfg.md` 必须随安装同步到程序目录，明确区分自动 `systemd` 主路径与专家手工 `cron` 备选路径
 - 安装与升级输出必须明确“默认执行器是 daemon，tmux 仅用于 debug attach/补偿”
 - 发布树文档必须覆盖 `stream-json` 产物链路、`status/stats` 观察入口、`sevolver` 自维护链路与五类受管 timer
 - `upgrade.sh` 固定走官方 release 下载与 `SHA256SUMS` 校验；若 user bus 不可直连，必须打印绝对准确的手工 `systemctl --user` 补救命令

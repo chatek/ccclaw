@@ -603,7 +603,13 @@ systemctl --user daemon-reload
 systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer
 ```
 
-如果需要专家手工维护受控 `cron`：
+如果需要专家手工维护受控 `cron`，先阅读：
+
+```bash
+~/.ccclaw/croncfg.md
+```
+
+然后再按文档中的专家路径执行：
 
 ```bash
 ~/.ccclaw/bin/ccclaw scheduler enable-cron \
@@ -626,7 +632,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-jou
 ~/.ccclaw/bin/ccclaw scheduler use none --config ~/.ccclaw/ops/config/config.toml
 ```
 
-如需专家手工切到 `cron`，请在确认 `systemd --user` 不可用或确有例外需求后，再执行：
+如需专家手工切到 `cron`，请在确认 `systemd --user` 不可用或确有例外需求后，先阅读 `~/.ccclaw/croncfg.md`，再执行：
 
 ```bash
 ~/.ccclaw/bin/ccclaw scheduler use cron --config ~/.ccclaw/ops/config/config.toml

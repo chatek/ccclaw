@@ -27,7 +27,7 @@
 ## 迁移动作
 
 1. 检查 `~/.ccclaw/ops/config/config.toml` 中的 `[scheduler]` 配置是否符合预期。
-2. 如需切换后端，优先执行 `ccclaw scheduler use systemd|none`；仅在专家手工场景再执行 `ccclaw scheduler use cron`。
+2. 如需切换后端，优先执行 `ccclaw scheduler use systemd|none`；仅在专家手工场景且已阅读 `~/.ccclaw/croncfg.md` 后，再执行 `ccclaw scheduler use cron`。
 3. 升级后执行一次 `ccclaw doctor`，确认没有双重调度或失效规则。
 
 ## 回滚命令

@@ -336,7 +336,7 @@ SCRIPT
 }
 
 test_first_install_and_idempotent_reinstall() {
-  local sandbox app_dir home_repo task_repo xdg log1 log2 config_file env_file target_count gh_count
+  local sandbox app_dir home_repo task_repo xdg log1 log2 config_file env_file croncfg_file target_count gh_count
   sandbox="$(setup_sandbox first-install)"
   app_dir="$sandbox/app"
   home_repo="$sandbox/home-repo"
@@ -346,6 +346,7 @@ test_first_install_and_idempotent_reinstall() {
   log2="$sandbox/reinstall.log"
   config_file="$app_dir/ops/config/config.toml"
   env_file="$app_dir/.env"
+  croncfg_file="$app_dir/croncfg.md"
 
   create_git_repo "$task_repo"
 
@@ -368,6 +369,7 @@ test_first_install_and_idempotent_reinstall() {
   assert_file_exists "$app_dir/bin/ccclaw"
   assert_file_exists "$config_file"
   assert_file_exists "$env_file"
+  assert_file_exists "$croncfg_file"
   assert_file_missing "$xdg/systemd/user/ccclaw-ingest.service"
   assert_file_missing "$xdg/systemd/user/ccclaw-ingest.timer"
   assert_file_missing "$xdg/systemd/user/ccclaw-run.service"
@@ -384,6 +386,8 @@ test_first_install_and_idempotent_reinstall() {
   assert_contains "$config_file" "local_path = \"$task_repo\""
   assert_contains "$config_file" 'default_target = "41490/task-local"'
   assert_contains "$env_file" 'GH_TOKEN='
+  assert_contains "$croncfg_file" 'CCClaw 自动使用的调度主路径'
+  assert_contains "$croncfg_file" '专家手工配置方式'
   assert_contains "$log1" '安装完成。'
   assert_contains "$log1" '请求=none, 生效=none'
 
@@ -1012,7 +1016,7 @@ test_install_keeps_claude_read_only() {
 }
 
 test_upgrade_downloads_release_and_migrates_config() {
-  local sandbox fakebin fixture_dir app_dir home_repo config_file env_file gh_log version old_bin
+  local sandbox fakebin fixture_dir app_dir home_repo config_file env_file gh_log version old_bin croncfg_file
   sandbox="$(setup_sandbox upgrade-release)"
   fakebin="$sandbox/fakebin"
   fixture_dir="$sandbox/release-fixture"
@@ -1020,6 +1024,7 @@ test_upgrade_downloads_release_and_migrates_config() {
   home_repo="$sandbox/home-repo-custom"
   config_file="$app_dir/ops/config/config.toml"
   env_file="$app_dir/.env"
+  croncfg_file="$app_dir/croncfg.md"
   gh_log="$sandbox/gh.log"
   version="$("$BIN_PATH" -V)"
   old_bin="$app_dir/bin/ccclaw"
@@ -1106,6 +1111,8 @@ EOF
   assert_contains "$config_file" 'minimum_permission = "admin"'
   assert_not_contains "$config_file" 'command = "/ccclaw approve"'
   assert_contains "$app_dir/install.sh" 'CONTROL_REPO_DEFAULT="41490/ccclaw"'
+  assert_file_exists "$croncfg_file"
+  assert_contains "$croncfg_file" 'ccclaw cron 专家手工配置说明'
 }
 
 main() {

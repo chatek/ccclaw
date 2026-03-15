@@ -757,6 +757,14 @@ sync_jj_quickref() {
   install_release_file 644 "$DIST_DIR/jj.md" "$APP_DIR/jj.md"
 }
 
+sync_croncfg_reference() {
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    log "[simulate] install $DIST_DIR/croncfg.md -> $CRONCFG_FILE"
+    return 0
+  fi
+  install_release_file 644 "$DIST_DIR/croncfg.md" "$CRONCFG_FILE"
+}
+
 normalize_repo_slug() {
   local repo="$1"
   repo="${repo%.git}"
@@ -1866,6 +1874,7 @@ create_app_layout() {
   copy_ops_tree
   sync_app_readme
   sync_jj_quickref
+  sync_croncfg_reference
   create_claude_wrapper
   create_env_file
   create_config_file
