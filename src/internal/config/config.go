@@ -51,7 +51,7 @@ type GitHubConfig struct {
 type PathsConfig struct {
 	AppDir   string `mapstructure:"app_dir" toml:"app_dir"`
 	HomeRepo string `mapstructure:"home_repo" toml:"home_repo"`
-	StateDB  string `mapstructure:"state_db" toml:"state_db"`
+	VarDir   string `mapstructure:"var_dir" toml:"var_dir"`
 	LogDir   string `mapstructure:"log_dir" toml:"log_dir"`
 	KBDir    string `mapstructure:"kb_dir" toml:"kb_dir"`
 	EnvFile  string `mapstructure:"env_file" toml:"env_file"`
@@ -116,9 +116,21 @@ func Load(path string) (*Config, error) {
 	if legacyApproval {
 		return nil, fmt.Errorf("%s: %s", legacyApprovalMigrationHint, path)
 	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	updatedPayload, changed, err := rewriteLegacyStateDBPaths(string(payload))
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := os.WriteFile(path, []byte(updatedPayload), 0o644); err != nil {
+			return nil, fmt.Errorf("自动回写废弃 paths.state_db 失败: %w", err)
+		}
+	}
 
 	v := viper.New()
-	v.SetConfigFile(path)
 	v.SetConfigType("toml")
 	v.SetDefault("github.control_repo", OfficialControlRepo)
 	v.SetDefault("github.issue_label", "ccclaw")
@@ -143,7 +155,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("approval.minimum_permission", "maintain")
 	v.SetDefault("default_target", "")
 
-	if err := v.ReadInConfig(); err != nil {
+	if err := v.ReadConfig(bytes.NewBufferString(updatedPayload)); err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
 
@@ -166,7 +178,7 @@ func (cfg *Config) NormalizePaths() {
 	cfg.GitHub.ControlRepo = OfficialControlRepo
 	cfg.Paths.AppDir = ExpandPath(cfg.Paths.AppDir)
 	cfg.Paths.HomeRepo = ExpandPath(cfg.Paths.HomeRepo)
-	cfg.Paths.StateDB = ExpandPath(cfg.Paths.StateDB)
+	cfg.Paths.VarDir = normalizeVarDir(ExpandPath(cfg.Paths.VarDir))
 	cfg.Paths.LogDir = ExpandPath(cfg.Paths.LogDir)
 	cfg.Paths.KBDir = ExpandPath(cfg.Paths.KBDir)
 	cfg.Paths.EnvFile = ExpandPath(cfg.Paths.EnvFile)
@@ -209,8 +221,8 @@ func (cfg *Config) Validate() error {
 	if cfg.Paths.HomeRepo == "" {
 		return errors.New("paths.home_repo 不能为空")
 	}
-	if cfg.Paths.StateDB == "" {
-		return errors.New("paths.state_db 不能为空")
+	if cfg.Paths.VarDir == "" {
+		return errors.New("paths.var_dir 不能为空")
 	}
 	if cfg.Paths.LogDir == "" {
 		return errors.New("paths.log_dir 不能为空")
@@ -783,6 +795,18 @@ func normalizeExecutorMode(raw string, fallback ExecutorMode) ExecutorMode {
 	}
 }
 
+func normalizeVarDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if strings.HasSuffix(strings.ToLower(path), ".db") {
+		return filepath.Dir(path)
+	}
+	return path
+}
+
 func approvalSectionContainsLegacyCommand(content string) bool {
 	_, changed, err := rewriteApprovalSection(content)
 	return err == nil && changed
@@ -831,6 +855,129 @@ func rewriteApprovalSection(content string) (string, bool, error) {
 	return strings.Join(updatedLines, "\n"), true, nil
 }
 
+func rewriteLegacyStateDBPaths(content string) (string, bool, error) {
+	lines := strings.Split(content, "\n")
+	start := -1
+	end := len(lines)
+	for idx, line := range lines {
+		if isPathsHeader(line) {
+			start = idx
+			break
+		}
+	}
+	if start < 0 {
+		return content, false, nil
+	}
+	for idx := start + 1; idx < len(lines); idx++ {
+		if isSectionHeader(lines[idx]) {
+			end = idx
+			break
+		}
+	}
+
+	section := lines[start:end]
+	hasVarDir := false
+	hasLegacyStateDB := false
+	for _, line := range section {
+		switch tomlKeyName(line) {
+		case "var_dir":
+			hasVarDir = true
+		case "state_db":
+			hasLegacyStateDB = true
+		}
+	}
+	if !hasLegacyStateDB {
+		return content, false, nil
+	}
+
+	replacement := make([]string, 0, len(section))
+	changed := false
+	for _, line := range section {
+		switch tomlKeyName(line) {
+		case "state_db":
+			changed = true
+			if hasVarDir {
+				continue
+			}
+			rewritten, err := rewriteLegacyStateDBLine(line)
+			if err != nil {
+				return "", false, err
+			}
+			replacement = append(replacement, rewritten)
+		default:
+			replacement = append(replacement, line)
+		}
+	}
+	if !changed {
+		return content, false, nil
+	}
+
+	updatedLines := make([]string, 0, len(lines)-len(section)+len(replacement))
+	updatedLines = append(updatedLines, lines[:start]...)
+	updatedLines = append(updatedLines, replacement...)
+	updatedLines = append(updatedLines, lines[end:]...)
+	return strings.Join(updatedLines, "\n"), true, nil
+}
+
+func rewriteLegacyStateDBLine(line string) (string, error) {
+	indentWidth := len(line) - len(strings.TrimLeft(line, " \t"))
+	indent := line[:indentWidth]
+	trimmed := strings.TrimSpace(line)
+	sep := strings.Index(trimmed, "=")
+	if sep < 0 {
+		return "", fmt.Errorf("解析 paths.state_db 失败: %s", line)
+	}
+	value, quote, suffix, err := parseTomlStringValue(trimmed[sep+1:])
+	if err != nil {
+		return "", fmt.Errorf("解析 paths.state_db 失败: %w", err)
+	}
+	renderedValue := renderTomlStringValue(normalizeVarDir(value), quote)
+	return indent + "var_dir = " + renderedValue + suffix, nil
+}
+
+func parseTomlStringValue(raw string) (value, quote, suffix string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", "", errors.New("值为空")
+	}
+	switch raw[0] {
+	case '"', '\'':
+		quote = string(raw[0])
+		end := strings.IndexByte(raw[1:], raw[0])
+		if end < 0 {
+			return "", "", "", errors.New("字符串缺少闭合引号")
+		}
+		end++
+		return raw[1:end], quote, raw[end+1:], nil
+	default:
+		value = strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
+		if value == "" {
+			return "", "", "", errors.New("值为空")
+		}
+		commentIdx := len(value)
+		return value, "", raw[commentIdx:], nil
+	}
+}
+
+func renderTomlStringValue(value, quote string) string {
+	if quote == "'" {
+		return "'" + value + "'"
+	}
+	return fmt.Sprintf("%q", value)
+}
+
+func tomlKeyName(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	sep := strings.Index(trimmed, "=")
+	if sep < 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(trimmed[:sep]))
+}
+
 func rewriteSchedulerSection(content string, scheduler SchedulerConfig) (string, bool, error) {
 	lines := strings.Split(content, "\n")
 	start := -1
@@ -869,6 +1016,10 @@ func rewriteSchedulerSection(content string, scheduler SchedulerConfig) (string,
 
 func isApprovalHeader(line string) bool {
 	return strings.EqualFold(strings.TrimSpace(line), "[approval]")
+}
+
+func isPathsHeader(line string) bool {
+	return strings.EqualFold(strings.TrimSpace(line), "[paths]")
 }
 
 func isSectionHeader(line string) bool {
@@ -983,12 +1134,13 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString("# 固定路径边界：\n")
 	buf.WriteString("# - app_dir: 程序树\n")
 	buf.WriteString("# - home_repo: 知识仓库\n")
+	buf.WriteString("# - var_dir: 运行态状态目录，统一承载 state.json 与 JSONL 事实产物\n")
 	buf.WriteString("# - kb_dir: 默认知识库目录\n")
 	buf.WriteString("# - env_file: 所有敏感信息唯一入口\n")
 	buf.WriteString("[paths]\n")
 	buf.WriteString(fmt.Sprintf("app_dir = %q\n", cfg.Paths.AppDir))
 	buf.WriteString(fmt.Sprintf("home_repo = %q\n", cfg.Paths.HomeRepo))
-	buf.WriteString(fmt.Sprintf("state_db = %q\n", cfg.Paths.StateDB))
+	buf.WriteString(fmt.Sprintf("var_dir = %q\n", cfg.Paths.VarDir))
 	buf.WriteString(fmt.Sprintf("log_dir = %q\n", cfg.Paths.LogDir))
 	buf.WriteString(fmt.Sprintf("kb_dir = %q\n", cfg.Paths.KBDir))
 	buf.WriteString(fmt.Sprintf("env_file = %q\n\n", cfg.Paths.EnvFile))

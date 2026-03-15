@@ -43,7 +43,7 @@ func NewRuntimeWithOptions(configPath, envFile string, options RuntimeOptions) (
 	if err != nil {
 		return nil, err
 	}
-	store, err := storage.Open(cfg.Paths.StateDB)
+	store, err := storage.Open(cfg.Paths.VarDir)
 	if err != nil {
 		return nil, err
 	}

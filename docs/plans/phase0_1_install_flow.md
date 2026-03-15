@@ -22,7 +22,7 @@
 - `app_dir`
 - `home_repo`
 - `kb_dir`
-- `state_db`
+- `var_dir`
 - `log_dir`
 
 ## 自动探查项

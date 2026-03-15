@@ -9,7 +9,7 @@ import (
 )
 
 func TestStateStorePersistsTaskSnapshot(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatal(err)
 	}

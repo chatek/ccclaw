@@ -4,7 +4,6 @@ import (
 	"github.com/41490/ccclaw/internal/archive"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/spf13/cobra"
-	"path/filepath"
 )
 
 func addArchiveCommand(rootCmd *cobra.Command, configPath *string) {
@@ -16,7 +15,7 @@ func addArchiveCommand(rootCmd *cobra.Command, configPath *string) {
 			if err != nil {
 				return err
 			}
-			_, err = archive.Run(cmd.Context(), filepath.Dir(cfg.Paths.StateDB), cmd.OutOrStdout())
+			_, err = archive.Run(cmd.Context(), cfg.Paths.VarDir, cmd.OutOrStdout())
 			return err
 		},
 	})

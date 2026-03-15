@@ -239,7 +239,7 @@ func writeRuntimeLoggingFixture(t *testing.T) (string, string) {
 		`[paths]`,
 		`app_dir = "` + appDir + `"`,
 		`home_repo = "` + homeRepo + `"`,
-		`state_db = "` + filepath.Join(appDir, "state.db") + `"`,
+		`var_dir = "` + filepath.Join(appDir, "var") + `"`,
 		`log_dir = "` + logDir + `"`,
 		`kb_dir = "` + kbDir + `"`,
 		`env_file = "` + envPath + `"`,

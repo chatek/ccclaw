@@ -1327,7 +1327,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "GitHub 网络", run: func() (string, error) {
 			return "rate_limit", rt.clientForRepo(rt.cfg.GitHub.ControlRepo).NetworkCheck(ctx)
 		}},
-		{name: "状态存储读写", run: func() (string, error) { return filepath.Dir(rt.cfg.Paths.StateDB), rt.store.Ping() }},
+		{name: "状态存储读写", run: func() (string, error) { return rt.cfg.Paths.VarDir, rt.store.Ping() }},
 		{name: "调度器", run: rt.describeSchedulerStatus},
 		{name: "磁盘空间", run: func() (string, error) { return rt.cfg.Paths.LogDir, rt.checkDisk() }},
 	}
@@ -2091,7 +2091,7 @@ func (rt *Runtime) SchedulerStatus() (string, error) {
 }
 
 func (rt *Runtime) checkDisk() error {
-	paths := []string{filepath.Dir(rt.cfg.Paths.StateDB), rt.cfg.Paths.LogDir}
+	paths := []string{rt.cfg.Paths.VarDir, rt.cfg.Paths.LogDir}
 	for _, path := range paths {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return err

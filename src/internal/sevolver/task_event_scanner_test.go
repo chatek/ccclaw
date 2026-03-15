@@ -11,7 +11,7 @@ import (
 
 func TestScanTaskEventsForGapsIncludesFailureAndBlockedSignals(t *testing.T) {
 	root := t.TempDir()
-	store, err := storage.Open(filepath.Join(root, "state.db"))
+	store, err := storage.Open(filepath.Join(root, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestScanTaskEventsForGapsIncludesFailureAndBlockedSignals(t *testing.T) {
 
 func TestScanTaskEventsForGapsPrefersStructuredMetadata(t *testing.T) {
 	root := t.TempDir()
-	store, err := storage.Open(filepath.Join(root, "state.db"))
+	store, err := storage.Open(filepath.Join(root, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}

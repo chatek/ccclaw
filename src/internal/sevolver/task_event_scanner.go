@@ -9,8 +9,8 @@ import (
 	"github.com/41490/ccclaw/internal/core"
 )
 
-func ScanTaskEventsForGaps(stateDBPath, kbDir string, since time.Time) ([]GapSignal, error) {
-	path := strings.TrimSpace(stateDBPath)
+func ScanTaskEventsForGaps(varDir, kbDir string, since time.Time) ([]GapSignal, error) {
+	path := strings.TrimSpace(varDir)
 	if path == "" {
 		return nil, nil
 	}

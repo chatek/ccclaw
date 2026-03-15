@@ -18,7 +18,7 @@ func testSystemdConfig() *config.Config {
 			AppDir:   "/tmp/ccclaw-app",
 			EnvFile:  "/tmp/ccclaw-app/.env",
 			HomeRepo: "/opt/ccclaw",
-			StateDB:  "/tmp/ccclaw-app/var/state.db",
+			VarDir:   "/tmp/ccclaw-app/var",
 			LogDir:   "/tmp/ccclaw-app/log",
 			KBDir:    "/opt/ccclaw/kb",
 		},

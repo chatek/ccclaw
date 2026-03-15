@@ -46,7 +46,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
-state_db = "~/.ccclaw/var/state.db"
+var_dir = "~/.ccclaw/var"
 log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
@@ -95,7 +95,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
-state_db = "~/.ccclaw/var/state.db"
+var_dir = "~/.ccclaw/var"
 log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
@@ -151,7 +151,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "/tmp/ccclaw-app"
 home_repo = "/opt/ccclaw"
-state_db = "/tmp/ccclaw-app/var/state.db"
+var_dir = "/tmp/ccclaw-app/var"
 log_dir = "/tmp/ccclaw-app/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "/tmp/ccclaw-app/.env"
@@ -182,7 +182,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "/tmp/ccclaw-app"
 home_repo = "/opt/ccclaw"
-state_db = "/tmp/ccclaw-app/var/state.db"
+var_dir = "/tmp/ccclaw-app/var"
 log_dir = "/tmp/ccclaw-app/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "/tmp/ccclaw-app/.env"
@@ -228,7 +228,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "/tmp/ccclaw-app"
 home_repo = "/opt/ccclaw"
-state_db = "/tmp/ccclaw-app/var/state.db"
+var_dir = "/tmp/ccclaw-app/var"
 log_dir = "/tmp/ccclaw-app/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "/tmp/ccclaw-app/.env"
@@ -265,7 +265,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
-state_db = "~/.ccclaw/var/state.db"
+var_dir = "~/.ccclaw/var"
 log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
@@ -286,6 +286,53 @@ minimum_permission = "maintain"
 		t.Fatal("expected legacy approval.command to be rejected")
 	} else if got := err.Error(); !strings.Contains(got, "config migrate") {
 		t.Fatalf("expected migration hint, got %q", got)
+	}
+}
+
+func TestLoadAutoRewritesLegacyStateDBToVarDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+state_db = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if got, want := cfg.Paths.VarDir, "/tmp/ccclaw-app/var"; got != want {
+		t.Fatalf("unexpected var dir: got=%q want=%q", got, want)
+	}
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, `var_dir = "/tmp/ccclaw-app/var"`) {
+		t.Fatalf("expected var_dir auto writeback, got %q", text)
+	}
+	if strings.Contains(text, "state_db") {
+		t.Fatalf("legacy state_db should be removed, got %q", text)
 	}
 }
 
@@ -346,6 +393,7 @@ kb_path = "/opt/data/9527/kb"
 	for _, want := range []string{
 		`control_repo = "41490/ccclaw"`,
 		`home_repo = "/opt/data/9527"`,
+		`var_dir = "/tmp/ccclaw-app/var"`,
 		`calendar_timezone = "Asia/Shanghai"`,
 		`[scheduler.timers]`,
 		`[scheduler.logs]`,
@@ -366,6 +414,9 @@ kb_path = "/opt/data/9527/kb"
 	if strings.Contains(text, `command = "/ccclaw approve"`) {
 		t.Fatalf("legacy approval command should be removed: %q", text)
 	}
+	if strings.Contains(text, "state_db") {
+		t.Fatalf("legacy state_db should be removed: %q", text)
+	}
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -376,6 +427,9 @@ kb_path = "/opt/data/9527/kb"
 	}
 	if got, want := cfg.Paths.HomeRepo, "/opt/data/9527"; got != want {
 		t.Fatalf("unexpected home repo: got=%q want=%q", got, want)
+	}
+	if got, want := cfg.Paths.VarDir, "/tmp/ccclaw-app/var"; got != want {
+		t.Fatalf("unexpected var dir: got=%q want=%q", got, want)
 	}
 }
 
@@ -392,7 +446,7 @@ func TestMigrateNoopForCurrentConfig(t *testing.T) {
 		Paths: PathsConfig{
 			AppDir:   "/tmp/ccclaw-app",
 			HomeRepo: "/opt/data/9527",
-			StateDB:  "/tmp/ccclaw-app/var/state.db",
+			VarDir:   "/tmp/ccclaw-app/var",
 			LogDir:   "/tmp/ccclaw-app/log",
 			KBDir:    "/opt/data/9527/kb",
 			EnvFile:  "/tmp/ccclaw-app/.env",
@@ -518,7 +572,7 @@ func TestDisableTargetClearsDefaultTarget(t *testing.T) {
 		Paths: PathsConfig{
 			AppDir:   "/tmp/app",
 			HomeRepo: "/opt/ccclaw",
-			StateDB:  "/tmp/app/var/state.db",
+			VarDir:   "/tmp/app/var",
 			LogDir:   "/tmp/app/log",
 			KBDir:    "/opt/ccclaw/kb",
 			EnvFile:  "/tmp/app/.env",

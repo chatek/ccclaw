@@ -1063,7 +1063,7 @@ limit = 20
 [paths]
 app_dir = "$app_dir"
 home_repo = "$home_repo"
-state_db = "$app_dir/var/state.db"
+var_dir = "$app_dir/var"
 log_dir = "$app_dir/log"
 kb_dir = "$home_repo/kb"
 env_file = "$env_file"

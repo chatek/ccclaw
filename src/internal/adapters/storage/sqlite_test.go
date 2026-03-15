@@ -9,7 +9,7 @@ import (
 )
 
 func TestStorePersistsLastSessionIDAndTokenStats(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestStorePersistsLastSessionIDAndTokenStats(t *testing.T) {
 }
 
 func TestStoreSupportsRTKComparisonAndJournalQueries(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestStoreSupportsRTKComparisonAndJournalQueries(t *testing.T) {
 }
 
 func TestListRunnableExcludesBlockedTasks(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestListRunnableExcludesBlockedTasks(t *testing.T) {
 }
 
 func TestStoreSupportsStatsDateRangeAndDailyAggregation(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestStoreSupportsStatsDateRangeAndDailyAggregation(t *testing.T) {
 }
 
 func TestTaskClassFlowStatsBetween(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}

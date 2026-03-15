@@ -16,7 +16,7 @@ type Config struct {
 	KBDir       string
 	JournalDir  string
 	ReportDir   string
-	StateDBPath string
+	VarDir      string
 	ControlRepo string
 	TargetRepo  string
 	IssueLabel  string
@@ -81,7 +81,7 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("扫描 journal 缺口信号失败: %w", err)
 	}
-	taskEventGaps, err := ScanTaskEventsForGaps(cfg.StateDBPath, cfg.KBDir, result.WindowStart)
+	taskEventGaps, err := ScanTaskEventsForGaps(cfg.VarDir, cfg.KBDir, result.WindowStart)
 	if err != nil {
 		return nil, fmt.Errorf("扫描 task_events 缺口信号失败: %w", err)
 	}

@@ -46,7 +46,7 @@ printf 'ok\n'
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CCCLAW_FAKE_DUCKDB_LOG", logPath)
 
-	store, err := storage.Open(filepath.Join(dir, "state.db"))
+	store, err := storage.Open(filepath.Join(dir, "var"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ printf 'ok\n'
 		t.Fatal(err)
 	}
 
-	result, err := RunAt(context.Background(), filepath.Join(dir), io.Discard, currentTime)
+	result, err := RunAt(context.Background(), filepath.Join(dir, "var"), io.Discard, currentTime)
 	if err != nil {
 		t.Fatalf("archive run failed: %v", err)
 	}
@@ -79,7 +79,7 @@ printf 'ok\n'
 		t.Fatalf("expected current week skip, got %#v", result)
 	}
 	for _, name := range []string{"events-2026-W10.parquet", "token-2026-W10.parquet"} {
-		if _, err := os.Stat(filepath.Join(dir, "archive", name)); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, "var", "archive", name)); err != nil {
 			t.Fatalf("expected archived parquet %s: %v", name, err)
 		}
 	}

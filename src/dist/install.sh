@@ -55,7 +55,7 @@ JOURNAL_CALENDAR="${JOURNAL_CALENDAR:-$JOURNAL_CALENDAR_DEFAULT}"
 ENV_FILE=""
 CONFIG_FILE=""
 CRONCFG_FILE=""
-STATE_DB=""
+VAR_DIR=""
 LOG_DIR=""
 KB_DIR=""
 CLAUDE_WRAPPER=""
@@ -110,7 +110,7 @@ refresh_paths() {
   ENV_FILE="$APP_DIR/.env"
   CONFIG_FILE="$APP_DIR/ops/config/config.toml"
   CRONCFG_FILE="$APP_DIR/croncfg.md"
-  STATE_DB="$APP_DIR/var/state.db"
+  VAR_DIR="$APP_DIR/var"
   LOG_DIR="$APP_DIR/log"
   KB_DIR="$HOME_REPO/kb"
   CLAUDE_WRAPPER="$APP_DIR/bin/ccclaude"
@@ -1159,7 +1159,7 @@ print_flow() {
 == 交互项矩阵 ==
 - 必填且敏感(.env): GH_TOKEN
 - 可选且敏感(.env): ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, GREPTILE_API_KEY
-- 必填但可默认(config.toml): app_dir, home_repo, kb_dir, state_db, log_dir
+- 必填但可默认(config.toml): app_dir, home_repo, kb_dir, var_dir, log_dir
 - 本体仓库模式: init|remote|local
 - 任务仓库模式: none|remote|local
 - 调度器模式: auto|systemd|cron|none
@@ -1541,7 +1541,7 @@ limit = 20
 [paths]
 app_dir = "$APP_DIR"
 home_repo = "$HOME_REPO"
-state_db = "$STATE_DB"
+var_dir = "$VAR_DIR"
 log_dir = "$LOG_DIR"
 kb_dir = "$KB_DIR"
 env_file = "$ENV_FILE"

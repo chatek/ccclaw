@@ -347,7 +347,7 @@ control_repo = "owner/ccclaw-control"
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
-state_db = "~/.ccclaw/var/state.db"
+var_dir = "~/.ccclaw/var"
 log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"

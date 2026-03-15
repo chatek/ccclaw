@@ -125,7 +125,7 @@ esac
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 
-	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	store, err := storage.Open(filepath.Join(tmpDir, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -218,7 +218,7 @@ esac
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 
-	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	store, err := storage.Open(filepath.Join(tmpDir, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -316,7 +316,7 @@ esac
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 
-	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	store, err := storage.Open(filepath.Join(tmpDir, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -425,7 +425,7 @@ esac
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TEST_COMMENTS_FILE", commentsFile)
 
-	store, err := storage.Open(filepath.Join(tmpDir, "state.db"))
+	store, err := storage.Open(filepath.Join(tmpDir, "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -627,7 +627,7 @@ func summarizeSchedulerProbe(t *testing.T, probe scheduler.Probe) (string, error
 }
 
 func TestStatsRendersSummaryAndTaskTable(t *testing.T) {
-	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := storage.Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -706,7 +706,7 @@ func TestBuildExecutionOptionsUsesResumeSession(t *testing.T) {
 }
 
 func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
-	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := storage.Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestStatsWithRTKComparisonRendersSection(t *testing.T) {
 }
 
 func TestStatsWithDateRangeAndDailyRendersSections(t *testing.T) {
-	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := storage.Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -934,8 +934,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1026,7 +1026,7 @@ exit 0
 			Paths: config.PathsConfig{
 				AppDir:  filepath.Join(tmpDir, "app"),
 				LogDir:  filepath.Join(tmpDir, "log"),
-				StateDB: stateDB,
+				VarDir:  varDir,
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
@@ -1073,8 +1073,8 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("PATH", tmpDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1113,7 +1113,7 @@ func TestStatusJSONRendersRuntimeSnapshot(t *testing.T) {
 			Paths: config.PathsConfig{
 				AppDir:  filepath.Join(tmpDir, "app"),
 				LogDir:  filepath.Join(tmpDir, "log"),
-				StateDB: stateDB,
+				VarDir:  varDir,
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
@@ -1196,8 +1196,8 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("PATH", tmpDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1240,7 +1240,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 			Paths: config.PathsConfig{
 				AppDir:  filepath.Join(tmpDir, "app"),
 				LogDir:  filepath.Join(tmpDir, "log"),
-				StateDB: stateDB,
+				VarDir:  varDir,
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
@@ -1306,8 +1306,8 @@ printf '{}\n'
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1335,7 +1335,7 @@ printf '{}\n'
 	rt := &Runtime{
 		cfg: &config.Config{
 			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
-			Paths:  config.PathsConfig{StateDB: stateDB, KBDir: "/opt/ccclaw/kb"},
+			Paths:  config.PathsConfig{VarDir: varDir, KBDir: "/opt/ccclaw/kb"},
 		},
 		store: store,
 		rep: reporter.New(func(repo string) *github.Client {
@@ -1385,8 +1385,8 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("PATH", tmpDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1397,7 +1397,7 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 			Paths: config.PathsConfig{
 				AppDir:  filepath.Join(tmpDir, "app"),
 				LogDir:  filepath.Join(tmpDir, "log"),
-				StateDB: stateDB,
+				VarDir:  varDir,
 				KBDir:   "/opt/ccclaw/kb",
 				EnvFile: filepath.Join(tmpDir, ".env"),
 			},
@@ -1506,8 +1506,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1553,10 +1553,10 @@ exit 0
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  filepath.Join(tmpDir, "app"),
-				LogDir:  logDir,
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: filepath.Join(tmpDir, "app"),
+				LogDir: logDir,
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
@@ -1585,7 +1585,7 @@ exit 0
 		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
-	store, err = storage.Open(stateDB)
+	store, err = storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("重新打开 store 失败: %v", err)
 	}
@@ -1647,8 +1647,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1693,10 +1693,10 @@ exit 0
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  appDir,
-				LogDir:  logDir,
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: appDir,
+				LogDir: logDir,
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
@@ -1728,7 +1728,7 @@ exit 0
 		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
-	store, err = storage.Open(stateDB)
+	store, err = storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("重新打开 store 失败: %v", err)
 	}
@@ -1776,8 +1776,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1823,10 +1823,10 @@ exit 0
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  appDir,
-				LogDir:  logDir,
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: appDir,
+				LogDir: logDir,
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
@@ -1858,7 +1858,7 @@ exit 0
 		t.Fatalf("执行 ingest cycle 失败: %v", err)
 	}
 
-	store, err = storage.Open(stateDB)
+	store, err = storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("重新打开 store 失败: %v", err)
 	}
@@ -1918,8 +1918,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TEST_DIAG_FILE", diagPath)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -1952,10 +1952,10 @@ exit 0
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  appDir,
-				LogDir:  logDir,
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: appDir,
+				LogDir: logDir,
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
@@ -2046,8 +2046,8 @@ exit 0
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
 	t.Setenv("TMUX_FIXTURE_DIR", fixtureDir)
 
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -2101,10 +2101,10 @@ exit 0
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  appDir,
-				LogDir:  logDir,
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: appDir,
+				LogDir: logDir,
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{"/bin/sh"},
@@ -2133,7 +2133,7 @@ exit 0
 		t.Fatalf("预期任务仍保持运行槽位，实际为 %#v", slot)
 	}
 
-	store, err = storage.Open(stateDB)
+	store, err = storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("重新打开 store 失败: %v", err)
 	}
@@ -2172,8 +2172,8 @@ exit 0
 
 func TestJournalWritesDailyFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -2216,7 +2216,7 @@ func TestJournalWritesDailyFile(t *testing.T) {
 			},
 			Paths: config.PathsConfig{
 				HomeRepo: tmpDir,
-				StateDB:  stateDB,
+				VarDir:   varDir,
 				KBDir:    filepath.Join(tmpDir, "kb"),
 			},
 			Targets: []config.TargetConfig{{
@@ -2286,7 +2286,7 @@ func TestJournalWritesDailyFile(t *testing.T) {
 }
 
 func TestFinishTaskExecutionClearsResumeSessionAfterFailure(t *testing.T) {
-	store, err := storage.Open(filepath.Join(t.TempDir(), "state.db"))
+	store, err := storage.Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -2490,8 +2490,8 @@ func TestNewExecutorForRepoRespectsModeOverride(t *testing.T) {
 func TestRunIngestCycleDaemonModeDoesNotDependOnTMuxPatrol(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("PATH", tmpDir)
-	stateDB := filepath.Join(tmpDir, "state.db")
-	store, err := storage.Open(stateDB)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatalf("打开 store 失败: %v", err)
 	}
@@ -2532,10 +2532,10 @@ printf '%s\n' '{"event":"result","timestamp":"2026-03-13T20:00:02Z","session_id"
 	rt := &Runtime{
 		cfg: &config.Config{
 			Paths: config.PathsConfig{
-				AppDir:  filepath.Join(tmpDir, "app"),
-				LogDir:  filepath.Join(tmpDir, "log"),
-				StateDB: stateDB,
-				KBDir:   "/opt/ccclaw/kb",
+				AppDir: filepath.Join(tmpDir, "app"),
+				LogDir: filepath.Join(tmpDir, "log"),
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
 			},
 			Executor: config.ExecutorConfig{
 				Command: []string{execScript},

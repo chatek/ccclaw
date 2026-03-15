@@ -54,7 +54,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "~/.ccclaw"
 home_repo = "/opt/ccclaw"
-state_db = "~/.ccclaw/var/state.db"
+var_dir = "~/.ccclaw/var"
 log_dir = "~/.ccclaw/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "~/.ccclaw/.env"
@@ -161,7 +161,7 @@ control_repo = "41490/ccclaw"
 [paths]
 app_dir = "/tmp/ccclaw-app"
 home_repo = "/opt/ccclaw"
-state_db = "/tmp/ccclaw-app/var/state.db"
+var_dir = "/tmp/ccclaw-app/var"
 log_dir = "/tmp/ccclaw-app/log"
 kb_dir = "/opt/ccclaw/kb"
 env_file = "/tmp/ccclaw-app/.env"
@@ -594,7 +594,7 @@ func TestArchiveCommand(t *testing.T) {
 	fakeBin := filepath.Join(dir, "bin")
 	duckdbLog := filepath.Join(dir, "duckdb.log")
 	appDir := filepath.Join(dir, "app")
-	stateDB := filepath.Join(appDir, "var", "state.db")
+	varDir := filepath.Join(appDir, "var")
 	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestArchiveCommand(t *testing.T) {
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CCCLAW_FAKE_DUCKDB_LOG", duckdbLog)
 
-	store, err := storage.Open(stateDB)
+	store, err := storage.Open(varDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -997,7 +997,7 @@ func testConfigTomlWithSystemdDir(appDir, envPath, systemdDir, mode string) stri
 		"[paths]\n" +
 		"app_dir = '" + appDir + "'\n" +
 		"home_repo = '/opt/ccclaw'\n" +
-		"state_db = '" + filepath.Join(appDir, "var", "state.db") + "'\n" +
+		"var_dir = '" + filepath.Join(appDir, "var") + "'\n" +
 		"log_dir = '" + filepath.Join(appDir, "log") + "'\n" +
 		"kb_dir = '/opt/ccclaw/kb'\n" +
 		"env_file = '" + envPath + "'\n\n" +
@@ -1033,7 +1033,7 @@ func (f *schedulerConfigFixture) toConfig() *config.Config {
 		Paths: config.PathsConfig{
 			AppDir:   f.AppDir,
 			HomeRepo: "/opt/ccclaw",
-			StateDB:  filepath.Join(f.AppDir, "var", "state.db"),
+			VarDir:   filepath.Join(f.AppDir, "var"),
 			LogDir:   filepath.Join(f.AppDir, "log"),
 			KBDir:    "/opt/ccclaw/kb",
 			EnvFile:  f.EnvPath,
