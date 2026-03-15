@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/41490/ccclaw/internal/adapters/storage"
+	"github.com/41490/ccclaw/internal/claude"
 	"github.com/41490/ccclaw/internal/config"
 	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/scheduler"
@@ -984,6 +985,77 @@ func TestParseStatsOptions(t *testing.T) {
 	}
 	if options.End.Format("2006-01-02") != "2026-03-11" {
 		t.Fatalf("unexpected end: %#v", options.End)
+	}
+}
+
+func TestHandleClaudeHookSkipsWhenTaskContextMissing(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "missing.toml")
+	if err := handleClaudeHook("stop", nil, configPath); err != nil {
+		t.Fatalf("无 task 上下文时应静默跳过，实际报错: %v", err)
+	}
+}
+
+func TestHandleClaudeHookUsesConfigAppDirWhenEnvMissing(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	appDir := filepath.Join(dir, "app")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigTomlWithSystemdDir(appDir, envPath, filepath.Join(dir, "systemd-user"), "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CCCLAW_TASK_ID", "task-from-config")
+
+	if err := handleClaudeHook("stop", nil, configPath); err != nil {
+		t.Fatalf("应从 config.toml 推导 hook 状态目录，实际报错: %v", err)
+	}
+
+	state, err := claude.LoadHookState(claude.DefaultHookStateDir(appDir), "task-from-config")
+	if err != nil {
+		t.Fatalf("读取 hook 状态失败: %v", err)
+	}
+	if state == nil {
+		t.Fatal("预期写入 hook 状态，实际为空")
+	}
+	if state.StoppedAt.IsZero() {
+		t.Fatalf("预期 Stop hook 记录 stopped_at，实际为零值: %+v", state)
+	}
+}
+
+func TestHandleClaudeHookPrefersExplicitHookStateDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	envPath := filepath.Join(dir, ".env")
+	appDir := filepath.Join(dir, "app")
+	overrideDir := filepath.Join(dir, "override-hooks")
+	if err := os.WriteFile(envPath, []byte("GH_TOKEN=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(testConfigTomlWithSystemdDir(appDir, envPath, filepath.Join(dir, "systemd-user"), "none")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CCCLAW_TASK_ID", "task-env-override")
+	t.Setenv("CCCLAW_HOOK_STATE_DIR", overrideDir)
+
+	if err := handleClaudeHook("stop", nil, configPath); err != nil {
+		t.Fatalf("显式 hook 状态目录应优先于配置，实际报错: %v", err)
+	}
+
+	overrideState, err := claude.LoadHookState(overrideDir, "task-env-override")
+	if err != nil {
+		t.Fatalf("读取 override hook 状态失败: %v", err)
+	}
+	if overrideState == nil {
+		t.Fatal("预期写入 override hook 状态，实际为空")
+	}
+	defaultState, err := claude.LoadHookState(claude.DefaultHookStateDir(appDir), "task-env-override")
+	if err != nil {
+		t.Fatalf("读取默认 hook 状态失败: %v", err)
+	}
+	if defaultState != nil {
+		t.Fatalf("显式目录覆盖时不应写入默认目录: %+v", defaultState)
 	}
 }
 

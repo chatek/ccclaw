@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -69,7 +70,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
 	addArchiveCommand(rootCmd, &configPath)
 	addSevolverCommand(rootCmd, &configPath, &envFile)
-	addClaudeHookCommand(rootCmd)
+	addClaudeHookCommand(rootCmd, &configPath)
 
 	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
 		return app.NewRuntimeWithOptions(configPath, envFile, app.RuntimeOptions{
@@ -523,7 +524,7 @@ func newRootCmd() *cobra.Command {
 	return rootCmd
 }
 
-func addClaudeHookCommand(rootCmd *cobra.Command) {
+func addClaudeHookCommand(rootCmd *cobra.Command, configPath *string) {
 	hookCmd := &cobra.Command{
 		Use:    "claude-hook EVENT",
 		Short:  "处理 Claude hook 回调",
@@ -534,39 +535,72 @@ func addClaudeHookCommand(rootCmd *cobra.Command) {
 			if err != nil {
 				return fmt.Errorf("读取 Claude hook stdin 失败: %w", err)
 			}
-			var event string
-			switch args[0] {
-			case "session-start":
-				event = claude.HookEventSessionStart
-			case "pre-compact":
-				event = claude.HookEventPreCompact
-			case "stop":
-				event = claude.HookEventStop
-			default:
-				return fmt.Errorf("未知 Claude hook 事件: %s", args[0])
+			currentConfigPath := ""
+			if configPath != nil {
+				currentConfigPath = *configPath
 			}
-			var hookPayload claude.HookPayload
-			if len(bytes.TrimSpace(payload)) > 0 {
-				if err := json.Unmarshal(payload, &hookPayload); err != nil {
-					return fmt.Errorf("解析 Claude hook payload 失败: %w", err)
-				}
-			}
-			hookPayload.HookEventName = event
-			taskID := os.Getenv("CCCLAW_TASK_ID")
-			stateDir := os.Getenv("CCCLAW_HOOK_STATE_DIR")
-			if stateDir == "" {
-				appDir := os.Getenv("CCCLAW_APP_DIR")
-				if appDir != "" {
-					stateDir = claude.DefaultHookStateDir(appDir)
-				}
-			}
-			if stateDir == "" {
-				return fmt.Errorf("缺少 CCCLAW_HOOK_STATE_DIR 或 CCCLAW_APP_DIR")
-			}
-			return claude.HandleHook(stateDir, taskID, hookPayload)
+			return handleClaudeHook(args[0], payload, currentConfigPath)
 		},
 	}
 	rootCmd.AddCommand(hookCmd)
+}
+
+func handleClaudeHook(eventArg string, payload []byte, configPath string) error {
+	event, err := parseClaudeHookEvent(eventArg)
+	if err != nil {
+		return err
+	}
+	var hookPayload claude.HookPayload
+	if len(bytes.TrimSpace(payload)) > 0 {
+		if err := json.Unmarshal(payload, &hookPayload); err != nil {
+			return fmt.Errorf("解析 Claude hook payload 失败: %w", err)
+		}
+	}
+	hookPayload.HookEventName = event
+	taskID := strings.TrimSpace(os.Getenv("CCCLAW_TASK_ID"))
+	if taskID == "" {
+		// 交互式会话没有受管 task 上下文时，hook 应静默跳过。
+		return nil
+	}
+	stateDir, err := resolveClaudeHookStateDir(configPath)
+	if err != nil {
+		return err
+	}
+	if stateDir == "" {
+		return fmt.Errorf("CCCLAW_TASK_ID 已设置但缺少可用的 Claude hook 状态目录")
+	}
+	return claude.HandleHook(stateDir, taskID, hookPayload)
+}
+
+func parseClaudeHookEvent(eventArg string) (string, error) {
+	switch strings.TrimSpace(eventArg) {
+	case "session-start":
+		return claude.HookEventSessionStart, nil
+	case "pre-compact":
+		return claude.HookEventPreCompact, nil
+	case "stop":
+		return claude.HookEventStop, nil
+	default:
+		return "", fmt.Errorf("未知 Claude hook 事件: %s", eventArg)
+	}
+}
+
+func resolveClaudeHookStateDir(configPath string) (string, error) {
+	if stateDir := strings.TrimSpace(os.Getenv("CCCLAW_HOOK_STATE_DIR")); stateDir != "" {
+		return stateDir, nil
+	}
+	if appDir := strings.TrimSpace(os.Getenv("CCCLAW_APP_DIR")); appDir != "" {
+		return claude.DefaultHookStateDir(appDir), nil
+	}
+	path := strings.TrimSpace(configPath)
+	if path == "" {
+		path = defaultConfigPath()
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return "", fmt.Errorf("加载 Claude hook 配置失败: %w", err)
+	}
+	return claude.DefaultHookStateDir(cfg.Paths.AppDir), nil
 }
 
 func defaultConfigPath() string {
