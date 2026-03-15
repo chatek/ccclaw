@@ -20,7 +20,7 @@ RELEASE_NOTES_FILE := $(RELEASE_DIR)/RELEASE_NOTES.md
 BIN := $(DIST_DIR)/bin/$(APP_NAME)
 LDFLAGS := -X github.com/41490/ccclaw/internal/buildinfo.Version=$(VERSION) -X github.com/41490/ccclaw/internal/buildinfo.Commit=$(COMMIT)
 
-.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release-notes release-preflight release clean
+.PHONY: fmt test test-install tidy build dist-sync package checksum sign archive release-notes release-assets release-preflight release clean
 
 fmt:
 	$(GOFMT) -w ./cmd ./internal
@@ -68,6 +68,9 @@ release-notes: checksum
 		-e 's/{{CHECKSUM_FILE}}/$(notdir $(CHECKSUM_FILE))/g' \
 		$(RELEASE_NOTES_TEMPLATE) > $(RELEASE_NOTES_FILE)
 
+# 发布链路必须复用同一份 artifact，避免 archive 与 GitHub release 上传资产分叉。
+release-assets: checksum release-notes
+
 release-preflight:
 	@git diff --quiet && git diff --cached --quiet || { echo "工作树存在未提交变更，禁止创建 release"; exit 1; }
 	@gh auth status >/dev/null 2>&1 || { echo "gh 未登录，无法创建 release"; exit 1; }
@@ -76,9 +79,7 @@ release-preflight:
 	upstream_sha="$$(git rev-parse "$$upstream")"; \
 	[ "$$local_sha" = "$$upstream_sha" ] || { echo "当前分支 HEAD 尚未推送到 $$upstream，禁止创建 release"; exit 1; }
 
-release: release-preflight
-	@$(MAKE) archive VERSION=$(VERSION) COMMIT=$(COMMIT) FULL_COMMIT=$(FULL_COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
-	@$(MAKE) release-notes VERSION=$(VERSION) COMMIT=$(COMMIT) FULL_COMMIT=$(FULL_COMMIT) GOOS=$(GOOS) GOARCH=$(GOARCH)
+release: release-preflight release-assets archive
 	gh release create $(VERSION) \
 		$(PACKAGE_FILE) \
 		$(CHECKSUM_FILE) \
