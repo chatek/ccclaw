@@ -50,5 +50,5 @@
 - 知识仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
 - 任务仓库默认不绑定；若指定远程仓库，则 clone 到 `/opt/src/3claw/owner/repo`
 - 若 `gh` 已登录，则优先复用 `gh auth token` 写入 `.env`
-- 若 `systemd --user` 不可用，默认降级继续安装，并输出 `cron` 样板
+- 若 `systemd --user` 不可用，默认继续安装为 `none + 手工 cron 指引`，不自动托管 `cron`
 - 升级只覆盖程序树，不覆盖知识仓库

@@ -16,8 +16,8 @@
 ## 调度说明
 
 - 默认调度模式仍为 `auto`，优先 `systemd --user`。
-- 当 `systemd --user` 不可部署时，安装器会在 `crontab` 可用的前提下自动降级到受控 `cron`。
-- 受控 `cron` 仅管理带 `ccclaw` 标记的块，更新与清理不会覆盖用户其它规则。
+- 当 `systemd --user` 不可部署时，安装器改为输出 `none + 手工 cron 指引`，不再自动托管 `cron`。
+- 受控 `cron` 仅保留为专家手工工具，仍只管理带 `ccclaw` 标记的块，更新与清理不会覆盖用户其它规则。
 
 ## 升级影响
 
@@ -27,7 +27,7 @@
 ## 迁移动作
 
 1. 检查 `~/.ccclaw/ops/config/config.toml` 中的 `[scheduler]` 配置是否符合预期。
-2. 如需切换后端，优先执行 `ccclaw scheduler use systemd|cron|none`，不要手工混写两套调度。
+2. 如需切换后端，优先执行 `ccclaw scheduler use systemd|none`；仅在专家手工场景再执行 `ccclaw scheduler use cron`。
 3. 升级后执行一次 `ccclaw doctor`，确认没有双重调度或失效规则。
 
 ## 回滚命令
@@ -36,8 +36,8 @@
 ~/.ccclaw/bin/ccclaw scheduler status
 ~/.ccclaw/bin/ccclaw scheduler use none
 # 或按需切回
-~/.ccclaw/bin/ccclaw scheduler use cron
 ~/.ccclaw/bin/ccclaw scheduler use systemd
+~/.ccclaw/bin/ccclaw scheduler use cron
 ```
 
 ## 发布检查

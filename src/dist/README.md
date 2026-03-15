@@ -37,12 +37,12 @@ bash install.sh
 ## 调度行为
 
 - `auto`：优先部署 `systemd --user`
-- 若 `systemd --user` 不可部署，且 `crontab` 可用，则自动降级为受控 `cron`
-- 受控 `cron` 会写入 `ingest/patrol/journal` 三类周期任务
-- `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
+- 若 `systemd --user` 不可部署，安装器进入 `none + 手工 cron 指引`，不再自动改写当前用户 `crontab`
+- 受控 `cron` 保留为专家手工工具，会写入 `ingest/patrol/journal` 三类周期任务
+- 专家手工 `cron` 仅管理带 `ccclaw` 标记的块，不覆盖用户其它 `crontab` 规则
 - `systemd --user` 额外托管 `ccclaw-archive.timer` 与 `ccclaw-sevolver.timer`
 - `ccclaw-archive.timer` 每周导出历史周 JSONL 为 Parquet，`ccclaw-sevolver.timer` 每晚维护 Skill 生命周期与缺口信号
-- 推荐优先通过 `ccclaw scheduler use systemd|cron|none` 切换后端，而不是手工混改配置和调度器
+- 日常切换优先使用 `ccclaw scheduler use systemd|none`；`cron` 仅在专家手工场景下启用
 - 如需清理受控块，可执行：
 
 ```bash
@@ -57,7 +57,7 @@ bash install.sh --remove-cron
 2. 检查本体仓库 / 任务仓库 配置是否符合预期
 3. 若体检结果为 `systemd`，且当前会话可直连 user bus，安装/升级会自动启用或重启 timer
 4. 若体检结果为 `systemd`，但当前会话无法直连 user bus，请在登录会话中手工执行 `systemctl --user daemon-reload && systemctl --user enable --now ...`
-5. 若体检结果为 `cron`，可用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
+5. 若需要专家手工启用 `cron`，先确认 `systemd --user` 确实不可用，再用 `crontab -l` 或 `ccclaw scheduler enable-cron` 复核受控规则
 6. 如需单独查看或切换调度后端：
 
 ```bash
@@ -72,9 +72,14 @@ bash install.sh --remove-cron
 ~/.ccclaw/bin/ccclaw scheduler timers --json
 ~/.ccclaw/bin/ccclaw scheduler logs -f
 ~/.ccclaw/bin/ccclaw --log-level debug run
-~/.ccclaw/bin/ccclaw scheduler use cron
 ~/.ccclaw/bin/ccclaw scheduler use systemd
 ~/.ccclaw/bin/ccclaw scheduler use none
+```
+
+如需专家手工切换到 `cron`：
+
+```bash
+~/.ccclaw/bin/ccclaw scheduler use cron
 ```
 
 说明：
