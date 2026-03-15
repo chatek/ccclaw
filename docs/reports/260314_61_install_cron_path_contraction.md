@@ -114,4 +114,12 @@ bash -n src/dist/install.sh
 ## 残留事项
 
 - CLI 级 `scheduler use cron` / `enable-cron` 仍保留，这是拍板后的专家手工能力，不在本轮继续收缩
-- `README_en.md` 仍有旧 `cron` 口径，后续若需要对外发布英文说明，应另开跟进收口
+
+## 后续同步
+
+在本轮收尾阶段，已追加同步 `README_en.md`，将以下内容与中文主文档重新对齐：
+
+- 当前阶段改为 `phase0.5`
+- `systemd --user` 是唯一自动托管调度主路径
+- `cron` 改为专家手工备选，并显式指向 `~/.ccclaw/croncfg.md`
+- 安装器在 `systemd --user` 不可用时进入 `none + manual cron guidance`

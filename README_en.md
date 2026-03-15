@@ -27,7 +27,7 @@ Chinese is the default documentation. See [README.md](README.md) for the primary
 - **systemd --user** as the preferred background scheduler
 - A dedicated **home knowledge repository** as long-term memory
 
-The current repository state has reached the `phase0.4` milestone: the first installable release flow is already in place.
+The current repository state is aligned with the `phase0.5` baseline: `daemon` is the default executor, `systemd --user` is the only auto-managed scheduler path, and `cron` has been reduced to an expert manual fallback.
 
 The point of `ccclaw` is not to make agents look flashy. It is to move repetitive operational work out of expensive model time:
 
@@ -40,7 +40,7 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 
 ## Key Strengths
 
-- **Token-aware by design**: deterministic work stays in local CLI logic and `systemd`/cron guidance; Claude Code is used when real execution is needed.
+- **Token-aware by design**: deterministic work stays in local CLI logic and `systemd` guidance; `cron` remains available only as an expert manual fallback, and Claude Code is used when real execution is needed.
 - **Issue-driven workflow**: it fits the way open-source teams already work.
 - **Linux-first**: no Docker, Kubernetes, or hosted control plane required for the default setup.
 - **Program tree and knowledge tree are separated**: upgrades do not overwrite user memory under `/opt/ccclaw`.
@@ -57,15 +57,15 @@ The point of `ccclaw` is not to make agents look flashy. It is to move repetitiv
 
 ## Current Status
 
-- Stage: `phase0.4`
-- Release status: first installable release flow is available
+- Stage: `phase0.5`
+- Release status: install, upgrade, `stream-json`, scheduler observability, and sevolver maintenance are already wired into the default path
 - Default platform: `linux/amd64`
 - Default app dir: `~/.ccclaw`
 - Default knowledge repo: `/opt/ccclaw`
 - Knowledge repo modes: `init | remote | local`
 - Task repo modes: `none | remote | local`
 - Default executor mode: `daemon` (can be switched back globally or per-target to `tmux`)
-- Default scheduler: `auto`, preferring `systemd --user`
+- Default scheduler: `auto`, preferring `systemd --user`; if unavailable, the installer falls back to `none + manual cron guidance`
 - Version format: `yy.mm.dd.HHMM`
 
 ## Topology
@@ -91,6 +91,7 @@ Default installed layout:
 ├── bin/
 │   ├── ccclaw
 │   └── ccclaude
+├── croncfg.md
 ├── .env
 ├── log/
 ├── var/
@@ -432,7 +433,7 @@ Prepare these before downloading a release.
 ### Host Requirements
 
 - Linux
-- `systemd --user` recommended; if unavailable, the installer degrades and leaves cron guidance instead of hard failing
+- `systemd --user` recommended; if unavailable, the installer now falls back to `none + manual cron guidance` instead of auto-managing `crontab`
 - `sudo` recommended, because the installer may need to install packages and write into `/opt/ccclaw`
 - Recommended packages: `git`, `gh`, `curl`, `wget`, `rg`, `sqlite3`, `golang`
 
@@ -485,7 +486,7 @@ The interactive installer will ask for:
 - knowledge repo mode: `init | remote | local`
 - knowledge repo dir, default `/opt/ccclaw`
 - task repo mode: `none | remote | local`
-- scheduler mode: `auto | systemd | cron | none`
+- scheduler mode: `auto | systemd | none` in the interactive path; `cron` remains an expert-only manual path
 - `GH_TOKEN`; if `gh auth login` is already in place, the installer reuses `gh auth token` first
 - optional Claude proxy settings
 
@@ -494,7 +495,7 @@ The interactive installer will ask for:
 `install.sh` currently performs these real actions:
 
 - probes `claude`, `gh`, `rg`, `sqlite3`, `rtk`, `git`, `node`, `npm`, `uv`
-- runs a preflight for `gh auth`, `systemd --user`, scheduler downgrade conditions, and the remote clone root
+- runs a preflight for `gh auth`, `systemd --user`, manual cron viability, and the remote clone root
 - checks whether the official Claude install channel is reachable
 - installs base system dependencies when needed
 - installs `rtk` and creates the `ccclaude` wrapper
@@ -503,7 +504,8 @@ The interactive installer will ask for:
 - creates a Chinese-commented `config.toml`
 - installs `~/.ccclaw/bin/ccclaw`
 - installs `install.sh` and `upgrade.sh`
-- installs `systemd --user` unit files only when user-level systemd is usable; otherwise it degrades and continues
+- installs `systemd --user` unit files only when user-level systemd is usable; otherwise it continues in `none` mode and prints exact manual cron guidance
+- syncs `croncfg.md` into the app dir so the expert manual cron path has a fixed local reference
 - binds task repositories and writes `[[targets]]`
 - prints a deployment summary and next-step commands
 
@@ -545,6 +547,10 @@ bash install.sh \
   --task-repo owner/work-repo \
   --task-repo-path /opt/src/3claw/owner/work-repo
 ```
+
+### Expert-only cron note
+
+If you explicitly need `cron`, read `~/.ccclaw/croncfg.md` after install. The installer no longer auto-manages `crontab`, and `--scheduler cron` now fails fast on purpose.
 
 ### Path E: non-interactive install with a local task repo
 
@@ -612,6 +618,12 @@ ccclaw config
 ccclaw ingest
 ccclaw run                      # compatibility entry; forwards into the per-target ingest cycle
 ccclaw status
+ccclaw scheduler status
+ccclaw scheduler doctor
+ccclaw scheduler use systemd
+ccclaw scheduler use none
+ccclaw scheduler enable-cron    # expert manual path
+ccclaw scheduler disable-cron
 ccclaw target list
 ccclaw target add --repo owner/repo --path /abs/path/to/repo
 ccclaw target disable --repo owner/repo
@@ -733,7 +745,7 @@ src/dist/
 ## Main Advantages
 
 - natural fit for open-source maintenance because it stays on GitHub Issues
-- natural fit for Linux hosts because it prefers `systemd --user` but can degrade when user-level systemd is unavailable
+- natural fit for Linux hosts because it prefers `systemd --user`; when user-level systemd is unavailable, it contracts to `none + manual cron guidance` instead of silently taking over `crontab`
 - lower token waste because deterministic orchestration is kept local
 - durable project memory through fixed knowledge and report locations
 - safer upgrades because the program tree and knowledge repo are separated
