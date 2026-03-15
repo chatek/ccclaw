@@ -46,6 +46,7 @@ const (
 	IntentFix      Intent = "fix"
 	IntentOps      Intent = "ops"
 	IntentRelease  Intent = "release"
+	IntentReport   Intent = "report" // 汇报型 Issue，无可执行任务，直接豁免 Claude 执行
 )
 
 type TaskClass string
@@ -114,6 +115,8 @@ func InferIntent(labels []string) Intent {
 			return IntentRelease
 		case "research":
 			return IntentResearch
+		case "report", "ops-report", "announce":
+			return IntentReport
 		}
 	}
 	return IntentResearch

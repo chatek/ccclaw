@@ -82,6 +82,16 @@ func (r *Reporter) ReportRestarted(task *core.Task, reason string, restartCount,
 	return err
 }
 
+func (r *Reporter) ReportSkipped(task *core.Task, reason string) error {
+	client := r.client(task)
+	if client == nil {
+		return nil
+	}
+	body := fmt.Sprintf("Issue 为汇报型，无可执行任务，已自动跳过 Claude 执行。\n\n- Issue: %s#%d\n- 原因: %s\n- 当前状态: `%s`\n\n%s", task.IssueRepo, task.IssueNumber, reason, task.State, github.DoneMarker)
+	_, err := client.AddComment(task.IssueNumber, body)
+	return err
+}
+
 func (r *Reporter) ReportFinalizing(task *core.Task, step, errMsg string, hints []string) error {
 	client := r.client(task)
 	if client == nil {

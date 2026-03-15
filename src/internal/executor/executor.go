@@ -663,6 +663,10 @@ func (e *Executor) commandArgs(opts RunOptions) []string {
 		"--dangerously-skip-permissions",
 		"--output-format", e.outputFormat(),
 	)
+	// Claude Code CLI 2.1.76+ 要求 --print 模式下 stream-json 必须附带 --verbose
+	if e.outputFormat() == outputFormatStreamJSON {
+		args = append(args, "--verbose")
+	}
 	return args
 }
 

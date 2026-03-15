@@ -1476,6 +1476,10 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 			current.ErrorMsg = ""
 		case current.State == core.StateDead:
 			// 保持终态，只更新元数据。
+		case current.Intent == core.IntentReport && current.State != core.StateDone:
+			// 汇报型 Issue 直接豁免 Claude 执行，标记完成。
+			current.State = core.StateDone
+			current.ErrorMsg = ""
 		case current.State == core.StateRunning || current.State == core.StateFinalizing:
 			// 执行中或收尾中任务只刷新元数据，不回退主状态。
 		case len(blockReasons) == 0:
@@ -1493,10 +1497,14 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	if updated == nil {
 		return nil
 	}
+	isReportSkip := updated.Intent == core.IntentReport && updated.State == core.StateDone
 	if previousState == "" {
 		eventType := core.EventCreated
 		detail := fmt.Sprintf("任务入队，author=%s permission=%s approved=%t class=%s target=%s", updated.IssueAuthor, permission, approved, updated.TaskClass, displayTargetRepo(targetRepo))
-		if updated.State == core.StateDone {
+		if isReportSkip {
+			eventType = core.EventDone
+			detail = "汇报型 Issue，无可执行任务，已自动豁免 Claude 执行"
+		} else if updated.State == core.StateDone {
 			eventType = core.EventDone
 			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
 		} else if updated.State == core.StateBlocked {
@@ -1512,12 +1520,18 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		if updated.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(updated, blockReasonText(blockReasons))
 		}
+		if isReportSkip && !fromRun {
+			rt.reportSkipped(updated, "Intent=report，Issue 内容为纯汇报，不含可执行任务")
+		}
 		return nil
 	}
 	if previousState != updated.State {
 		eventType := core.EventUpdated
 		detail := fmt.Sprintf("状态变更: %s -> %s", previousState, updated.State)
-		if updated.State == core.StateDone {
+		if isReportSkip {
+			eventType = core.EventDone
+			detail = "汇报型 Issue，无可执行任务，已自动豁免 Claude 执行"
+		} else if updated.State == core.StateDone {
 			eventType = core.EventDone
 			detail = "检测到 Issue 完成标记 /ccclaw [DONE]"
 		} else if updated.State == core.StateBlocked {
@@ -1532,6 +1546,9 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 		}
 		if updated.State == core.StateBlocked && !fromRun {
 			rt.reportBlocked(updated, blockReasonText(blockReasons))
+		}
+		if isReportSkip && !fromRun {
+			rt.reportSkipped(updated, "Intent=report，Issue 内容为纯汇报，不含可执行任务")
 		}
 	} else {
 		rt.logDebug("issue", "Issue 状态无变化", "issue", rt.issueRef(issueRepo, issue.Number), "state", updated.State)
@@ -2027,6 +2044,13 @@ func (rt *Runtime) reportBlocked(task *core.Task, reason string) {
 		return
 	}
 	_ = rt.rep.ReportBlocked(task, reason)
+}
+
+func (rt *Runtime) reportSkipped(task *core.Task, reason string) {
+	if rt.rep == nil {
+		return
+	}
+	_ = rt.rep.ReportSkipped(task, reason)
 }
 
 func (rt *Runtime) reportFailure(task *core.Task) {
