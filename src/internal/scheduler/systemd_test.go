@@ -193,6 +193,115 @@ func TestApplyLogArchivePolicyCompressesAndTrimsManagedFiles(t *testing.T) {
 	}
 }
 
+func TestEnableSystemdRemovesLegacyRunUnits(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	systemctlLog := filepath.Join(dir, "systemctl.log")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+log_file="${CCCLAW_FAKE_SYSTEMCTL_LOG:?}"
+printf '%s\n' "$*" >> "$log_file"
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'XDG_RUNTIME_DIR=/run/user/1000\n'
+  exit 0
+fi
+exit 0
+`
+	scriptPath := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(systemctlLog, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CCCLAW_FAKE_SYSTEMCTL_LOG", systemctlLog)
+
+	cfg := testSystemdConfig()
+	cfg.Scheduler.SystemdUserDir = filepath.Join(dir, "systemd-user")
+	if err := os.MkdirAll(cfg.Scheduler.SystemdUserDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range legacySystemdUnits() {
+		if err := os.WriteFile(filepath.Join(cfg.Scheduler.SystemdUserDir, name), []byte("[Unit]\nDescription=legacy\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	message, err := EnableSystemd(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("启用 systemd 失败: %v", err)
+	}
+	if !strings.Contains(message, "已清理遗留单元") {
+		t.Fatalf("unexpected message: %q", message)
+	}
+	for _, name := range legacySystemdUnits() {
+		if _, err := os.Stat(filepath.Join(cfg.Scheduler.SystemdUserDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("预期遗留单元已删除: %s err=%v", name, err)
+		}
+	}
+	payload, err := os.ReadFile(systemctlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, "--user disable --now ccclaw-run.timer") {
+		t.Fatalf("expected legacy disable call: %q", text)
+	}
+	if !strings.Contains(text, "--user enable --now ccclaw-ingest.timer") {
+		t.Fatalf("expected managed enable call: %q", text)
+	}
+}
+
+func TestEnableSystemdFallsBackWithoutUserBus(t *testing.T) {
+	dir := t.TempDir()
+	fakeBin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--user" && "${2:-}" == "show-environment" ]]; then
+  printf 'Failed to connect to bus: No medium found\n' >&2
+  exit 1
+fi
+printf 'unsupported systemctl args: %s\n' "$*" >&2
+exit 1
+`
+	scriptPath := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := testSystemdConfig()
+	cfg.Scheduler.SystemdUserDir = filepath.Join(dir, "systemd-user")
+	if err := os.MkdirAll(cfg.Scheduler.SystemdUserDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range legacySystemdUnits() {
+		if err := os.WriteFile(filepath.Join(cfg.Scheduler.SystemdUserDir, name), []byte("[Unit]\nDescription=legacy\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	message, err := EnableSystemd(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("预期无 user bus 时降级为手工提示，实际失败: %v", err)
+	}
+	if !strings.Contains(message, "当前会话未直连 user bus") || !strings.Contains(message, "ccclaw-run.timer") {
+		t.Fatalf("unexpected message: %q", message)
+	}
+	for _, name := range legacySystemdUnits() {
+		if _, err := os.Stat(filepath.Join(cfg.Scheduler.SystemdUserDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("预期遗留单元已删除: %s err=%v", name, err)
+		}
+	}
+}
+
 func createManagedArchiveFixture(t *testing.T, path string, modTime time.Time, body string) {
 	t.Helper()
 

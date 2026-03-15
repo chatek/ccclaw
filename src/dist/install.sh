@@ -81,6 +81,7 @@ CRON_MANAGED_STATUS="未处理"
 CRON_MANAGED_REASON="未执行受控 crontab 管理"
 SYSTEMD_ACTIVATION_STATUS="未处理"
 SYSTEMD_ACTIVATION_REASON="未执行 user systemd 激活"
+LEGACY_RUN_CLEANUP_NOTE="未检查遗留 ccclaw-run unit"
 CONFIG_FILE_ALREADY_EXISTS=0
 
 expand_path() {
@@ -1683,6 +1684,44 @@ WantedBy=timers.target
 UNIT
 }
 
+append_legacy_cleanup_note() {
+  local reason="$1"
+  case "$LEGACY_RUN_CLEANUP_NOTE" in
+    "未检查遗留 ccclaw-run unit"|"未发现遗留 ccclaw-run unit")
+      printf '%s\n' "$reason"
+      ;;
+    *)
+      printf '%s；%s\n' "$reason" "$LEGACY_RUN_CLEANUP_NOTE"
+      ;;
+  esac
+}
+
+cleanup_legacy_user_systemd_run_units() {
+  local legacy_service="$SYSTEMD_USER_DIR/ccclaw-run.service"
+  local legacy_timer="$SYSTEMD_USER_DIR/ccclaw-run.timer"
+  LEGACY_RUN_CLEANUP_NOTE="未发现遗留 ccclaw-run unit"
+  if [[ ! -f "$legacy_service" && ! -f "$legacy_timer" ]]; then
+    return 0
+  fi
+  if [[ "$SIMULATE" -eq 1 ]]; then
+    if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+      log "[simulate] systemctl --user disable --now ccclaw-run.timer"
+    fi
+    log "[simulate] rm -f $legacy_timer $legacy_service"
+    LEGACY_RUN_CLEANUP_NOTE="模拟模式：将清理遗留 ccclaw-run unit"
+    return 0
+  fi
+  if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+    systemctl --user disable --now ccclaw-run.timer || true
+  fi
+  rm -f "$legacy_timer" "$legacy_service"
+  if [[ "$SYSTEMD_CONTROL_READY" -eq 1 ]]; then
+    LEGACY_RUN_CLEANUP_NOTE="已清理遗留 ccclaw-run unit"
+    return 0
+  fi
+  LEGACY_RUN_CLEANUP_NOTE="已删除本地遗留 ccclaw-run unit 文件；请在登录会话执行 systemctl --user disable --now ccclaw-run.timer || true 与 systemctl --user daemon-reload"
+}
+
 reconcile_managed_crontab() {
   local message=""
   if [[ ! -x "$APP_DIR/bin/ccclaw" || ! -f "$CONFIG_FILE" ]]; then
@@ -1731,14 +1770,15 @@ activate_user_systemd_timers() {
     SYSTEMD_ACTIVATION_REASON="当前调度模式不是 systemd，跳过 user systemd 激活"
     return 0
   fi
+  cleanup_legacy_user_systemd_run_units
   if [[ "$SYSTEMD_CONTROL_READY" -ne 1 ]]; then
     SYSTEMD_ACTIVATION_STATUS="manual"
-    SYSTEMD_ACTIVATION_REASON="当前会话未直连 user bus；需在登录会话手工执行 daemon-reload + enable --now"
+    SYSTEMD_ACTIVATION_REASON="$(append_legacy_cleanup_note "当前会话未直连 user bus；需在登录会话手工执行 daemon-reload + enable --now")"
     return 0
   fi
   if [[ "$SIMULATE" -eq 1 ]]; then
     SYSTEMD_ACTIVATION_STATUS="planned:auto"
-    SYSTEMD_ACTIVATION_REASON="模拟模式：将自动执行 daemon-reload + enable --now"
+    SYSTEMD_ACTIVATION_REASON="$(append_legacy_cleanup_note "模拟模式：将自动执行 daemon-reload + enable --now")"
     log "[simulate] systemctl --user daemon-reload"
     log "[simulate] systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
     if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
@@ -1751,11 +1791,11 @@ activate_user_systemd_timers() {
   if [[ "$CONFIG_FILE_ALREADY_EXISTS" -eq 1 ]]; then
     systemctl --user restart ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer
     SYSTEMD_ACTIVATION_STATUS="restarted"
-    SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit"
+    SYSTEMD_ACTIVATION_REASON="$(append_legacy_cleanup_note "已自动 daemon-reload，并重启托管 timer 以加载更新后的 unit")"
     return 0
   fi
   SYSTEMD_ACTIVATION_STATUS="enabled"
-  SYSTEMD_ACTIVATION_REASON="已自动 daemon-reload，并启用托管 timer"
+  SYSTEMD_ACTIVATION_REASON="$(append_legacy_cleanup_note "已自动 daemon-reload，并启用托管 timer")"
 }
 
 remove_managed_crontab_only() {
@@ -2012,6 +2052,7 @@ print_summary() {
    $APP_DIR/bin/ccclaw scheduler timers --config $CONFIG_FILE --env-file $ENV_FILE"
       else
         scheduler_step_6="6. 当前会话未直连 user bus；请在登录会话中手工启用用户定时器:
+   systemctl --user disable --now ccclaw-run.timer || true
    systemctl --user daemon-reload
    systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer"
       fi

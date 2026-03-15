@@ -37,6 +37,22 @@ func managedSystemdUnits() []string {
 	}
 }
 
+func legacySystemdUnits() []string {
+	return []string{
+		"ccclaw-run.service",
+		"ccclaw-run.timer",
+	}
+}
+
+func legacySystemdTimers() []string {
+	return []string{"ccclaw-run.timer"}
+}
+
+func removableSystemdUnits() []string {
+	units := append([]string{}, managedSystemdUnits()...)
+	return append(units, legacySystemdUnits()...)
+}
+
 func EnableSystemd(ctx context.Context, cfg *config.Config) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("配置不能为空")
@@ -47,14 +63,32 @@ func EnableSystemd(ctx context.Context, cfg *config.Config) (string, error) {
 	if err := installManagedSystemdUnits(cfg); err != nil {
 		return "", err
 	}
+	controlReady := UserControlReady(ctx)
+	removedLegacy, err := cleanupLegacySystemdUnits(ctx, cfg.Scheduler.SystemdUserDir, controlReady)
+	if err != nil {
+		return "", err
+	}
+	if !controlReady {
+		return buildManualEnableSystemdMessage(removedLegacy), nil
+	}
 	if _, err := runSystemctlUser(ctx, "daemon-reload"); err != nil {
+		if isUserBusUnavailable(err.Error()) {
+			return buildManualEnableSystemdMessage(removedLegacy), nil
+		}
 		return "", err
 	}
 	args := append([]string{"enable", "--now"}, ManagedSystemdTimers()...)
 	if _, err := runSystemctlUser(ctx, args...); err != nil {
+		if isUserBusUnavailable(err.Error()) {
+			return buildManualEnableSystemdMessage(removedLegacy), nil
+		}
 		return "", err
 	}
-	return fmt.Sprintf("已启用 user systemd 定时器: %s", strings.Join(ManagedSystemdTimers(), ", ")), nil
+	message := fmt.Sprintf("已启用 user systemd 定时器: %s", strings.Join(ManagedSystemdTimers(), ", "))
+	if len(removedLegacy) > 0 {
+		message += "；已清理遗留单元: " + strings.Join(removedLegacy, ", ")
+	}
+	return message, nil
 }
 
 func RestartSystemd(ctx context.Context) (string, error) {
@@ -83,7 +117,8 @@ func DisableSystemd(ctx context.Context, cfg *config.Config) (string, error) {
 		}
 		return "当前环境缺少 systemctl；已仅清理本地 user systemd 单元文件", nil
 	}
-	args := append([]string{"disable", "--now"}, ManagedSystemdTimers()...)
+	timers := append(append([]string{}, ManagedSystemdTimers()...), legacySystemdTimers()...)
+	args := append([]string{"disable", "--now"}, timers...)
 	if _, err := runSystemctlUser(ctx, args...); err != nil {
 		if !isIgnorableSystemdDisableError(err.Error()) && !isUserBusUnavailable(err.Error()) {
 			return "", err
@@ -119,10 +154,57 @@ func installManagedSystemdUnits(cfg *config.Config) error {
 }
 
 func removeManagedSystemdUnits(unitDir string) error {
+	return removeSystemdUnits(unitDir, removableSystemdUnits())
+}
+
+func cleanupLegacySystemdUnits(ctx context.Context, unitDir string, controlReady bool) ([]string, error) {
+	removed := existingSystemdUnits(unitDir, legacySystemdUnits())
+	if controlReady {
+		args := append([]string{"disable", "--now"}, legacySystemdTimers()...)
+		if _, err := runSystemctlUser(ctx, args...); err != nil && !isIgnorableSystemdDisableError(err.Error()) && !isUserBusUnavailable(err.Error()) {
+			return nil, err
+		}
+	}
+	if err := removeSystemdUnits(unitDir, legacySystemdUnits()); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+func buildManualEnableSystemdMessage(removedLegacy []string) string {
+	steps := []string{}
+	if len(removedLegacy) > 0 {
+		steps = append(steps, "`systemctl --user disable --now ccclaw-run.timer || true`")
+	}
+	steps = append(steps,
+		"`systemctl --user daemon-reload`",
+		"`systemctl --user enable --now "+strings.Join(ManagedSystemdTimers(), " ")+"`",
+	)
+	message := "当前会话未直连 user bus；已写入本地 user systemd 单元文件"
+	if len(removedLegacy) > 0 {
+		message += "，并删除遗留单元文件: " + strings.Join(removedLegacy, ", ")
+	}
+	return message + "。请在登录会话依次执行 " + strings.Join(steps, "、")
+}
+
+func existingSystemdUnits(unitDir string, names []string) []string {
 	if strings.TrimSpace(unitDir) == "" {
 		return nil
 	}
-	for _, name := range managedSystemdUnits() {
+	found := make([]string, 0, len(names))
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(unitDir, name)); err == nil {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
+func removeSystemdUnits(unitDir string, names []string) error {
+	if strings.TrimSpace(unitDir) == "" {
+		return nil
+	}
+	for _, name := range names {
 		path := filepath.Join(unitDir, name)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("删除 user systemd 单元失败: %w", err)

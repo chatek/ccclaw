@@ -19,21 +19,25 @@ type doctorCheck struct {
 	Name   string
 	Detail string
 	Repair string
+	Warn   bool
 	Err    error
 }
 
 type doctorSummary struct {
 	Total  int `json:"total"`
 	Passed int `json:"passed"`
+	Warned int `json:"warned"`
 	Failed int `json:"failed"`
 }
 
 type doctorCheckSnapshot struct {
-	Name   string `json:"name"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail,omitempty"`
-	Repair string `json:"repair,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Name    string `json:"name"`
+	Level   string `json:"level"`
+	OK      bool   `json:"ok"`
+	Warning bool   `json:"warning,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Repair  string `json:"repair,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type doctorSnapshot struct {
@@ -57,6 +61,14 @@ func Doctor(ctx context.Context, cfg *config.Config, out io.Writer, asJSON bool)
 			_, _ = fmt.Fprintf(out, "[FAIL] %s: %v", check.Name, check.Err)
 			if rendered := renderDoctorCheckExtra(check); rendered != "" {
 				_, _ = fmt.Fprintf(out, " (%s)", rendered)
+			}
+			_, _ = fmt.Fprintln(out)
+			continue
+		}
+		if check.Warn {
+			_, _ = fmt.Fprintf(out, "[WARN] %s", check.Name)
+			if rendered := renderDoctorCheckExtra(check); rendered != "" {
+				_, _ = fmt.Fprintf(out, ": %s", rendered)
 			}
 			_, _ = fmt.Fprintln(out)
 			continue
@@ -89,14 +101,18 @@ func buildDoctorSnapshot(checks []doctorCheck) (doctorSnapshot, error) {
 	}
 	for _, check := range checks {
 		item := doctorCheckSnapshot{
-			Name:   check.Name,
-			OK:     check.Err == nil,
-			Detail: check.Detail,
-			Repair: check.Repair,
+			Name:    check.Name,
+			Level:   doctorCheckLevel(check),
+			OK:      check.Err == nil,
+			Warning: check.Warn,
+			Detail:  check.Detail,
+			Repair:  check.Repair,
 		}
 		if check.Err != nil {
 			item.Error = check.Err.Error()
 			snapshot.Summary.Failed++
+		} else if check.Warn {
+			snapshot.Summary.Warned++
 		} else {
 			snapshot.Summary.Passed++
 		}
@@ -107,6 +123,17 @@ func buildDoctorSnapshot(checks []doctorCheck) (doctorSnapshot, error) {
 		return snapshot, fmt.Errorf("scheduler doctor 失败，共 %d 项异常", snapshot.Summary.Failed)
 	}
 	return snapshot, nil
+}
+
+func doctorCheckLevel(check doctorCheck) string {
+	switch {
+	case check.Err != nil:
+		return "fail"
+	case check.Warn:
+		return "warn"
+	default:
+		return "ok"
+	}
 }
 
 func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
@@ -179,6 +206,7 @@ func runDoctorChecks(ctx context.Context, cfg *config.Config) []doctorCheck {
 		checks = append(checks, inspectLinger(ctx))
 		checks = append(checks, inspectUserBus(ctx, cfg))
 		checks = append(checks, inspectUnitDrift(cfg))
+		checks = append(checks, inspectLegacyRunUnits(ctx, cfg))
 		checks = append(checks, inspectManagedTimers(ctx, cfg))
 		checks = append(checks, inspectManagedServices(ctx, cfg))
 	}
@@ -432,6 +460,38 @@ func inspectManagedServices(ctx context.Context, cfg *config.Config) doctorCheck
 		Repair: buildServiceRepairHint(units),
 		Err:    fmt.Errorf("存在最近失败或异常退出的 service"),
 	}
+}
+
+func inspectLegacyRunUnits(ctx context.Context, cfg *config.Config) doctorCheck {
+	unitDir := ""
+	if cfg != nil {
+		unitDir = strings.TrimSpace(cfg.Scheduler.SystemdUserDir)
+	}
+	found := existingSystemdUnits(unitDir, legacySystemdUnits())
+	if len(found) == 0 {
+		return doctorCheck{
+			Name:   "遗留 run 单元",
+			Detail: fmt.Sprintf("dir=%s 未发现 ccclaw-run 遗留 unit", fallbackValue(unitDir, "-")),
+		}
+	}
+	return doctorCheck{
+		Name:   "遗留 run 单元",
+		Detail: fmt.Sprintf("dir=%s detected=%s", fallbackValue(unitDir, "-"), strings.Join(found, ", ")),
+		Repair: buildLegacyRunCleanupHint(unitDir, UserControlReady(ctx)),
+		Warn:   true,
+	}
+}
+
+func buildLegacyRunCleanupHint(unitDir string, controlReady bool) string {
+	removeCmd := fmt.Sprintf(
+		"rm -f %q %q",
+		filepath.Join(unitDir, "ccclaw-run.timer"),
+		filepath.Join(unitDir, "ccclaw-run.service"),
+	)
+	if controlReady {
+		return "请依次执行 `systemctl --user disable --now ccclaw-run.timer || true`、`" + removeCmd + "`、`systemctl --user daemon-reload` 清理旧单元"
+	}
+	return "请先执行 `" + removeCmd + "` 删除本地旧单元文件，再在登录会话执行 `systemctl --user disable --now ccclaw-run.timer || true` 与 `systemctl --user daemon-reload`"
 }
 
 func serviceLooksHealthy(item ServiceStatus) bool {

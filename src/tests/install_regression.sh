@@ -499,12 +499,13 @@ test_systemd_preflight_accepts_busless_deploy() {
 }
 
 test_systemd_install_auto_enable_and_restart() {
-  local sandbox fakebin app_dir home_repo task_repo log1 log2 config_file readme_file systemctl_log
+  local sandbox fakebin app_dir home_repo task_repo xdg log1 log2 config_file readme_file systemctl_log
   sandbox="$(setup_sandbox systemd-auto-enable)"
   fakebin="$sandbox/fakebin"
   app_dir="$sandbox/app"
   home_repo="$sandbox/home-repo"
   task_repo="$sandbox/task-local"
+  xdg="$sandbox/xdg"
   log1="$sandbox/install.log"
   log2="$sandbox/reinstall.log"
   config_file="$app_dir/ops/config/config.toml"
@@ -541,6 +542,10 @@ test_systemd_install_auto_enable_and_restart() {
   assert_contains "$systemctl_log" '--user daemon-reload'
   assert_contains "$systemctl_log" '--user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 
+  mkdir -p "$xdg/systemd/user"
+  printf '[Unit]\nDescription=legacy\n' > "$xdg/systemd/user/ccclaw-run.service"
+  printf '[Unit]\nDescription=legacy\n' > "$xdg/systemd/user/ccclaw-run.timer"
+
   run_case "$log2" \
     env \
       HOME="$sandbox/home" \
@@ -559,6 +564,9 @@ test_systemd_install_auto_enable_and_restart() {
       --task-repo "41490/task-local" \
       --scheduler systemd
 
+  assert_file_missing "$xdg/systemd/user/ccclaw-run.service"
+  assert_file_missing "$xdg/systemd/user/ccclaw-run.timer"
+  assert_contains "$systemctl_log" '--user disable --now ccclaw-run.timer'
   assert_contains "$systemctl_log" '--user restart ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-journal.timer ccclaw-archive.timer ccclaw-sevolver.timer'
 }
 

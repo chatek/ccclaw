@@ -739,6 +739,7 @@ func TestSchedulerDoctorCommand(t *testing.T) {
 	if !strings.Contains(text, "[ OK ] 调度配置:") ||
 		!strings.Contains(text, "[ OK ] linger:") ||
 		!strings.Contains(text, "[ OK ] unit 漂移:") ||
+		!strings.Contains(text, "[ OK ] 遗留 run 单元:") ||
 		!strings.Contains(text, "[ OK ] 日志归档策略:") ||
 		!strings.Contains(text, "[ OK ] user bus:") ||
 		!strings.Contains(text, "[ OK ] 托管 timers:") ||
@@ -894,12 +895,12 @@ func TestSchedulerUseSystemdCommand(t *testing.T) {
 	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-		for _, name := range []string{
-			"ccclaw-ingest.service",
-			"ccclaw-ingest.timer",
-			"ccclaw-patrol.service",
-			"ccclaw-patrol.timer",
-			"ccclaw-journal.service",
+	for _, name := range []string{
+		"ccclaw-ingest.service",
+		"ccclaw-ingest.timer",
+		"ccclaw-patrol.service",
+		"ccclaw-patrol.timer",
+		"ccclaw-journal.service",
 		"ccclaw-journal.timer",
 		"ccclaw-archive.service",
 		"ccclaw-archive.timer",
